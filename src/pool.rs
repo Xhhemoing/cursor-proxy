@@ -153,7 +153,9 @@ impl AccountPool {
             return AcquireTry::Empty;
         }
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
-        let mut eligible = 0usize;
+
+        // 收集所有 eligible 账号，按权重排序（剩余配额比例 × (1 - 错误率)）
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
         for i in 0..n {
             let idx = (start + i) % n;
             let acc_id = slots[idx].account.id.clone();
@@ -170,7 +172,32 @@ impl AccountPool {
             {
                 continue;
             }
-            eligible += 1;
+
+            // 计算权重：剩余配额比例 × (1 - 错误率)
+            let quota_weight = match self.quota(&acc_id).usage_percent {
+                Some(p) => (100.0 - p).max(1.0) / 100.0, // 剩余比例，至少 1%
+                None => 0.5, // 未知配额给中等权重
+            };
+            let error_rate = match self.stats.get(&acc_id) {
+                Some(s) if s.requests > 0 => s.errors as f64 / s.requests as f64,
+                _ => 0.0,
+            };
+            let weight = quota_weight * (1.0 - error_rate.min(0.9)); // 错误率上限 90%
+
+            candidates.push((idx, weight));
+        }
+
+        if candidates.is_empty() {
+            return AcquireTry::Empty;
+        }
+
+        // 按权重降序排序，优先选权重高的
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 尝试按权重顺序获取信号量
+        for (idx, _weight) in &candidates {
+            let idx = *idx;
+            let acc_id = slots[idx].account.id.clone();
             if let Ok(permit) = slots[idx].sem.clone().try_acquire_owned() {
                 if let Some(mut s) = self.stats.get_mut(&acc_id) {
                     s.requests += 1;
@@ -178,11 +205,8 @@ impl AccountPool {
                 return AcquireTry::Got((slots[idx].account.clone(), permit));
             }
         }
-        if eligible == 0 {
-            AcquireTry::Empty
-        } else {
-            AcquireTry::Busy
-        }
+
+        AcquireTry::Busy
     }
 
     pub fn release(&self, account_id: &str, error: bool, cooldown_s: u64) {
@@ -192,9 +216,18 @@ impl AccountPool {
             }
         }
         if error && cooldown_s > 0 {
+            // 动态冷却：根据错误率调整冷却时间，错误率越高冷却越长
+            let dynamic_cooldown = match self.stats.get(account_id) {
+                Some(s) if s.requests > 0 => {
+                    let error_rate = s.errors as f64 / s.requests as f64;
+                    let base = cooldown_s as f64;
+                    (base * (1.0 + error_rate * 2.0)).min(300.0) as u64 // 最高 5 分钟
+                }
+                _ => cooldown_s,
+            };
             let mut slots = self.slots.lock().unwrap();
             if let Some(slot) = slots.iter_mut().find(|s| s.account.id == account_id) {
-                slot.cooldown_until = Some(Instant::now() + Duration::from_secs(cooldown_s));
+                slot.cooldown_until = Some(Instant::now() + Duration::from_secs(dynamic_cooldown));
             }
         }
     }
