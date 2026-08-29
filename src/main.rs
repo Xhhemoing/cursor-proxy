@@ -453,7 +453,7 @@ async fn chat_handler(
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
 
     // 选号
-    let (account, _permit) = match state.pool.acquire().await {
+    let (mut account, _permit) = match state.pool.acquire().await {
         Ok(v) => v,
         Err(pool::AcquireError::Empty) => {
             state.metrics.observe_err();
@@ -472,7 +472,7 @@ async fn chat_handler(
                 .into_response());
         }
     };
-    let account_id = account.id.clone();
+    let mut account_id = account.id.clone();
 
     // 构造 Cursor 请求
     let cursor_body = cursor::build_cursor_body(messages, &model, max_tokens, temperature);
@@ -503,31 +503,78 @@ async fn chat_handler(
         }
     };
 
-    // 调用上游（统一通过 UpstreamClient::stream，自动处理 Cursor/OpenAI 差异）
-    let cursor_auth = match upstream {
-        crate::upstream::UpstreamClient::Cursor(_) => Some((account.access_token.as_str(), account.machine_id.as_str())),
-        crate::upstream::UpstreamClient::OpenAi(_) => None,
-    };
+    // 请求失败自动重试：最多 3 次，每次切换账号
+    const MAX_RETRIES: usize = 3;
+    let mut last_error = String::new();
+    let mut frames_opt = None;
 
-    let frames = match upstream
-        .stream(&model, messages, max_tokens, temperature, cursor_auth)
-        .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            state.pool.release(&account_id, true, 30);
-            state.metrics.observe_err();
-            error!(
-                event = "upstream_error",
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            // 重新获取账号（排除当前失败的账号）
+            let retry_account = match state.pool.acquire().await {
+                Ok((acc, permit)) => {
+                    drop(permit);
+                    acc
+                }
+                Err(_) => break, // 无可用账号，退出重试
+            };
+            // 更新账号信息用于重试
+            account.access_token = retry_account.access_token;
+            account.machine_id = retry_account.machine_id;
+            account_id = retry_account.id.clone();
+            info!(
+                event = "retry",
                 req_id = %request_id,
-                upstream = %upstream_name,
-                account = %account_id,
-                error = %e,
-                "upstream stream failed"
+                attempt = attempt + 1,
+                new_account = %account_id,
+                "retrying with different account"
             );
+        }
+
+        // 调用上游（统一通过 UpstreamClient::stream，自动处理 Cursor/OpenAI 差异）
+        let cursor_auth = match upstream {
+            crate::upstream::UpstreamClient::Cursor(_) => Some((account.access_token.as_str(), account.machine_id.as_str())),
+            crate::upstream::UpstreamClient::OpenAi(_) => None,
+        };
+
+        match upstream
+            .stream(&model, messages, max_tokens, temperature, cursor_auth)
+            .await
+        {
+            Ok(f) => {
+                frames_opt = Some(f);
+                break;
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                state.pool.release(&account_id, true, 30);
+                state.metrics.observe_err();
+                error!(
+                    event = "upstream_error",
+                    req_id = %request_id,
+                    upstream = %upstream_name,
+                    account = %account_id,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "upstream stream failed"
+                );
+                if attempt == MAX_RETRIES - 1 {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(openai_error(&format!("upstream error after {} retries: {}", MAX_RETRIES, last_error), "upstream_error", 502)),
+                    )
+                        .into_response());
+                }
+            }
+        }
+    }
+
+    let frames = match frames_opt {
+        Some(f) => f,
+        None => {
             return Err((
-                StatusCode::BAD_GATEWAY,
-                Json(openai_error(&e.to_string(), "upstream_error", 502)),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(openai_error("no available account for retry", "pool_exhausted", 503)),
             )
                 .into_response());
         }
