@@ -309,3 +309,68 @@ pub async fn api_accounts_export(State(state): State<Arc<AppState>>) -> impl Int
         "accounts": rows,
     }))
 }
+
+/// GET /admin/api/pool/health — 健康度仪表盘
+pub async fn api_pool_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let scores = state.pool.all_health_scores();
+    let total = scores.len();
+    let healthy = scores.iter().filter(|s| s["health"]["score"].as_u64().unwrap_or(0) >= 80).count();
+    let degraded = scores.iter().filter(|s| {
+        let score = s["health"]["score"].as_u64().unwrap_or(0);
+        score >= 50 && score < 80
+    }).count();
+    let unhealthy = scores.iter().filter(|s| s["health"]["score"].as_u64().unwrap_or(0) < 50).count();
+    
+    Json(json!({
+        "total": total,
+        "healthy": healthy,
+        "degraded": degraded,
+        "unhealthy": unhealthy,
+        "accounts": scores,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct BatchOpBody {
+    pub ids: Vec<String>,
+    pub op: String, // "enable", "disable", "delete", "clear_cooldown"
+}
+
+/// POST /admin/api/accounts/batch — 批量操作
+pub async fn api_accounts_batch(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BatchOpBody>,
+) -> Response {
+    let mut results = Vec::new();
+    
+    for id in &body.ids {
+        let result = match body.op.as_str() {
+            "enable" => {
+                state.pool.set_enabled(id, true);
+                json!({"id": id, "status": "enabled"})
+            }
+            "disable" => {
+                state.pool.set_enabled(id, false);
+                json!({"id": id, "status": "disabled"})
+            }
+            "clear_cooldown" => {
+                let ok = state.pool.clear_cooldown(id);
+                json!({"id": id, "status": if ok { "cooldown_cleared" } else { "not_found" }})
+            }
+            "delete" => {
+                match config::delete_account(id) {
+                    Ok(accounts) => {
+                        state.pool.replace_accounts(accounts);
+                        json!({"id": id, "status": "deleted"})
+                    }
+                    Err(e) => json!({"id": id, "error": e.to_string()}),
+                }
+            }
+            _ => json!({"id": id, "error": "unknown op"}),
+        };
+        results.push(result);
+    }
+    
+    state.audit.account_op("batch", "batch", json!({"op": body.op, "count": body.ids.len()}));
+    Json(json!({"status": "ok", "results": results})).into_response()
+}

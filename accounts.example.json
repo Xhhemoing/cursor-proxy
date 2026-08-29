@@ -1,0 +1,11 @@
+[
+  {
+    "id": "acc1",
+    "access_token": "replace-with-cursor-access-token",
+    "machine_id": "00000000-0000-0000-0000-000000000000",
+    "refresh_token": "",
+    "enabled": true,
+    "token_expires_at": null,
+    "refresh_url": null
+  }
+]

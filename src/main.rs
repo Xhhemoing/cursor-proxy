@@ -155,6 +155,50 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // 定时探测冷却中账号 (每 60s)
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let cooling = state.pool.cooling_accounts();
+                let quota_exhausted = state.pool.quota_exhausted_accounts();
+                
+                // 合并去重
+                let mut to_probe: std::collections::HashMap<String, crate::config::Account> = 
+                    std::collections::HashMap::new();
+                for (id, acc) in cooling.into_iter().chain(quota_exhausted.into_iter()) {
+                    to_probe.insert(id, acc);
+                }
+                
+                if to_probe.is_empty() {
+                    continue;
+                }
+                
+                info!(event = "quota_probe", count = to_probe.len(), "probing cooling/exhausted accounts");
+                
+                for (id, acc) in to_probe {
+                    let snap = state.cursor.probe_quota(&acc.access_token, &acc.machine_id).await;
+                    let has_quota = snap.has_available_usage == Some(true);
+                    let error = snap.error.is_some();
+                    
+                    state.pool.set_quota(&id, snap);
+                    
+                    if has_quota && !error {
+                        // 探测成功且额度可用 → 清除冷却
+                        state.pool.clear_cooldown(&id);
+                        info!(event = "quota_probe_ok", account = %id, "account recovered, cooldown cleared");
+                    } else if error {
+                        // 探测失败 → 延长冷却
+                        state.pool.release(&id, true, 60);
+                        warn!(event = "quota_probe_fail", account = %id, "probe failed, cooldown extended");
+                    }
+                }
+            }
+        });
+    }
+
     // 构建路由
     let admin_routes = Router::new()
         .route("/admin", get(admin::admin_page))
@@ -168,6 +212,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/accounts/probe-all", post(admin::api_account_probe_all))
         .route("/admin/api/accounts/import", post(admin::api_accounts_import))
         .route("/admin/api/accounts/export", get(admin::api_accounts_export))
+        .route("/admin/api/accounts/batch", post(admin::api_accounts_batch))
+        .route("/admin/api/pool/health", get(admin::api_pool_health))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
         .route("/admin/api/logs", get(admin::api_logs_recent))
@@ -452,8 +498,14 @@ async fn chat_handler(
     let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
 
-    // 选号
-    let (mut account, _permit) = match state.pool.acquire().await {
+    // 提取 session_id 用于会话一致性（OpenAI user 字段或自定义 header）
+    let session_id = body
+        .get("user")
+        .and_then(|v| v.as_str())
+        .or_else(|| headers.get("x-session-id").and_then(|v| v.to_str().ok()));
+
+    // 选号（会话一致性）
+    let (mut account, _permit) = match state.pool.acquire_by_session(session_id).await {
         Ok(v) => v,
         Err(pool::AcquireError::Empty) => {
             state.metrics.observe_err();
@@ -549,6 +601,18 @@ async fn chat_handler(
                 last_error = e.to_string();
                 state.pool.release(&account_id, true, 30);
                 state.metrics.observe_err();
+                
+                // 自动禁用: 连续错误 >= 5 次
+                if state.pool.should_auto_disable(&account_id, 5) {
+                    state.pool.auto_disable(&account_id);
+                    warn!(
+                        event = "auto_disable",
+                        req_id = %request_id,
+                        account = %account_id,
+                        "account auto-disabled after 5 consecutive errors"
+                    );
+                }
+                
                 error!(
                     event = "upstream_error",
                     req_id = %request_id,
@@ -582,7 +646,7 @@ async fn chat_handler(
 
     if stream {
         // 流式 SSE
-        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::convert::Infallible>>(100);
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::convert::Infallible>>(1000);
         let pool = state.pool.clone();
         let aid = account_id.clone();
         let rid = request_id.clone();

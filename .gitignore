@@ -1,1 +1,12 @@
 /target
+/src.backup.*/
+
+# runtime secrets and local state — never publish
+/config.json
+/accounts.json
+/usage.json
+/audit.log
+/proxy.log
+*.log
+.env
+.env.*

@@ -150,7 +150,8 @@ impl CursorClient {
             .enable_http2()
             .build();
         let client = Client::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(1000)
+            .pool_max_idle_per_host(10000)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build(https);
         Ok(Self {
             client,
