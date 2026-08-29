@@ -3,284 +3,489 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CFP-RS 号池台</title>
+  <title>CFP 控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..700,50&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #16140f;
-      --panel: #211d16;
-      --ink: #efe6d2;
-      --muted: #9a8f78;
-      --line: #3a3428;
-      --ok: #7cba6a;
-      --warn: #d4a017;
-      --bad: #d45a3a;
-      --accent: #e8b86d;
-      --btn: #2b261c;
+      --paper: #f4f1ea;
+      --paper-2: #ebe7dd;
+      --card: #fbfaf6;
+      --ink: #1a1815;
+      --ink-2: #4a4640;
+      --muted: #8a8479;
+      --hair: #d9d3c6;
+      --hair-2: #e8e3d8;
+      --accent: #d6412b;
+      --accent-ink: #b8321f;
+      --accent-soft: #fbe6e1;
+      --ok: #2f7d4f;
+      --ok-soft: #e1f0e6;
+      --warn: #a86a00;
+      --warn-soft: #fbeed3;
+      --bad: #c22a1c;
+      --bad-soft: #fbe3df;
+      --sidebar: 224px;
+      --serif: "Fraunces", "Songti SC", "Noto Serif SC", Georgia, serif;
+      --sans: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", "Helvetica Neue", sans-serif;
+      --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      font: 14px/1.45 "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
-      background: var(--bg);
+      font: 14px/1.5 var(--sans);
       color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 100% -10%, #fff 0%, transparent 60%),
+        var(--paper);
+      -webkit-font-smoothing: antialiased;
     }
-    header {
-      display: flex; align-items: baseline; justify-content: space-between;
-      gap: 16px; padding: 18px 22px 12px; border-bottom: 1px solid var(--line);
+    body::before {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .5;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
     }
-    header h1 { font-size: 18px; font-weight: 650; margin: 0; letter-spacing: 0.04em; }
-    header .meta { color: var(--muted); font-size: 12px; }
-    main { padding: 18px 22px 40px; max-width: 1180px; }
-    .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
-    .kpi, .panel {
-      background: var(--panel); border: 1px solid var(--line); border-radius: 2px;
+    a { color: inherit; }
+    code { font-family: var(--mono); font-size: .92em; background: var(--paper-2); padding: 1px 5px; border-radius: 3px; }
+
+    /* ---------- 骨架 ---------- */
+    .shell { display: grid; grid-template-columns: var(--sidebar) 1fr; min-height: 100%; position: relative; z-index: 1; }
+    aside {
+      position: sticky; top: 0; height: 100vh; padding: 28px 18px 20px;
+      border-right: 1px solid var(--hair); background: var(--paper);
+      display: flex; flex-direction: column; gap: 6px;
     }
-    .kpi { padding: 12px 14px; }
-    .kpi .l { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
-    .kpi .v { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 22px; margin-top: 4px; }
-    .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
-    .panel { padding: 14px 16px; margin-bottom: 14px; }
-    .panel h2 { font-size: 13px; margin: 0 0 12px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+    .brand { padding: 0 8px 22px; }
+    .brand h1 { margin: 0; font: 300 30px/1 var(--serif); font-variation-settings: "SOFT" 50; letter-spacing: -.01em; }
+    .brand h1 em { font-style: italic; color: var(--accent); }
+    .brand .sub { margin-top: 6px; color: var(--muted); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; }
+    nav a {
+      display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px;
+      text-decoration: none; color: var(--ink-2); font-weight: 500; font-size: 13.5px; position: relative;
+      transition: background .15s, color .15s;
+    }
+    nav a .idx { font: 500 11px var(--mono); color: var(--muted); width: 18px; }
+    nav a:hover { background: var(--paper-2); color: var(--ink); }
+    nav a.active { background: var(--ink); color: var(--paper); }
+    nav a.active .idx { color: var(--accent); }
+    nav a .badge { margin-left: auto; font: 500 11px var(--mono); color: var(--muted); }
+    nav a.active .badge { color: var(--paper-2); }
+    .side-foot { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--hair); font: 11.5px/1.6 var(--mono); color: var(--muted); word-break: break-all; }
+    .side-foot .live { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); margin-bottom: 4px; }
+    .side-foot .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(47,125,79,.5); animation: pulse 2.2s infinite; }
+    .side-foot .live.off { color: var(--bad); } .side-foot .live.off i { background: var(--bad); animation: none; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(47,125,79,.45); } 70% { box-shadow: 0 0 0 7px rgba(47,125,79,0); } 100% { box-shadow: 0 0 0 0 rgba(47,125,79,0); } }
+
+    main { padding: 34px 40px 80px; min-width: 0; overflow-x: hidden; }
+    .kpi { min-width: 0; }
+    .page { display: none; animation: rise .35s ease both; }
+    .page.active { display: block; }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 22px; padding-bottom: 14px; border-bottom: 1px solid var(--hair); }
+    .page-head h2 { margin: 0; font: 400 28px/1.1 var(--serif); letter-spacing: -.01em; }
+    .page-head p { margin: 0; color: var(--muted); font-size: 12.5px; }
+    .page-head .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* ---------- 卡片 / 区块 ---------- */
+    .card { background: var(--card); border: 1px solid var(--hair); border-radius: 8px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 0 rgba(26,24,21,.03); }
+    .card.flush { padding: 0; overflow: hidden; }
+    .card.flush .card-bar { padding: 12px 16px; border-bottom: 1px solid var(--hair-2); }
+    .card h3 { margin: 0 0 12px; font: 600 11px/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+
+    /* KPI */
+    .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 22px; }
+    .kpi { background: var(--card); border: 1px solid var(--hair); border-radius: 8px; padding: 16px 18px 14px; position: relative; overflow: hidden; }
+    .kpi::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--hair); }
+    .kpi.hero::after { background: var(--accent); }
+    .kpi .l { color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+    .kpi .v { font: 500 30px/1.15 var(--mono); margin-top: 8px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+    .kpi .v.sm { font-size: 17px; margin-top: 12px; word-break: break-all; }
+    .kpi .v.ok { color: var(--ok); } .kpi .v.warn { color: var(--warn); } .kpi .v.bad { color: var(--bad); }
+    .bill-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px; }
+    .bill-kpis .kpi .v { font-size: 24px; }
+
+    /* ---------- 表单控件 ---------- */
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
-    label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
-    input, select {
-      background: #14110c; color: var(--ink); border: 1px solid var(--line);
-      padding: 7px 9px; font: 13px/1.3 "IBM Plex Mono", ui-monospace, monospace; min-width: 160px;
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px 14px; align-items: end; }
+    .form-grid .span-2 { grid-column: span 2; }
+    label { display: flex; flex-direction: column; gap: 5px; color: var(--ink-2); font-size: 12px; font-weight: 500; }
+    label.inline { flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px; }
+    input, select, textarea {
+      background: #fff; color: var(--ink); border: 1px solid var(--hair);
+      padding: 8px 10px; font: 13px/1.3 var(--mono); border-radius: 5px; min-width: 0; width: 100%;
+      transition: border-color .15s, box-shadow .15s;
     }
+    input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(26,24,21,.08); }
+    textarea { min-height: 220px; line-height: 1.5; font-size: 12.5px; resize: vertical; }
     button {
-      background: var(--btn); color: var(--ink); border: 1px solid var(--accent);
-      padding: 7px 12px; cursor: pointer; font: 13px/1.2 inherit;
+      background: var(--ink); color: var(--paper); border: 1px solid var(--ink);
+      padding: 8px 14px; cursor: pointer; font: 500 13px/1.2 var(--sans); border-radius: 5px; white-space: nowrap;
+      transition: transform .08s, background .15s, color .15s, border-color .15s;
     }
-    button:hover { background: #3a3224; }
-    button.ghost { border-color: var(--line); color: var(--muted); }
-    button.danger { border-color: var(--bad); color: var(--bad); }
-    button:disabled { opacity: 0.45; cursor: not-allowed; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-    td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; font-family: "IBM Plex Mono", ui-monospace, monospace; }
-    .table-scroll { overflow: auto; max-height: 42vh; }
-    .pagination { display: flex; gap: 6px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
-    .pagination button { padding: 4px 10px; font-size: 12px; }
-    .pagination .page-info { color: var(--muted); font-size: 12px; margin: 0 8px; }
-    .pagination .page-btn.active { background: var(--accent); color: #14110c; }
-    .toast { min-height: 18px; color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+    button:hover { background: #000; } button:active { transform: translateY(1px); }
+    button.ghost { background: transparent; color: var(--ink-2); border-color: var(--hair); }
+    button.ghost:hover { border-color: var(--ink); color: var(--ink); background: transparent; }
+    button.danger { background: transparent; color: var(--bad); border-color: transparent; }
+    button.danger:hover { background: var(--bad-soft); }
+    button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.accent:hover { background: var(--accent-ink); }
+    button:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+    td button { padding: 4px 9px; font-size: 12px; border-radius: 4px; margin-right: 4px; }
+    td button:not(.ghost):not(.danger) { background: transparent; color: var(--ink); border-color: var(--hair); }
+    td button:not(.ghost):not(.danger):hover { border-color: var(--ink); }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .toolbar .grow { flex: 1; min-width: 160px; }
+    .toolbar select { width: auto; }
+    .toolbar .sep { width: 1px; height: 22px; background: var(--hair); margin: 0 4px; }
+    details.add { border: 1px dashed var(--hair); border-radius: 8px; padding: 0 16px; margin-top: 14px; background: transparent; }
+    details.add summary { cursor: pointer; padding: 12px 0; font-weight: 500; font-size: 13px; color: var(--ink-2); list-style: none; display: flex; align-items: center; gap: 8px; }
+    details.add summary::before { content: "+"; font: 400 18px/1 var(--mono); color: var(--accent); }
+    details.add[open] summary::before { content: "–"; }
+    details.add summary::-webkit-details-marker { display: none; }
+    details.add .body { padding: 4px 0 16px; }
+
+    /* ---------- 表格 ---------- */
+    .table-scroll { overflow: auto; max-height: 62vh; }
+    table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    th { position: sticky; top: 0; z-index: 1; background: var(--card); text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; padding: 10px 12px; border-bottom: 1px solid var(--hair); white-space: nowrap; }
+    td { padding: 10px 12px; border-bottom: 1px solid var(--hair-2); vertical-align: middle; font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: #fff; }
+    td.ok, .ok { color: var(--ok); } td.bad, .bad { color: var(--bad); } td.warn, .warn { color: var(--warn); }
+    td.ok::before, td.warn::before, td.bad::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; background: currentColor; vertical-align: 1px; }
+    .money, th.money { text-align: right; }
+    .empty { color: var(--muted); padding: 26px 12px; text-align: center; font-family: var(--sans); }
+    .tag { display: inline-block; padding: 1px 7px; margin: 0 4px 2px 0; border: 1px solid var(--hair); border-radius: 999px; font: 500 11px/1.6 var(--sans); color: var(--ink-2); background: #fff; }
+    .pagination { display: flex; gap: 6px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+    .pagination button { padding: 4px 10px; font-size: 12px; background: transparent; color: var(--ink-2); border-color: var(--hair); }
+    .pagination .page-info { color: var(--muted); font: 12px var(--mono); margin: 0 8px; }
+    .pagination .page-btn.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+    .toast { min-height: 18px; color: var(--muted); font-size: 12px; margin: 10px 0 0; font-family: var(--mono); }
     .toast.err { color: var(--bad); }
-    .log {
-      font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
-      max-height: 280px; overflow: auto; border-top: 1px solid var(--line);
-    }
-    .log div { display: grid; grid-template-columns: 150px 72px 90px 70px 1fr; gap: 8px; padding: 6px 4px; border-bottom: 1px dashed var(--line); }
-    .empty { color: var(--muted); padding: 18px 4px; }
-    .tag { display: inline-block; padding: 1px 6px; margin: 0 3px 2px 0; border: 1px solid var(--line); border-radius: 2px; font-size: 11px; color: var(--muted); }
-    .money { text-align: right; font-variant-numeric: tabular-nums; }
-    .bill-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
-    textarea { background: #14110c; color: var(--ink); border: 1px solid var(--line); padding: 7px 9px; font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace; width: 100%; min-height: 140px; }
-    .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
-    .tabs button { padding: 5px 10px; font-size: 12px; }
-    .tabs button.active { background: var(--accent); color: #14110c; border-color: var(--accent); }
-    @media (max-width: 800px) { .bill-kpis { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 800px) {
-      .kpis { grid-template-columns: 1fr 1fr; }
-      header, main { padding-left: 12px; padding-right: 12px; }
+    .tabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--paper-2); border-radius: 7px; margin-bottom: 16px; }
+    .tabs button { padding: 6px 14px; font-size: 12.5px; background: transparent; color: var(--ink-2); border-color: transparent; border-radius: 5px; }
+    .tabs button.active { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+    .tabs button:hover:not(.active) { color: var(--ink); background: transparent; }
+    .money-big { font: 500 26px/1 var(--mono); }
+
+    /* 日志流 */
+    .log { font: 12.5px/1.5 var(--mono); max-height: 60vh; overflow: auto; }
+    .log div { display: grid; grid-template-columns: 160px 60px 190px 120px 1fr; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--hair-2); font-variant-numeric: tabular-nums; }
+    .log div:hover { background: #fff; }
+    .log div span:first-child { color: var(--muted); }
+    #overview-log .log { max-height: 340px; }
+
+    dialog { background: var(--card); border: 1px solid var(--hair); color: var(--ink); padding: 20px 22px; max-width: 640px; width: 92vw; border-radius: 10px; box-shadow: 0 30px 80px rgba(26,24,21,.25); }
+    dialog::backdrop { background: rgba(26,24,21,.35); backdrop-filter: blur(2px); }
+    dialog h3 { margin: 0 0 8px; font: 400 20px var(--serif); }
+    dialog p { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; }
+    dialog textarea { min-height: 180px; }
+
+    .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 13px; }
+    .kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--mono); }
+
+    @media (max-width: 960px) {
+      .shell { grid-template-columns: 1fr; }
+      aside { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 14px; border-right: 0; border-bottom: 1px solid var(--hair); }
+      .brand { padding: 0 10px 0 0; width: 100%; margin-bottom: 8px; } .brand h1 { font-size: 24px; }
+      nav { display: flex; gap: 4px; flex-wrap: wrap; } nav a { padding: 7px 10px; } nav a .badge { display: none; }
+      .side-foot { display: none; }
+      main { padding: 20px 16px 60px; }
+      .kpis, .bill-kpis { grid-template-columns: 1fr 1fr; gap: 10px; }
+      .kpi .v { font-size: 24px; } .kpi .v.sm { font-size: 13px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
       .log div { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
 <body>
-  <header>
-    <h1>CFP-RS 号池台</h1>
-    <div class="meta" id="meta">加载中…</div>
-  </header>
-  <main>
-    <section class="kpis" aria-label="号池概览">
-      <div class="kpi"><div class="l">账号</div><div class="v" id="k-total">–</div></div>
-      <div class="kpi"><div class="l">可用</div><div class="v ok" id="k-avail">–</div></div>
-      <div class="kpi"><div class="l">在飞</div><div class="v" id="k-inflight">–</div></div>
-      <div class="kpi"><div class="l">默认模型</div><div class="v" id="k-model" style="font-size:16px">–</div></div>
-    </section>
-
-    <section class="panel">
-      <h2>运行参数</h2>
-      <form id="settings-form" class="row">
-        <label>默认模型 <input id="f-model" name="default_model" autocomplete="off"></label>
-        <label>超时秒 <input id="f-timeout" name="timeout_s" type="number" min="10" max="3600"></label>
-        <label>每号并发 <input id="f-conc" name="max_concurrency_per_account" type="number" min="1" max="128"></label>
-        <button type="submit">保存</button>
-      </form>
-      <p class="toast" id="settings-msg">超时和并发写入磁盘后需重启进程才进热路径。</p>
-    </section>
-
-    <section class="panel">
-      <h2>号池</h2>
-      <!-- 快速导入 -->
-      <div class="row" style="margin-bottom:10px;gap:6px">
-        <button type="button" id="btn-probe-all">探测全部</button>
-        <button type="button" id="btn-import">导入文件</button>
-        <button type="button" id="btn-paste-import" class="ghost">粘贴导入</button>
-        <button type="button" id="btn-export" class="ghost">导出备份</button>
-        <input type="file" id="file-import" accept=".json,.csv" style="display:none">
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <h1>CFP<em>.</em></h1>
+        <div class="sub">Cursor Proxy Console</div>
       </div>
-      <!-- 高级管理: 搜索/筛选/批量操作 -->
-      <div class="row" style="margin-bottom:10px;gap:6px;flex-wrap:wrap">
-        <input id="acc-search" placeholder="搜索 ID..." style="min-width:120px;flex:1">
-        <select id="acc-filter">
-          <option value="all">全部</option>
-          <option value="enabled">可用</option>
-          <option value="disabled">已禁用</option>
-          <option value="cooldown">冷却中</option>
-          <option value="error">有错误</option>
-        </select>
-        <select id="acc-sort">
-          <option value="id">按 ID</option>
-          <option value="requests">按请求数</option>
-          <option value="errors">按错误数</option>
-          <option value="quota">按配额</option>
-        </select>
-        <button type="button" id="btn-select-all" class="ghost">全选</button>
-        <button type="button" id="btn-batch-enable" class="ghost">批量启用</button>
-        <button type="button" id="btn-batch-disable" class="ghost">批量禁用</button>
-        <button type="button" id="btn-batch-delete" class="danger">批量删除</button>
+      <nav id="nav">
+        <a href="#overview" data-page="overview"><span class="idx">01</span>概览</a>
+        <a href="#pool" data-page="pool"><span class="idx">02</span>号池<span class="badge" id="nav-pool-badge"></span></a>
+        <a href="#keys" data-page="keys"><span class="idx">03</span>API Keys<span class="badge" id="nav-keys-badge"></span></a>
+        <a href="#billing" data-page="billing"><span class="idx">04</span>计费账单</a>
+        <a href="#settings" data-page="settings"><span class="idx">05</span>运行参数</a>
+        <a href="#logs" data-page="logs"><span class="idx">06</span>请求日志</a>
+      </nav>
+      <div class="side-foot">
+        <div class="live" id="live"><i></i>LIVE</div>
+        <div id="meta">加载中…</div>
       </div>
-      <!-- 粘贴导入对话框 -->
-      <dialog id="paste-dialog" style="background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:16px;max-width:600px">
-        <h3 style="margin:0 0 10px;font-size:14px">粘贴批量导入</h3>
-        <p style="color:var(--muted);font-size:12px;margin:0 0 8px">每行一个账号，格式: <code>id,access_token,machine_id[,refresh_token]</code></p>
-        <textarea id="paste-text" rows="8" style="width:100%;background:#14110c;color:var(--ink);border:1px solid var(--line);padding:8px;font:12px/1.4 monospace"></textarea>
-        <div class="row" style="margin-top:10px;justify-content:flex-end">
-          <button type="button" id="paste-cancel" class="ghost">取消</button>
-          <button type="button" id="paste-submit">导入</button>
+    </aside>
+
+    <main>
+      <!-- ================= 01 概览 ================= -->
+      <section class="page" id="page-overview">
+        <div class="page-head">
+          <div><h2>概览</h2><p>号池健康与今日收入，4 秒自动刷新</p></div>
+          <div class="actions"><button type="button" class="ghost" id="ov-refresh">刷新</button></div>
         </div>
-      </dialog>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th style="width:30px"><input type="checkbox" id="acc-check-all"></th>
-              <th>ID</th><th>请求</th><th>错误</th><th>在飞</th><th>额度</th><th>状态</th><th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="acc-body"></tbody>
-        </table>
-      </div>
-      <div class="pagination" id="acc-pagination"></div>
-      <form id="acc-form" class="row" style="margin-top:10px">
-        <label>ID <input id="f-acc-id" required></label>
-        <label>access_token <input id="f-acc-tok" type="password" required></label>
-        <label>machine_id <input id="f-acc-mid" required></label>
-        <label>refresh_token <input id="f-acc-ref" type="password" placeholder="可选"></label>
-        <button type="submit">保存账号</button>
-      </form>
-      <p class="toast" id="acc-msg"></p>
-    </section>
-
-    <section class="panel">
-      <h2>API Keys（脱敏 / 限额 / 过期）</h2>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>#</th><th>前缀</th><th>名称/描述</th><th>标签 / 销售</th><th>用量</th><th>限额</th><th>过期</th><th></th></tr></thead>
-          <tbody id="key-body"></tbody>
-        </table>
-      </div>
-      <form id="key-form" class="row" style="margin-top:10px">
-        <label>新 key <input id="f-key" type="password" minlength="16" autocomplete="off" placeholder="sk-... (≥16 字符)"></label>
-        <label>名称 <input id="f-key-name"></label>
-        <label>描述 <input id="f-key-desc" placeholder="可选"></label>
-        <label>token 限额 <input id="f-key-tlim" type="number" min="0" placeholder="空=不限"></label>
-        <label>请求限额 <input id="f-key-rlim" type="number" min="0" placeholder="空=不限"></label>
-        <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
-        <label>标签 <input id="f-key-tags" placeholder="逗号分隔, 如 vip,项目A"></label>
-        <label>归属销售 <select id="f-key-sales"><option value="">（无）</option></select></label>
-        <button type="submit">追加</button>
-      </form>
-      <p class="toast" id="key-msg"></p>
-    </section>
-
-    <section class="panel" id="billing-panel">
-      <h2>计费账单</h2>
-      <div class="tabs">
-        <button type="button" class="active" data-tab="summary">汇总</button>
-        <button type="button" data-tab="records">明细</button>
-        <button type="button" data-tab="pricing">价格 / 销售</button>
-      </div>
-
-      <form id="bill-filter" class="row" style="margin-bottom:10px">
-        <label>起 <input id="bf-from" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH" style="min-width:190px"></label>
-        <label>止(含) <input id="bf-to" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH" style="min-width:190px"></label>
-        <label>分组 <select id="bf-group">
-          <option value="day">按天</option><option value="hour">按小时</option>
-          <option value="key">按 key</option><option value="sales">按销售</option>
-          <option value="model">按模型</option><option value="tag">按标签</option>
-          <option value="account">按账号</option><option value="none">合计</option>
-        </select></label>
-        <label>Key <input id="bf-key" placeholder="前缀 / 名称"></label>
-        <label>销售 <select id="bf-sales"><option value="">全部</option></select></label>
-        <label>标签 <select id="bf-tag"><option value="">全部</option></select></label>
-        <label>模型 <input id="bf-model" placeholder="精确或 claude-*"></label>
-        <label>状态 <select id="bf-status"><option value="">全部</option><option value="200">成功</option><option value="502">上游失败</option><option value="504">超时</option><option value="500">内部错误</option></select></label>
-        <label>搜索 <input id="bf-q" placeholder="req_id / 名称 / IP / 标签"></label>
-        <label><input type="checkbox" id="bf-unpriced" style="min-width:auto"> 只看未定价</label>
-        <button type="submit">查询</button>
-        <button type="button" class="ghost" id="bf-today">今天</button>
-        <button type="button" class="ghost" id="bf-yesterday">昨天</button>
-        <button type="button" class="ghost" id="bf-month">本月</button>
-        <button type="button" class="ghost" id="bf-export">导出 CSV</button>
-      </form>
-
-      <div id="bill-tab-summary">
-        <div class="bill-kpis">
-          <div class="kpi"><div class="l">请求</div><div class="v" id="bk-req">–</div></div>
-          <div class="kpi"><div class="l">输入 tok</div><div class="v" id="bk-in">–</div></div>
-          <div class="kpi"><div class="l">输出 tok</div><div class="v" id="bk-out">–</div></div>
-          <div class="kpi"><div class="l">金额 <span id="bk-cur"></span></div><div class="v ok" id="bk-cost">–</div></div>
-          <div class="kpi"><div class="l">销售分成</div><div class="v warn" id="bk-comm">–</div></div>
+        <div class="kpis">
+          <div class="kpi"><div class="l">账号</div><div class="v" id="k-total">–</div></div>
+          <div class="kpi hero"><div class="l">可用</div><div class="v ok" id="k-avail">–</div></div>
+          <div class="kpi"><div class="l">在飞</div><div class="v" id="k-inflight">–</div></div>
+          <div class="kpi"><div class="l">默认模型</div><div class="v sm" id="k-model">–</div></div>
         </div>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>分组</th><th>请求</th><th>成功</th><th>输入 tok</th><th>输出 tok</th><th class="money">金额</th><th class="money">分成</th><th>未定价</th><th>首次</th><th>最后</th></tr></thead>
-            <tbody id="bill-sum-body"></tbody>
-          </table>
+        <div class="kpis">
+          <div class="kpi hero"><div class="l">今日金额 <span id="ov-cur"></span></div><div class="v" id="ov-cost">–</div></div>
+          <div class="kpi"><div class="l">今日分成</div><div class="v warn" id="ov-comm">–</div></div>
+          <div class="kpi"><div class="l">今日请求</div><div class="v" id="ov-req">–</div></div>
+          <div class="kpi"><div class="l">今日 tokens</div><div class="v" id="ov-tok">–</div></div>
         </div>
-      </div>
+        <div class="card" id="overview-log">
+          <h3>最近请求</h3>
+          <div class="log" id="log-body-ov"></div>
+        </div>
+      </section>
 
-      <div id="bill-tab-records" style="display:none">
-        <div class="table-scroll" style="max-height:60vh">
-          <table>
-            <thead><tr><th>时间</th><th>req_id</th><th>Key</th><th>销售</th><th>模型</th><th>账号</th><th>in/out</th><th class="money">单价 in/out /M</th><th class="money">金额</th><th class="money">分成</th><th>状态</th><th>耗时</th><th>标签</th></tr></thead>
-            <tbody id="bill-rec-body"></tbody>
-          </table>
-        </div>
-        <div class="pagination" id="bill-pager"></div>
-      </div>
-
-      <div id="bill-tab-pricing" style="display:none">
-        <div class="row" style="margin-bottom:10px">
-          <label>币种 <input id="pr-currency" style="min-width:80px"></label>
-          <label>时区偏移(分钟) <input id="pr-tz" type="number" style="min-width:100px"></label>
-          <label>默认分成(万分比) <input id="pr-bps" type="number" min="0" max="10000" style="min-width:100px"></label>
-          <label><input type="checkbox" id="pr-reject" style="min-width:auto"> 未定价模型拒绝请求 (402)</label>
-          <button type="button" id="pr-save">保存全部</button>
-        </div>
-        <div class="row" style="align-items:start">
-          <div style="flex:1;min-width:320px">
-            <label>模型价格表（每 1M tokens；model 支持精确名 / <code>prefix*</code> / <code>*</code> 兜底；精确 &gt; 最长前缀 &gt; *）</label>
-            <textarea id="pr-prices" spellcheck="false"></textarea>
-          </div>
-          <div style="flex:1;min-width:320px">
-            <label>销售 / 渠道（commission_bps 万分比，1500 = 15%）</label>
-            <textarea id="pr-sales" spellcheck="false"></textarea>
+      <!-- ================= 02 号池 ================= -->
+      <section class="page" id="page-pool">
+        <div class="page-head">
+          <div><h2>号池</h2><p>账号轮询、冷却、额度探测与批量管理</p></div>
+          <div class="actions">
+            <button type="button" id="btn-probe-all" class="ghost">探测全部</button>
+            <button type="button" id="btn-import" class="ghost">导入文件</button>
+            <button type="button" id="btn-paste-import" class="ghost">粘贴导入</button>
+            <button type="button" id="btn-export" class="ghost">导出备份</button>
+            <input type="file" id="file-import" accept=".json,.csv" style="display:none">
           </div>
         </div>
-        <p class="toast" id="pr-msg">改价只影响之后的请求；历史账单已快照当时单价。</p>
-        <p class="toast" id="bill-writer"></p>
-      </div>
-      <p class="toast" id="bill-msg"></p>
-    </section>
+        <div class="card flush">
+          <div class="card-bar toolbar">
+            <input id="acc-search" class="grow" placeholder="搜索 ID…">
+            <select id="acc-filter">
+              <option value="all">全部状态</option>
+              <option value="enabled">可用</option>
+              <option value="disabled">已禁用</option>
+              <option value="cooldown">冷却中</option>
+              <option value="error">有错误</option>
+            </select>
+            <select id="acc-sort">
+              <option value="id">按 ID</option>
+              <option value="requests">按请求数</option>
+              <option value="errors">按错误数</option>
+              <option value="quota">按配额</option>
+            </select>
+            <span class="sep"></span>
+            <button type="button" id="btn-select-all" class="ghost">全选</button>
+            <button type="button" id="btn-batch-enable" class="ghost">批量启用</button>
+            <button type="button" id="btn-batch-disable" class="ghost">批量禁用</button>
+            <button type="button" id="btn-batch-delete" class="danger">批量删除</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:36px"><input type="checkbox" id="acc-check-all"></th>
+                  <th>ID</th><th>请求</th><th>错误</th><th>在飞</th><th>额度</th><th>状态</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="acc-body"></tbody>
+            </table>
+          </div>
+          <div style="padding: 0 16px 12px"><div class="pagination" id="acc-pagination"></div><p class="toast" id="acc-msg"></p></div>
+        </div>
+        <details class="add">
+          <summary>新增 / 更新账号</summary>
+          <div class="body">
+            <form id="acc-form" class="form-grid">
+              <label>ID <input id="f-acc-id" required></label>
+              <label>access_token <input id="f-acc-tok" type="password" required></label>
+              <label>machine_id <input id="f-acc-mid" required></label>
+              <label>refresh_token <input id="f-acc-ref" type="password" placeholder="可选"></label>
+              <div><button type="submit">保存账号</button></div>
+            </form>
+          </div>
+        </details>
+        <dialog id="paste-dialog">
+          <h3>粘贴批量导入</h3>
+          <p>每行一个账号，格式 <code>id,access_token,machine_id[,refresh_token]</code></p>
+          <textarea id="paste-text" rows="8"></textarea>
+          <div class="row" style="margin-top:12px;justify-content:flex-end">
+            <button type="button" id="paste-cancel" class="ghost">取消</button>
+            <button type="button" id="paste-submit">导入</button>
+          </div>
+        </dialog>
+      </section>
 
-    <section class="panel">
-      <h2>最近请求</h2>
-      <div class="log" id="log-body"></div>
-    </section>
-  </main>
+      <!-- ================= 03 Keys ================= -->
+      <section class="page" id="page-keys">
+        <div class="page-head">
+          <div><h2>API Keys</h2><p>脱敏显示 · 限额 · 过期 · 标签与销售归属</p></div>
+        </div>
+        <div class="card flush">
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>#</th><th>前缀</th><th>名称 / 描述</th><th>标签 / 销售</th><th>用量</th><th>限额</th><th>过期</th><th></th></tr></thead>
+              <tbody id="key-body"></tbody>
+            </table>
+          </div>
+          <div style="padding: 0 16px 12px"><p class="toast" id="key-msg"></p></div>
+        </div>
+        <details class="add" open>
+          <summary>追加 API Key</summary>
+          <div class="body">
+            <form id="key-form" class="form-grid">
+              <label class="span-2">新 key <input id="f-key" type="password" minlength="16" autocomplete="off" placeholder="sk-… (≥16 字符)"></label>
+              <label>名称 <input id="f-key-name"></label>
+              <label>描述 <input id="f-key-desc" placeholder="可选"></label>
+              <label>token 限额 <input id="f-key-tlim" type="number" min="0" placeholder="空=不限"></label>
+              <label>请求限额 <input id="f-key-rlim" type="number" min="0" placeholder="空=不限"></label>
+              <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
+              <label>标签 <input id="f-key-tags" placeholder="逗号分隔, 如 vip,项目A"></label>
+              <label>归属销售 <select id="f-key-sales"><option value="">（无）</option></select></label>
+              <div><button type="submit">追加</button></div>
+            </form>
+          </div>
+        </details>
+      </section>
+
+      <!-- ================= 04 计费 ================= -->
+      <section class="page" id="page-billing">
+        <div class="page-head">
+          <div><h2>计费账单</h2><p>金额整数存储、单价按请求快照，改价不影响历史</p></div>
+          <div class="actions"><button type="button" class="ghost" id="bf-export">导出 CSV</button></div>
+        </div>
+        <div id="billing-panel">
+          <div class="tabs">
+            <button type="button" class="active" data-tab="summary">汇总</button>
+            <button type="button" data-tab="records">明细</button>
+            <button type="button" data-tab="pricing">价格 / 销售</button>
+          </div>
+
+          <form id="bill-filter" class="card">
+            <div class="form-grid">
+              <label>起 <input id="bf-from" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH"></label>
+              <label>止（含） <input id="bf-to" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH"></label>
+              <label>分组 <select id="bf-group">
+                <option value="day">按天</option><option value="hour">按小时</option>
+                <option value="key">按 key</option><option value="sales">按销售</option>
+                <option value="model">按模型</option><option value="tag">按标签</option>
+                <option value="account">按账号</option><option value="none">合计</option>
+              </select></label>
+              <label>Key <input id="bf-key" placeholder="前缀 / 名称"></label>
+              <label>销售 <select id="bf-sales"><option value="">全部</option></select></label>
+              <label>标签 <select id="bf-tag"><option value="">全部</option></select></label>
+              <label>模型 <input id="bf-model" placeholder="精确或 claude-*"></label>
+              <label>状态 <select id="bf-status"><option value="">全部</option><option value="200">成功</option><option value="502">上游失败</option><option value="504">超时</option><option value="500">内部错误</option></select></label>
+              <label class="span-2">搜索 <input id="bf-q" placeholder="req_id / 名称 / IP / 标签"></label>
+            </div>
+            <div class="toolbar" style="margin-top:14px">
+              <button type="submit" class="accent">查询</button>
+              <button type="button" class="ghost" id="bf-today">今天</button>
+              <button type="button" class="ghost" id="bf-yesterday">昨天</button>
+              <button type="button" class="ghost" id="bf-month">本月</button>
+              <span class="sep"></span>
+              <label class="inline"><input type="checkbox" id="bf-unpriced"> 只看未定价</label>
+            </div>
+          </form>
+
+          <div id="bill-tab-summary">
+            <div class="bill-kpis">
+              <div class="kpi hero"><div class="l">金额 <span id="bk-cur"></span></div><div class="v" id="bk-cost">–</div></div>
+              <div class="kpi"><div class="l">销售分成</div><div class="v warn" id="bk-comm">–</div></div>
+              <div class="kpi"><div class="l">请求</div><div class="v" id="bk-req">–</div></div>
+              <div class="kpi"><div class="l">输入 tokens</div><div class="v" id="bk-in">–</div></div>
+              <div class="kpi"><div class="l">输出 tokens</div><div class="v" id="bk-out">–</div></div>
+            </div>
+            <div class="card flush">
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>分组</th><th>请求</th><th>成功</th><th>输入 tok</th><th>输出 tok</th><th class="money">金额</th><th class="money">分成</th><th>未定价</th><th>首次</th><th>最后</th></tr></thead>
+                  <tbody id="bill-sum-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div id="bill-tab-records" style="display:none">
+            <div class="card flush">
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>时间</th><th>req_id</th><th>Key</th><th>销售</th><th>模型</th><th>账号</th><th>in / out</th><th class="money">单价 /M</th><th class="money">金额</th><th class="money">分成</th><th>状态</th><th>耗时</th><th>标签</th></tr></thead>
+                  <tbody id="bill-rec-body"></tbody>
+                </table>
+              </div>
+              <div style="padding: 0 16px 12px"><div class="pagination" id="bill-pager"></div></div>
+            </div>
+          </div>
+
+          <div id="bill-tab-pricing" style="display:none">
+            <div class="card">
+              <h3>计费参数</h3>
+              <div class="form-grid">
+                <label>币种 <input id="pr-currency"></label>
+                <label>时区偏移（分钟） <input id="pr-tz" type="number"></label>
+                <label>默认分成（万分比） <input id="pr-bps" type="number" min="0" max="10000"></label>
+                <label class="inline" style="align-self:end"><input type="checkbox" id="pr-reject"> 未定价模型拒绝请求 (402)</label>
+              </div>
+            </div>
+            <div class="grid-2">
+              <div class="card">
+                <h3>模型价格表</h3>
+                <p class="hint">每 1M tokens。<code>model</code> 支持精确名 / <code>prefix*</code> / <code>*</code> 兜底；优先级 精确 &gt; 最长前缀 &gt; <code>*</code>。</p>
+                <textarea id="pr-prices" spellcheck="false"></textarea>
+              </div>
+              <div class="card">
+                <h3>销售 / 渠道</h3>
+                <p class="hint"><code>commission_bps</code> 为万分比，1500 = 15%。key 未绑定销售时用默认分成。</p>
+                <textarea id="pr-sales" spellcheck="false"></textarea>
+              </div>
+            </div>
+            <div class="toolbar">
+              <button type="button" id="pr-save" class="accent">保存全部</button>
+              <p class="toast" id="pr-msg" style="margin:0">改价只影响之后的请求；历史账单已快照当时单价。</p>
+            </div>
+            <p class="toast" id="bill-writer"></p>
+          </div>
+          <p class="toast" id="bill-msg"></p>
+        </div>
+      </section>
+
+      <!-- ================= 05 设置 ================= -->
+      <section class="page" id="page-settings">
+        <div class="page-head">
+          <div><h2>运行参数</h2><p>默认模型热更新；超时与并发写盘后需重启进程</p></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <h3>参数</h3>
+            <form id="settings-form" class="form-grid">
+              <label class="span-2">默认模型 <input id="f-model" name="default_model" autocomplete="off"></label>
+              <label>超时（秒） <input id="f-timeout" name="timeout_s" type="number" min="10" max="3600"></label>
+              <label>每号并发 <input id="f-conc" name="max_concurrency_per_account" type="number" min="1" max="128"></label>
+              <div class="span-2"><button type="submit">保存</button></div>
+            </form>
+            <p class="toast" id="settings-msg"></p>
+          </div>
+          <div class="card">
+            <h3>进程信息</h3>
+            <dl class="kv" id="settings-kv"></dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 06 日志 ================= -->
+      <section class="page" id="page-logs">
+        <div class="page-head">
+          <div><h2>请求日志</h2><p>最近 40 条，内存 ring buffer</p></div>
+        </div>
+        <div class="card">
+          <div class="log" id="log-body"></div>
+        </div>
+      </section>
+    </main>
+  </div>
   <script>
     function el(tag, attrs, text) {
       const n = document.createElement(tag);
@@ -561,7 +766,10 @@
       }
     }
     function renderLogs(logs) {
-      const box = document.getElementById('log-body');
+      renderLogsInto(document.getElementById('log-body'), logs);
+      renderLogsInto(document.getElementById('log-body-ov'), (logs || []).slice(0, 12));
+    }
+    function renderLogsInto(box, logs) {
       box.replaceChildren();
       if (!logs || !logs.length) {
         box.appendChild(el('div', { class: 'empty' }, '还没有请求'));
@@ -569,7 +777,9 @@
       }
       logs.forEach((l) => {
         const row = el('div');
-        row.appendChild(el('span', null, String(l.ts || '').replace('T', ' ').slice(0, 19)));
+        const d = l.ts ? new Date(l.ts) : null;
+        const p2 = (n) => String(n).padStart(2, '0');
+        row.appendChild(el('span', null, d && !isNaN(d) ? (localDate(d) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds())) : String(l.ts || '')));
         row.appendChild(el('span', { class: l.status >= 400 ? 'bad' : 'ok' }, String(l.status || '')));
         row.appendChild(el('span', null, String(l.model || '')));
         row.appendChild(el('span', null, String(l.account || '')));
@@ -589,15 +799,61 @@
       document.getElementById('k-avail').textContent = pool.available;
       document.getElementById('k-inflight').textContent = pool.inflight;
       document.getElementById('k-model').textContent = settings.default_model;
-      document.getElementById('meta').textContent =
-        'v' + settings.version + '  ' + settings.host + ':' + settings.port + '  ' + settings.backend + '  上游 ' + (settings.upstreams || []).join(',');
+      const meta = document.getElementById('meta');
+      meta.replaceChildren();
+      ['v' + settings.version, settings.host + ':' + settings.port, settings.backend.replace(/^https?:\/\//, ''), '上游 ' + (settings.upstreams || []).join(',')]
+        .forEach((t) => meta.appendChild(el('div', null, t)));
       document.getElementById('f-model').value = settings.default_model;
       document.getElementById('f-timeout').value = settings.timeout_s;
       document.getElementById('f-conc').value = settings.max_concurrency_per_account;
       renderAccounts(pool.accounts);
       renderKeys(keys);
       renderLogs(logs.logs);
+      document.getElementById('nav-pool-badge').textContent = pool.available + '/' + pool.total_accounts;
+      document.getElementById('nav-keys-badge').textContent = String((keys.keys || []).length);
+      const kv = document.getElementById('settings-kv');
+      kv.replaceChildren();
+      [['版本', 'v' + settings.version], ['监听', settings.host + ':' + settings.port], ['上游', settings.backend],
+       ['已配置上游', (settings.upstreams || []).join(', ')], ['排队等待', settings.acquire_wait_ms + ' ms'],
+       ['计费币种', settings.billing_currency], ['计费时区', '+' + (settings.billing_tz_offset_minutes / 60) + 'h'],
+       ['价格规则', String(settings.billing_price_rules)], ['API key 数', String(settings.api_key_count)]]
+        .forEach(([k, v]) => { kv.appendChild(el('dt', null, k)); kv.appendChild(el('dd', null, v == null ? '—' : String(v))); });
+      setLive(true);
+      loadOverviewBilling().catch(() => {});
     }
+    function setLive(ok) {
+      const n = document.getElementById('live');
+      n.className = ok ? 'live' : 'live off';
+      n.replaceChildren(el('i'), document.createTextNode(ok ? 'LIVE' : 'OFFLINE'));
+    }
+    async function loadOverviewBilling() {
+      const d = localDate(new Date());
+      const r = await api('/admin/api/billing/summary?group=none&from=' + d + '&to=' + d);
+      const t = r.total || {};
+      document.getElementById('ov-cost').textContent = t.cost || '0.00';
+      document.getElementById('ov-comm').textContent = t.commission || '0.00';
+      document.getElementById('ov-req').textContent = fmtN(t.requests);
+      document.getElementById('ov-tok').textContent = fmtN((t.input_tokens || 0) + (t.output_tokens || 0));
+      document.getElementById('ov-cur').textContent = r.currency ? '(' + r.currency + ')' : '';
+    }
+    // ---------- 路由: hash → 页面 ----------
+    const PAGES = ['overview', 'pool', 'keys', 'billing', 'settings', 'logs'];
+    function showPage(name) {
+      // 支持 #billing/records 直达 tab
+      const [base, sub] = (name || '').split('/');
+      name = base;
+      if (!PAGES.includes(name)) name = 'overview';
+      if (name === 'billing' && sub) {
+        const b = document.querySelector('#billing-panel .tabs button[data-tab="' + sub + '"]');
+        if (b && !b.classList.contains('active')) { b.click(); }
+      }
+      PAGES.forEach((p) => document.getElementById('page-' + p).classList.toggle('active', p === name));
+      document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
+      if (name === 'billing' && !sub) loadBilling().catch((e) => toast('bill-msg', e.message, true));
+      window.scrollTo({ top: 0 });
+    }
+    window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
+    document.getElementById('ov-refresh').addEventListener('click', () => loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); }));
     document.getElementById('settings-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
@@ -942,10 +1198,11 @@
       const q = billQuery(); const tok = new URLSearchParams(location.search).get('token'); if (tok) q.set('token', tok);
       window.open('/admin/api/billing/export?' + q.toString(), '_blank');
     });
-    loadBillingMeta().then(() => loadBilling()).catch(() => {});
+    loadBillingMeta().then(() => { if (location.hash === '#billing') return loadBilling(); }).catch(() => {});
 
-    loadAll().catch((e) => toast('acc-msg', e.message, true));
-    setInterval(() => { loadAll().catch(() => {}); }, 4000);
+    showPage(location.hash.slice(1));
+    loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });
+    setInterval(() => { loadAll().catch(() => setLive(false)); }, 4000);
   </script>
 </body>
 </html>

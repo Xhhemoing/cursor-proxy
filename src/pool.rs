@@ -545,6 +545,7 @@ impl AccountPool {
         let mut available = 0usize;
         let mut total_requests = 0u64;
         let mut total_errors = 0u64;
+        let mut total_inflight = 0usize;
 
         for entry in self.slots.iter() {
             let id = entry.key();
@@ -558,11 +559,16 @@ impl AccountPool {
                 available += 1;
             }
 
+            let inflight = self.max_concurrency.saturating_sub(slot.sem.available_permits());
+            total_inflight += inflight;
+            let (req, err) = self
+                .stats
+                .get(id)
+                .map(|s| (s.requests.load(Ordering::Relaxed), s.errors.load(Ordering::Relaxed)))
+                .unwrap_or((0, 0));
+            total_requests += req;
+            total_errors += err;
             let stats = self.stats.get(id).map(|s| {
-                let req = s.requests.load(Ordering::Relaxed);
-                let err = s.errors.load(Ordering::Relaxed);
-                total_requests += req;
-                total_errors += err;
                 serde_json::json!({
                     "requests": req,
                     "errors": err,
@@ -579,8 +585,15 @@ impl AccountPool {
                 "enabled": enabled,
                 "cooldown": cooling,
                 "cooldown_remaining_secs": cooldown_remaining,
+                "cooldown_remaining_s": cooldown_remaining,
                 "quota_ok": quota_ok,
+                "quota": self.quotas.get(id.as_str()).map(|q| q.clone()),
                 "available": is_available,
+                // 扁平字段供面板直接读取
+                "requests": req,
+                "errors": err,
+                "inflight": inflight,
+                "max_concurrency": self.max_concurrency,
                 "stats": stats,
                 "health_score": self.health_score(id).map(|h| h.score),
             }));
@@ -589,6 +602,7 @@ impl AccountPool {
         serde_json::json!({
             "total_accounts": self.slots.len(),
             "available": available,
+            "inflight": total_inflight,
             "total_requests": total_requests,
             "total_errors": total_errors,
             "accounts": accounts,
