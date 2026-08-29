@@ -153,6 +153,8 @@ pub async fn api_account_upsert(
         machine_id: body.machine_id.trim().to_string(),
         refresh_token: body.refresh_token,
         enabled: body.enabled,
+        token_expires_at: None,
+        refresh_url: None,
     };
     let existed = state.pool.has_account(&acc.id);
     match config::upsert_account(acc) {

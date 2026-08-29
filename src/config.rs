@@ -208,6 +208,12 @@ pub struct Account {
     pub refresh_token: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// access_token 过期时间（Unix 秒），None 表示未知/不过期
+    #[serde(default)]
+    pub token_expires_at: Option<u64>,
+    /// 自定义 refresh 端点，为空则用默认 OAuth 风格
+    #[serde(default)]
+    pub refresh_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -314,6 +320,8 @@ mod tests {
                 machine_id: "mid".into(),
                 refresh_token: String::new(),
                 enabled: true,
+                token_expires_at: None,
+                refresh_url: None,
             }];
             atomic_write(
                 &accounts_path(),

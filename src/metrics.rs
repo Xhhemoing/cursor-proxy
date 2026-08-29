@@ -76,6 +76,8 @@ mod tests {
                 machine_id: "m".into(),
                 refresh_token: String::new(),
                 enabled: true,
+                token_expires_at: None,
+                refresh_url: None,
             }],
             2,
         );

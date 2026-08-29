@@ -284,3 +284,56 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     Ok(out)
 }
+
+/// 刷新 access_token（OAuth 风格，支持自定义端点）
+pub async fn refresh_access_token(
+    client: &reqwest::Client,
+    refresh_url: Option<&str>,
+    backend: &str,
+    refresh_token: &str,
+) -> Result<(String, Option<u64>), String> {
+    let url = refresh_url
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| format!("{}/oauth/token", backend.trim_end_matches('/')));
+
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("refresh request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("refresh failed {}: {}", status, text));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("refresh decode failed: {}", e))?;
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "no access_token in refresh response".to_string())?
+        .to_string();
+
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .map(|s| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                + s
+        });
+
+    Ok((access_token, expires_in))
+}

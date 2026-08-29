@@ -337,6 +337,8 @@ mod tests {
             machine_id: "machine-abcdef12".into(),
             refresh_token: String::new(),
             enabled,
+            token_expires_at: None,
+            refresh_url: None,
         }
     }
 
