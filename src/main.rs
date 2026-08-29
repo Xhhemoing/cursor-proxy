@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, DefaultBodyLimit, State},
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -227,7 +227,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/v1/models", get(models_handler))
+        // 1M-token 上下文请求体可达 ~3.2MB（kimi-k3 等长上下文模型），
+        // axum 默认 DefaultBodyLimit 为 2MB 会以 413 拦截，这里放宽到 64MB。
         .route("/v1/chat/completions", post(chat_handler))
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .merge(admin_routes)
         .with_state(state.clone());
 
