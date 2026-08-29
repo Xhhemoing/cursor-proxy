@@ -1,0 +1,54 @@
+[package]
+name = "cursor-fast-proxy-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+# HTTP 服务器
+axum = { version = "0.7", features = ["http2", "json", "tokio", "tracing"] }
+# HTTP 客户端 (上游 Cursor/OpenAI)
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+hyper-rustls = { version = "0.27", features = ["http2", "webpki-roots"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# TLS
+tokio-rustls = { version = "0.26", features = ["ring"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+# 压缩
+flate2 = "1"
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# 工具
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+tokio-stream = "0.1"
+async-trait = "0.1"
+anyhow = "1"
+thiserror = "1"
+dashmap = "6"  # 并发 HashMap (号池状态)
+arc-swap = "1"  # 原子配置热更新
+tokio-util = { version = "0.7", features = ["codec"] }
+tower-http = { version = "0.5", features = ["fs"] }  # 静态文件服务
+subtle = "2"  # 恒定时间比较 (API key 防时序攻击)
+parking_lot = "0.12"  # 无 poison 的 Mutex/RwLock
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }  # 配置热重载
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

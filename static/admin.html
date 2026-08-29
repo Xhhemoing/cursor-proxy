@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CFP-RS 号池台</title>
+  <style>
+    :root {
+      --bg: #16140f;
+      --panel: #211d16;
+      --ink: #efe6d2;
+      --muted: #9a8f78;
+      --line: #3a3428;
+      --ok: #7cba6a;
+      --warn: #d4a017;
+      --bad: #d45a3a;
+      --accent: #e8b86d;
+      --btn: #2b261c;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font: 14px/1.45 "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 16px; padding: 18px 22px 12px; border-bottom: 1px solid var(--line);
+    }
+    header h1 { font-size: 18px; font-weight: 650; margin: 0; letter-spacing: 0.04em; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    main { padding: 18px 22px 40px; max-width: 1180px; }
+    .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .kpi, .panel {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 2px;
+    }
+    .kpi { padding: 12px 14px; }
+    .kpi .l { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .kpi .v { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 22px; margin-top: 4px; }
+    .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+    .panel { padding: 14px 16px; margin-bottom: 14px; }
+    .panel h2 { font-size: 13px; margin: 0 0 12px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+    input, select {
+      background: #14110c; color: var(--ink); border: 1px solid var(--line);
+      padding: 7px 9px; font: 13px/1.3 "IBM Plex Mono", ui-monospace, monospace; min-width: 160px;
+    }
+    button {
+      background: var(--btn); color: var(--ink); border: 1px solid var(--accent);
+      padding: 7px 12px; cursor: pointer; font: 13px/1.2 inherit;
+    }
+    button:hover { background: #3a3224; }
+    button.ghost { border-color: var(--line); color: var(--muted); }
+    button.danger { border-color: var(--bad); color: var(--bad); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+    .table-scroll { overflow: auto; max-height: 42vh; }
+    .toast { min-height: 18px; color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+    .toast.err { color: var(--bad); }
+    .log {
+      font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+      max-height: 280px; overflow: auto; border-top: 1px solid var(--line);
+    }
+    .log div { display: grid; grid-template-columns: 150px 72px 90px 70px 1fr; gap: 8px; padding: 6px 4px; border-bottom: 1px dashed var(--line); }
+    .empty { color: var(--muted); padding: 18px 4px; }
+    @media (max-width: 800px) {
+      .kpis { grid-template-columns: 1fr 1fr; }
+      header, main { padding-left: 12px; padding-right: 12px; }
+      .log div { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>CFP-RS 号池台</h1>
+    <div class="meta" id="meta">加载中…</div>
+  </header>
+  <main>
+    <section class="kpis" aria-label="号池概览">
+      <div class="kpi"><div class="l">账号</div><div class="v" id="k-total">–</div></div>
+      <div class="kpi"><div class="l">可用</div><div class="v ok" id="k-avail">–</div></div>
+      <div class="kpi"><div class="l">在飞</div><div class="v" id="k-inflight">–</div></div>
+      <div class="kpi"><div class="l">默认模型</div><div class="v" id="k-model" style="font-size:16px">–</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>运行参数</h2>
+      <form id="settings-form" class="row">
+        <label>默认模型 <input id="f-model" name="default_model" autocomplete="off"></label>
+        <label>超时秒 <input id="f-timeout" name="timeout_s" type="number" min="10" max="3600"></label>
+        <label>每号并发 <input id="f-conc" name="max_concurrency_per_account" type="number" min="1" max="128"></label>
+        <button type="submit">保存</button>
+      </form>
+      <p class="toast" id="settings-msg">超时和并发写入磁盘后需重启进程才进热路径。</p>
+    </section>
+
+    <section class="panel">
+      <h2>号池</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button type="button" id="btn-probe-all">探测全部额度</button>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>请求</th><th>错误</th><th>在飞</th><th>额度</th><th>状态</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="acc-body"></tbody>
+        </table>
+      </div>
+      <form id="acc-form" class="row" style="margin-top:10px">
+        <label>ID <input id="f-acc-id" required></label>
+        <label>access_token <input id="f-acc-tok" type="password" required></label>
+        <label>machine_id <input id="f-acc-mid" required></label>
+        <button type="submit">保存账号</button>
+      </form>
+      <p class="toast" id="acc-msg"></p>
+    </section>
+
+    <section class="panel">
+      <h2>API Keys（脱敏 / 限额 / 过期）</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>#</th><th>前缀</th><th>名称/描述</th><th>用量</th><th>限额</th><th>过期</th><th></th></tr></thead>
+          <tbody id="key-body"></tbody>
+        </table>
+      </div>
+      <form id="key-form" class="row" style="margin-top:10px">
+        <label>新 key <input id="f-key" type="password" minlength="16" autocomplete="off" placeholder="sk-... (≥16 字符)"></label>
+        <label>名称 <input id="f-key-name"></label>
+        <label>描述 <input id="f-key-desc" placeholder="可选"></label>
+        <label>token 限额 <input id="f-key-tlim" type="number" min="0" placeholder="空=不限"></label>
+        <label>请求限额 <input id="f-key-rlim" type="number" min="0" placeholder="空=不限"></label>
+        <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
+        <button type="submit">追加</button>
+      </form>
+      <p class="toast" id="key-msg"></p>
+    </section>
+
+    <section class="panel">
+      <h2>最近请求</h2>
+      <div class="log" id="log-body"></div>
+    </section>
+  </main>
+  <script>
+    function el(tag, attrs, text) {
+      const n = document.createElement(tag);
+      if (attrs) Object.entries(attrs).forEach(([k, v]) => {
+        if (k === 'class') n.className = v;
+        else n.setAttribute(k, v);
+      });
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function toast(id, msg, err) {
+      const n = document.getElementById(id);
+      n.textContent = msg || '';
+      n.className = err ? 'toast err' : 'toast';
+    }
+    async function api(path, opt) {
+      const q = new URLSearchParams(location.search).get('token');
+      const url = q ? (path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(q)) : path;
+      const headers = { 'content-type': 'application/json' };
+      if (q) headers['authorization'] = 'Bearer ' + q;
+      const r = await fetch(url, Object.assign({ headers }, opt || {}));
+      const text = await r.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { error: text }; }
+      if (!r.ok) throw new Error(data.error || r.status + ' ' + path);
+      return data;
+    }
+    function statusCell(acc) {
+      if (acc.cooldown) return ['冷却 ' + (acc.cooldown_remaining_s || 0) + 's', 'bad'];
+      if (!acc.enabled) return ['已禁用', 'warn'];
+      return ['正常', 'ok'];
+    }
+    function fmtQuota(q) {
+      if (!q) return '未探测';
+      const bits = [];
+      if (q.plan) bits.push(q.plan);
+      if (q.usage_percent != null) bits.push('Sand ' + q.usage_percent + '%');
+      if (q.auto_percent_used != null) bits.push('Auto ' + q.auto_percent_used + '%');
+      if (q.api_percent_used != null) bits.push('API ' + q.api_percent_used + '%');
+      if (q.has_available_usage === false) bits.push('无余量');
+      if (q.next_reset_at) bits.push('重置 ' + new Date(q.next_reset_at * 1000).toISOString().slice(0, 16).replace('T', ' '));
+      if (q.error) bits.push('err ' + q.error);
+      return bits.join(' · ') || '已探测无数据';
+    }
+    function renderAccounts(rows) {
+      const body = document.getElementById('acc-body');
+      body.replaceChildren();
+      if (!rows || !rows.length) {
+        const tr = el('tr'); const td = el('td', { colspan: '7' }, '号池为空'); td.className = 'empty';
+        tr.appendChild(td); body.appendChild(tr); return;
+      }
+      rows.forEach((acc) => {
+        const tr = el('tr');
+        tr.appendChild(el('td', null, acc.id));
+        tr.appendChild(el('td', null, String(acc.requests)));
+        const err = el('td', null, String(acc.errors));
+        if (acc.errors > 0) err.className = 'bad';
+        tr.appendChild(err);
+        tr.appendChild(el('td', null, String(acc.inflight) + '/' + String(acc.max_concurrency)));
+        const qtd = el('td', null, fmtQuota(acc.quota));
+        tr.appendChild(qtd);
+        const [label, cls] = statusCell(acc);
+        const st = el('td', null, label); st.className = cls; tr.appendChild(st);
+        const op = el('td');
+        const tog = el('button', { type: 'button' }, acc.enabled ? '禁用' : '启用');
+        tog.addEventListener('click', async () => {
+          tog.disabled = true;
+          try {
+            await api('/admin/api/accounts/' + encodeURIComponent(acc.id) + '/toggle', { method: 'POST' });
+            toast('acc-msg', acc.id + (acc.enabled ? ' 已禁用并写盘' : ' 已启用并写盘'));
+            await loadAll();
+          } catch (e) { toast('acc-msg', e.message, true); }
+          tog.disabled = false;
+        });
+        op.appendChild(tog);
+        const probe = el('button', { type: 'button', class: 'ghost' }, '探测');
+        probe.addEventListener('click', async () => {
+          probe.disabled = true;
+          try {
+            const r = await api('/admin/api/accounts/' + encodeURIComponent(acc.id) + '/probe', { method: 'POST' });
+            toast('acc-msg', acc.id + ' ' + fmtQuota(r.quota));
+            await loadAll();
+          } catch (e) { toast('acc-msg', e.message, true); }
+          probe.disabled = false;
+        });
+        op.appendChild(probe);
+        if (acc.cooldown) {
+          const clr = el('button', { type: 'button', class: 'ghost' }, '清冷却');
+          clr.addEventListener('click', async () => {
+            try {
+              await api('/admin/api/accounts/' + encodeURIComponent(acc.id) + '/cooldown/clear', { method: 'POST' });
+              toast('acc-msg', acc.id + ' 冷却已清');
+              await loadAll();
+            } catch (e) { toast('acc-msg', e.message, true); }
+          });
+          op.appendChild(clr);
+        }
+        const del = el('button', { type: 'button', class: 'danger' }, '删除');
+        del.addEventListener('click', async () => {
+          if (!confirm('删除账号 ' + acc.id + '？')) return;
+          try {
+            await api('/admin/api/accounts/' + encodeURIComponent(acc.id), { method: 'DELETE' });
+            toast('acc-msg', acc.id + ' 已删除');
+            await loadAll();
+          } catch (e) { toast('acc-msg', e.message, true); }
+        });
+        op.appendChild(del);
+        tr.appendChild(op);
+        body.appendChild(tr);
+      });
+    }
+    function fmtExp(k) {
+      if (k.expires_at == null) return '永不';
+      const d = new Date(k.expires_at * 1000);
+      const s = d.toISOString().slice(0, 16).replace('T', ' ');
+      return k.expired ? s + ' (已过期)' : s;
+    }
+    function renderKeys(data) {
+      const body = document.getElementById('key-body');
+      body.replaceChildren();
+      (data.keys || []).forEach((k) => {
+        const tr = el('tr');
+        tr.appendChild(el('td', null, String(k.index)));
+        tr.appendChild(el('td', null, k.prefix + '…'));
+        const nd = (k.name || '') + (k.description ? ' — ' + k.description : '');
+        tr.appendChild(el('td', null, nd || '—'));
+        tr.appendChild(el('td', null, String(k.used_tokens || 0) + ' tok / ' + String(k.used_requests || 0) + ' req'));
+        const lim = (k.token_limit == null ? 'token∞' : ('token ' + k.token_limit)) + '  ' + (k.request_limit == null ? 'req∞' : ('req ' + k.request_limit));
+        tr.appendChild(el('td', null, (k.enabled === false ? '停用 · ' : '') + lim));
+        const expTd = el('td', null, fmtExp(k));
+        if (k.expired) expTd.className = 'bad';
+        tr.appendChild(expTd);
+        const op = el('td');
+        const limBtn = el('button', { type: 'button', class: 'ghost' }, '编辑');
+        limBtn.addEventListener('click', async () => {
+          const name = prompt('名称', k.name || '');
+          if (name === null) return;
+          const desc = prompt('描述', k.description || '');
+          if (desc === null) return;
+          const t = prompt('token 限额（空=不限）', k.token_limit == null ? '' : String(k.token_limit));
+          if (t === null) return;
+          const r = prompt('请求限额（空=不限）', k.request_limit == null ? '' : String(k.request_limit));
+          if (r === null) return;
+          const exp = prompt('过期 Unix 秒（空=永不过期, 0=清除）', k.expires_at == null ? '' : String(k.expires_at));
+          if (exp === null) return;
+          try {
+            await api('/admin/api/keys/' + k.index, {
+              method: 'POST',
+              body: JSON.stringify({
+                name,
+                description: desc,
+                token_limit: t.trim() === '' ? null : Number(t),
+                request_limit: r.trim() === '' ? null : Number(r),
+                expires_at: exp.trim() === '' ? null : (Number(exp) === 0 ? null : Number(exp)),
+              }),
+            });
+            toast('key-msg', '已保存');
+            await loadAll();
+          } catch (e) { toast('key-msg', e.message, true); }
+        });
+        op.appendChild(limBtn);
+        const tog = el('button', { type: 'button', class: 'ghost' }, k.enabled === false ? '启用' : '停用');
+        tog.addEventListener('click', async () => {
+          try {
+            await api('/admin/api/keys/' + k.index, {
+              method: 'POST',
+              body: JSON.stringify({ enabled: !(k.enabled !== false) }),
+            });
+            await loadAll();
+          } catch (e) { toast('key-msg', e.message, true); }
+        });
+        op.appendChild(tog);
+        const del = el('button', { type: 'button', class: 'danger' }, '删除');
+        del.addEventListener('click', async () => {
+          if (!confirm('删除这个 key？立即生效。')) return;
+          try {
+            await api('/admin/api/keys/' + k.index, { method: 'DELETE' });
+            toast('key-msg', '已删除 #' + k.index);
+            await loadAll();
+          } catch (e) { toast('key-msg', e.message, true); }
+        });
+        op.appendChild(del);
+        tr.appendChild(op);
+        body.appendChild(tr);
+      });
+      if (!(data.keys || []).length) {
+        const tr = el('tr'); const td = el('td', { colspan: '7' }, '未配置 key（鉴权关闭）');
+        td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
+      }
+    }
+    function renderLogs(logs) {
+      const box = document.getElementById('log-body');
+      box.replaceChildren();
+      if (!logs || !logs.length) {
+        box.appendChild(el('div', { class: 'empty' }, '还没有请求'));
+        return;
+      }
+      logs.forEach((l) => {
+        const row = el('div');
+        row.appendChild(el('span', null, String(l.ts || '').replace('T', ' ').slice(0, 19)));
+        row.appendChild(el('span', { class: l.status >= 400 ? 'bad' : 'ok' }, String(l.status || '')));
+        row.appendChild(el('span', null, String(l.model || '')));
+        row.appendChild(el('span', null, String(l.account || '')));
+        const detail = (l.stream ? 'SSE ' : '') + (l.total_tokens || 0) + ' tok  ' + (l.latency_ms || 0) + ' ms';
+        row.appendChild(el('span', null, detail));
+        box.appendChild(row);
+      });
+    }
+    async function loadAll() {
+      const [pool, settings, keys, logs] = await Promise.all([
+        api('/admin/api/pool'),
+        api('/admin/api/settings'),
+        api('/admin/api/keys'),
+        api('/admin/api/logs?n=40'),
+      ]);
+      document.getElementById('k-total').textContent = pool.total_accounts;
+      document.getElementById('k-avail').textContent = pool.available;
+      document.getElementById('k-inflight').textContent = pool.inflight;
+      document.getElementById('k-model').textContent = settings.default_model;
+      document.getElementById('meta').textContent =
+        'v' + settings.version + '  ' + settings.host + ':' + settings.port + '  ' + settings.backend + '  上游 ' + (settings.upstreams || []).join(',');
+      document.getElementById('f-model').value = settings.default_model;
+      document.getElementById('f-timeout').value = settings.timeout_s;
+      document.getElementById('f-conc').value = settings.max_concurrency_per_account;
+      renderAccounts(pool.accounts);
+      renderKeys(keys);
+      renderLogs(logs.logs);
+    }
+    document.getElementById('settings-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const data = await api('/admin/api/settings', {
+          method: 'POST',
+          body: JSON.stringify({
+            default_model: document.getElementById('f-model').value.trim(),
+            timeout_s: Number(document.getElementById('f-timeout').value),
+            max_concurrency_per_account: Number(document.getElementById('f-conc').value),
+          }),
+        });
+        const extra = (data.restart_required || []).length
+          ? ' 需重启: ' + data.restart_required.join(', ')
+          : ' 默认模型已热更新';
+        toast('settings-msg', '已保存。' + extra);
+        await loadAll();
+      } catch (err) { toast('settings-msg', err.message, true); }
+    });
+    document.getElementById('key-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const key = document.getElementById('f-key').value;
+      const name = document.getElementById('f-key-name').value;
+      const desc = document.getElementById('f-key-desc').value;
+      const tlim = document.getElementById('f-key-tlim').value.trim();
+      const rlim = document.getElementById('f-key-rlim').value.trim();
+      const expLocal = document.getElementById('f-key-exp').value;
+      const exp = expLocal ? Math.floor(new Date(expLocal).getTime() / 1000) : null;
+      try {
+        await api('/admin/api/keys', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            name,
+            description: desc,
+            token_limit: tlim === '' ? null : Number(tlim),
+            request_limit: rlim === '' ? null : Number(rlim),
+            expires_at: exp,
+          }),
+        });
+        document.getElementById('f-key').value = '';
+        document.getElementById('f-key-desc').value = '';
+        document.getElementById('f-key-exp').value = '';
+        toast('key-msg', '已追加并写盘');
+        await loadAll();
+      } catch (err) { toast('key-msg', err.message, true); }
+    });
+    document.getElementById('acc-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await api('/admin/api/accounts', {
+          method: 'POST',
+          body: JSON.stringify({
+            id: document.getElementById('f-acc-id').value.trim(),
+            access_token: document.getElementById('f-acc-tok').value.trim(),
+            machine_id: document.getElementById('f-acc-mid').value.trim(),
+            enabled: true,
+          }),
+        });
+        toast('acc-msg', '账号已保存并热加载');
+        document.getElementById('f-acc-tok').value = '';
+        await loadAll();
+      } catch (err) { toast('acc-msg', err.message, true); }
+    });
+    document.getElementById('btn-probe-all').addEventListener('click', async () => {
+      try {
+        await api('/admin/api/accounts/probe-all', { method: 'POST' });
+        toast('acc-msg', '已探测全部账号');
+        await loadAll();
+      } catch (err) { toast('acc-msg', err.message, true); }
+    });
+    loadAll().catch((e) => toast('acc-msg', e.message, true));
+    setInterval(() => { loadAll().catch(() => {}); }, 4000);
+  </script>
+</body>
+</html>
