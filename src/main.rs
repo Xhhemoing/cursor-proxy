@@ -634,6 +634,8 @@ async fn chat_handler(
                 key_usage.add(&billed_key, input_tokens + output_tokens);
             }
             metrics.observe_ok(input_tokens + output_tokens);
+            pool.record_success(&aid);
+            // 成功时检查是否需要重新启用（连续错误已重置）
             pool.release(&aid, false, 0);
         });
 
@@ -670,6 +672,7 @@ async fn chat_handler(
                     state.key_usage.add(&used_key, usage.0 + usage.1);
                 }
                 state.metrics.observe_ok(usage.0 + usage.1);
+                state.pool.record_success(&account_id);
                 state.pool.release(&account_id, false, 0);
                 Ok(Json(result).into_response())
             }

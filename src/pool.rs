@@ -41,6 +41,19 @@ pub struct AccountPool {
 pub struct AccountStats {
     pub requests: u64,
     pub errors: u64,
+    /// 连续错误次数（成功时重置）
+    pub consecutive_errors: u32,
+}
+
+impl AccountStats {
+    /// 错误率（0.0 - 1.0）
+    pub fn error_rate(&self) -> f64 {
+        if self.requests == 0 {
+            0.0
+        } else {
+            self.errors as f64 / self.requests as f64
+        }
+    }
 }
 
 impl AccountPool {
@@ -213,6 +226,9 @@ impl AccountPool {
         if let Some(mut s) = self.stats.get_mut(account_id) {
             if error {
                 s.errors += 1;
+                s.consecutive_errors += 1;
+            } else {
+                s.consecutive_errors = 0;
             }
         }
         if error && cooldown_s > 0 {
@@ -230,6 +246,28 @@ impl AccountPool {
                 slot.cooldown_until = Some(Instant::now() + Duration::from_secs(dynamic_cooldown));
             }
         }
+    }
+
+    /// 记录成功请求（重置连续错误计数）
+    pub fn record_success(&self, account_id: &str) {
+        if let Some(mut s) = self.stats.get_mut(account_id) {
+            s.requests += 1;
+            s.consecutive_errors = 0;
+        }
+    }
+
+    /// 检查账号是否应被自动禁用（连续错误超过阈值）
+    pub fn should_auto_disable(&self, account_id: &str, threshold: u32) -> bool {
+        self.stats
+            .get(account_id)
+            .map(|s| s.consecutive_errors >= threshold)
+            .unwrap_or(false)
+    }
+
+    /// 自动禁用账号（连续错误超阈值时调用）
+    pub fn auto_disable(&self, account_id: &str) -> bool {
+        self.disabled.insert(account_id.to_string(), true);
+        true
     }
 
     pub fn has_account(&self, account_id: &str) -> bool {
