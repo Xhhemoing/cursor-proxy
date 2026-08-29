@@ -71,6 +71,14 @@
     }
     .log div { display: grid; grid-template-columns: 150px 72px 90px 70px 1fr; gap: 8px; padding: 6px 4px; border-bottom: 1px dashed var(--line); }
     .empty { color: var(--muted); padding: 18px 4px; }
+    .tag { display: inline-block; padding: 1px 6px; margin: 0 3px 2px 0; border: 1px solid var(--line); border-radius: 2px; font-size: 11px; color: var(--muted); }
+    .money { text-align: right; font-variant-numeric: tabular-nums; }
+    .bill-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+    textarea { background: #14110c; color: var(--ink); border: 1px solid var(--line); padding: 7px 9px; font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace; width: 100%; min-height: 140px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+    .tabs button { padding: 5px 10px; font-size: 12px; }
+    .tabs button.active { background: var(--accent); color: #14110c; border-color: var(--accent); }
+    @media (max-width: 800px) { .bill-kpis { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 800px) {
       .kpis { grid-template-columns: 1fr 1fr; }
       header, main { padding-left: 12px; padding-right: 12px; }
@@ -169,7 +177,7 @@
       <h2>API Keys（脱敏 / 限额 / 过期）</h2>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>#</th><th>前缀</th><th>名称/描述</th><th>用量</th><th>限额</th><th>过期</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>前缀</th><th>名称/描述</th><th>标签 / 销售</th><th>用量</th><th>限额</th><th>过期</th><th></th></tr></thead>
           <tbody id="key-body"></tbody>
         </table>
       </div>
@@ -180,9 +188,92 @@
         <label>token 限额 <input id="f-key-tlim" type="number" min="0" placeholder="空=不限"></label>
         <label>请求限额 <input id="f-key-rlim" type="number" min="0" placeholder="空=不限"></label>
         <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
+        <label>标签 <input id="f-key-tags" placeholder="逗号分隔, 如 vip,项目A"></label>
+        <label>归属销售 <select id="f-key-sales"><option value="">（无）</option></select></label>
         <button type="submit">追加</button>
       </form>
       <p class="toast" id="key-msg"></p>
+    </section>
+
+    <section class="panel" id="billing-panel">
+      <h2>计费账单</h2>
+      <div class="tabs">
+        <button type="button" class="active" data-tab="summary">汇总</button>
+        <button type="button" data-tab="records">明细</button>
+        <button type="button" data-tab="pricing">价格 / 销售</button>
+      </div>
+
+      <form id="bill-filter" class="row" style="margin-bottom:10px">
+        <label>起 <input id="bf-from" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH" style="min-width:190px"></label>
+        <label>止(含) <input id="bf-to" placeholder="YYYY-MM-DD 或 YYYY-MM-DD HH" style="min-width:190px"></label>
+        <label>分组 <select id="bf-group">
+          <option value="day">按天</option><option value="hour">按小时</option>
+          <option value="key">按 key</option><option value="sales">按销售</option>
+          <option value="model">按模型</option><option value="tag">按标签</option>
+          <option value="account">按账号</option><option value="none">合计</option>
+        </select></label>
+        <label>Key <input id="bf-key" placeholder="前缀 / 名称"></label>
+        <label>销售 <select id="bf-sales"><option value="">全部</option></select></label>
+        <label>标签 <select id="bf-tag"><option value="">全部</option></select></label>
+        <label>模型 <input id="bf-model" placeholder="精确或 claude-*"></label>
+        <label>状态 <select id="bf-status"><option value="">全部</option><option value="200">成功</option><option value="502">上游失败</option><option value="504">超时</option><option value="500">内部错误</option></select></label>
+        <label>搜索 <input id="bf-q" placeholder="req_id / 名称 / IP / 标签"></label>
+        <label><input type="checkbox" id="bf-unpriced" style="min-width:auto"> 只看未定价</label>
+        <button type="submit">查询</button>
+        <button type="button" class="ghost" id="bf-today">今天</button>
+        <button type="button" class="ghost" id="bf-yesterday">昨天</button>
+        <button type="button" class="ghost" id="bf-month">本月</button>
+        <button type="button" class="ghost" id="bf-export">导出 CSV</button>
+      </form>
+
+      <div id="bill-tab-summary">
+        <div class="bill-kpis">
+          <div class="kpi"><div class="l">请求</div><div class="v" id="bk-req">–</div></div>
+          <div class="kpi"><div class="l">输入 tok</div><div class="v" id="bk-in">–</div></div>
+          <div class="kpi"><div class="l">输出 tok</div><div class="v" id="bk-out">–</div></div>
+          <div class="kpi"><div class="l">金额 <span id="bk-cur"></span></div><div class="v ok" id="bk-cost">–</div></div>
+          <div class="kpi"><div class="l">销售分成</div><div class="v warn" id="bk-comm">–</div></div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>分组</th><th>请求</th><th>成功</th><th>输入 tok</th><th>输出 tok</th><th class="money">金额</th><th class="money">分成</th><th>未定价</th><th>首次</th><th>最后</th></tr></thead>
+            <tbody id="bill-sum-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="bill-tab-records" style="display:none">
+        <div class="table-scroll" style="max-height:60vh">
+          <table>
+            <thead><tr><th>时间</th><th>req_id</th><th>Key</th><th>销售</th><th>模型</th><th>账号</th><th>in/out</th><th class="money">单价 in/out /M</th><th class="money">金额</th><th class="money">分成</th><th>状态</th><th>耗时</th><th>标签</th></tr></thead>
+            <tbody id="bill-rec-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="bill-pager"></div>
+      </div>
+
+      <div id="bill-tab-pricing" style="display:none">
+        <div class="row" style="margin-bottom:10px">
+          <label>币种 <input id="pr-currency" style="min-width:80px"></label>
+          <label>时区偏移(分钟) <input id="pr-tz" type="number" style="min-width:100px"></label>
+          <label>默认分成(万分比) <input id="pr-bps" type="number" min="0" max="10000" style="min-width:100px"></label>
+          <label><input type="checkbox" id="pr-reject" style="min-width:auto"> 未定价模型拒绝请求 (402)</label>
+          <button type="button" id="pr-save">保存全部</button>
+        </div>
+        <div class="row" style="align-items:start">
+          <div style="flex:1;min-width:320px">
+            <label>模型价格表（每 1M tokens；model 支持精确名 / <code>prefix*</code> / <code>*</code> 兜底；精确 &gt; 最长前缀 &gt; *）</label>
+            <textarea id="pr-prices" spellcheck="false"></textarea>
+          </div>
+          <div style="flex:1;min-width:320px">
+            <label>销售 / 渠道（commission_bps 万分比，1500 = 15%）</label>
+            <textarea id="pr-sales" spellcheck="false"></textarea>
+          </div>
+        </div>
+        <p class="toast" id="pr-msg">改价只影响之后的请求；历史账单已快照当时单价。</p>
+        <p class="toast" id="bill-writer"></p>
+      </div>
+      <p class="toast" id="bill-msg"></p>
     </section>
 
     <section class="panel">
@@ -394,6 +485,11 @@
         tr.appendChild(el('td', null, k.prefix + '…'));
         const nd = (k.name || '') + (k.description ? ' — ' + k.description : '');
         tr.appendChild(el('td', null, nd || '—'));
+        const tsTd = el('td');
+        (k.tags || []).forEach((t) => tsTd.appendChild(el('span', { class: 'tag' }, t)));
+        if (k.sales_id) tsTd.appendChild(el('span', { class: 'warn' }, '👤 ' + (salesName(k.sales_id))));
+        if (!(k.tags || []).length && !k.sales_id) tsTd.textContent = '—';
+        tr.appendChild(tsTd);
         tr.appendChild(el('td', null, String(k.used_tokens || 0) + ' tok / ' + String(k.used_requests || 0) + ' req'));
         const lim = (k.token_limit == null ? 'token∞' : ('token ' + k.token_limit)) + '  ' + (k.request_limit == null ? 'req∞' : ('req ' + k.request_limit));
         tr.appendChild(el('td', null, (k.enabled === false ? '停用 · ' : '') + lim));
@@ -413,6 +509,10 @@
           if (r === null) return;
           const exp = prompt('过期 Unix 秒（空=永不过期, 0=清除）', k.expires_at == null ? '' : String(k.expires_at));
           if (exp === null) return;
+          const tags = prompt('标签（逗号分隔，空=无）', (k.tags || []).join(','));
+          if (tags === null) return;
+          const sid = prompt('归属销售 id（空=无）可选: ' + salesList.map((s) => s.id).join(', '), k.sales_id || '');
+          if (sid === null) return;
           try {
             await api('/admin/api/keys/' + k.index, {
               method: 'POST',
@@ -422,6 +522,8 @@
                 token_limit: t.trim() === '' ? null : Number(t),
                 request_limit: r.trim() === '' ? null : Number(r),
                 expires_at: exp.trim() === '' ? null : (Number(exp) === 0 ? null : Number(exp)),
+                tags: splitTags(tags),
+                sales_id: sid.trim() === '' ? null : sid.trim(),
               }),
             });
             toast('key-msg', '已保存');
@@ -533,9 +635,12 @@
             token_limit: tlim === '' ? null : Number(tlim),
             request_limit: rlim === '' ? null : Number(rlim),
             expires_at: exp,
+            tags: splitTags(document.getElementById('f-key-tags').value),
+            sales_id: document.getElementById('f-key-sales').value || null,
           }),
         });
         document.getElementById('f-key').value = '';
+        document.getElementById('f-key-tags').value = '';
         document.getElementById('f-key-desc').value = '';
         document.getElementById('f-key-exp').value = '';
         toast('key-msg', '已追加并写盘');
@@ -668,6 +773,177 @@
       toast('acc-msg', '批量删除完成: ' + ids.length + ' 个');
       await loadAll();
     });
+    // ===================== 计费 =====================
+    let salesList = [];
+    function salesName(id) { const s = salesList.find((x) => x.id === id); return s ? (s.name || s.id) : id; }
+    function splitTags(s) { return (s || '').split(/[,，]/).map((x) => x.trim()).filter(Boolean); }
+    function fmtN(n) { return Number(n || 0).toLocaleString('en-US'); }
+    function localDate(d) { const p = (n) => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
+    let billTab = 'summary';
+    let billPage = 0;
+    const BILL_PAGE = 50;
+
+    document.querySelectorAll('#billing-panel .tabs button').forEach((b) => {
+      b.addEventListener('click', () => {
+        billTab = b.dataset.tab;
+        document.querySelectorAll('#billing-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
+        ['summary', 'records', 'pricing'].forEach((t) => { document.getElementById('bill-tab-' + t).style.display = t === billTab ? '' : 'none'; });
+        document.getElementById('bill-filter').style.display = billTab === 'pricing' ? 'none' : '';
+        if (billTab === 'pricing') loadPricing().catch((e) => toast('pr-msg', e.message, true));
+        else loadBilling().catch((e) => toast('bill-msg', e.message, true));
+      });
+    });
+
+    function billQuery() {
+      const q = new URLSearchParams();
+      const g = (id) => document.getElementById(id).value.trim();
+      if (g('bf-from')) q.set('from', g('bf-from'));
+      if (g('bf-to')) q.set('to', g('bf-to'));
+      if (g('bf-key')) q.set('key', g('bf-key'));
+      if (g('bf-sales')) q.set('sales', g('bf-sales'));
+      if (g('bf-tag')) q.set('tag', g('bf-tag'));
+      if (g('bf-model')) q.set('model', g('bf-model'));
+      if (g('bf-status')) q.set('status', g('bf-status'));
+      if (g('bf-q')) q.set('q', g('bf-q'));
+      if (document.getElementById('bf-unpriced').checked) q.set('unpriced', '1');
+      return q;
+    }
+
+    async function loadBilling() {
+      if (billTab === 'summary') {
+        const q = billQuery(); q.set('group', document.getElementById('bf-group').value);
+        const d = await api('/admin/api/billing/summary?' + q.toString());
+        const t = d.total || {};
+        document.getElementById('bk-req').textContent = fmtN(t.requests);
+        document.getElementById('bk-in').textContent = fmtN(t.input_tokens);
+        document.getElementById('bk-out').textContent = fmtN(t.output_tokens);
+        document.getElementById('bk-cost').textContent = t.cost || '0.00';
+        document.getElementById('bk-comm').textContent = t.commission || '0.00';
+        document.getElementById('bk-cur').textContent = d.currency ? '(' + d.currency + ')' : '';
+        const body = document.getElementById('bill-sum-body');
+        body.replaceChildren();
+        if (!(d.rows || []).length) {
+          const tr = el('tr'); const td = el('td', { colspan: '10' }, '无数据'); td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
+        }
+        (d.rows || []).forEach((r) => {
+          const tr = el('tr');
+          let g = r.group;
+          if (d.group === 'key') g = (r.key_prefix || '') + '… ' + (r.key_name || '');
+          if (d.group === 'sales') g = r.group ? (r.group + (r.sales_name ? ' / ' + r.sales_name : '')) : '(未归属)';
+          if (g === '') g = '(空)';
+          tr.appendChild(el('td', null, g));
+          tr.appendChild(el('td', null, fmtN(r.requests)));
+          tr.appendChild(el('td', null, fmtN(r.ok)));
+          tr.appendChild(el('td', null, fmtN(r.input_tokens)));
+          tr.appendChild(el('td', null, fmtN(r.output_tokens)));
+          tr.appendChild(el('td', { class: 'money' }, r.cost));
+          tr.appendChild(el('td', { class: 'money' }, r.commission));
+          const up = el('td', null, String(r.unpriced || 0)); if (r.unpriced) up.className = 'bad';
+          tr.appendChild(up);
+          tr.appendChild(el('td', null, r.first || ''));
+          tr.appendChild(el('td', null, r.last || ''));
+          body.appendChild(tr);
+        });
+        toast('bill-msg', '时区偏移 ' + (d.tz_offset_minutes / 60) + 'h · ' + (d.rows || []).length + ' 行');
+      } else if (billTab === 'records') {
+        const q = billQuery(); q.set('limit', String(BILL_PAGE)); q.set('offset', String(billPage * BILL_PAGE));
+        const d = await api('/admin/api/billing/records?' + q.toString());
+        const body = document.getElementById('bill-rec-body');
+        body.replaceChildren();
+        if (!(d.rows || []).length) {
+          const tr = el('tr'); const td = el('td', { colspan: '13' }, '无数据'); td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
+        }
+        (d.rows || []).forEach((r) => {
+          const tr = el('tr');
+          tr.appendChild(el('td', null, r.ts));
+          tr.appendChild(el('td', { title: r.req_id }, r.req_id.slice(0, 14) + '…'));
+          tr.appendChild(el('td', { title: r.key_hash }, r.key_prefix + '… ' + (r.key_name || '')));
+          tr.appendChild(el('td', null, r.sales_id ? salesName(r.sales_id) + ' ' + (r.commission_bps / 100) + '%' : '—'));
+          tr.appendChild(el('td', null, r.model));
+          tr.appendChild(el('td', null, r.account));
+          tr.appendChild(el('td', null, fmtN(r.input_tokens) + ' / ' + fmtN(r.output_tokens)));
+          const pr = el('td', { class: 'money' }, r.priced ? (r.input_price_per_m + ' / ' + r.output_price_per_m) : '未定价');
+          if (!r.priced) pr.className = 'money bad';
+          tr.appendChild(pr);
+          tr.appendChild(el('td', { class: 'money' }, r.cost));
+          tr.appendChild(el('td', { class: 'money' }, r.commission));
+          const st = el('td', null, String(r.status) + (r.stream ? ' 流' : '')); st.className = r.status === 200 ? 'ok' : 'bad';
+          tr.appendChild(st);
+          tr.appendChild(el('td', null, r.latency_ms + 'ms'));
+          const tg = el('td'); (r.tags || []).forEach((t) => tg.appendChild(el('span', { class: 'tag' }, t)));
+          tr.appendChild(tg);
+          body.appendChild(tr);
+        });
+        const pager = document.getElementById('bill-pager');
+        pager.replaceChildren();
+        const pages = Math.max(1, Math.ceil((d.total || 0) / BILL_PAGE));
+        const prev = el('button', { type: 'button' }, '‹'); prev.disabled = billPage === 0;
+        prev.addEventListener('click', () => { billPage--; loadBilling(); });
+        const next = el('button', { type: 'button' }, '›'); next.disabled = billPage >= pages - 1;
+        next.addEventListener('click', () => { billPage++; loadBilling(); });
+        pager.appendChild(prev);
+        pager.appendChild(el('span', { class: 'page-info' }, (billPage + 1) + ' / ' + pages + ' 页 · 共 ' + fmtN(d.total) + ' 条'));
+        pager.appendChild(next);
+        toast('bill-msg', '');
+      }
+    }
+
+    async function loadBillingMeta() {
+      try {
+        const [pr, tg] = await Promise.all([api('/admin/api/billing/pricing'), api('/admin/api/billing/tags')]);
+        salesList = pr.sales || [];
+        const fill = (id, items, label, keepBlank) => {
+          const sel = document.getElementById(id); const cur = sel.value;
+          sel.replaceChildren(el('option', { value: '' }, keepBlank));
+          items.forEach((it) => sel.appendChild(el('option', { value: typeof it === 'string' ? it : it.id }, label(it))));
+          sel.value = cur;
+        };
+        fill('bf-sales', salesList, (s) => s.id + (s.name ? ' / ' + s.name : ''), '全部');
+        fill('f-key-sales', salesList, (s) => s.id + (s.name ? ' / ' + s.name : ''), '（无）');
+        fill('bf-tag', tg.tags || [], (t) => t, '全部');
+      } catch (e) { /* 面板可能未鉴权 */ }
+    }
+
+    async function loadPricing() {
+      const d = await api('/admin/api/billing/pricing');
+      salesList = d.sales || [];
+      document.getElementById('pr-currency').value = d.currency || 'USD';
+      document.getElementById('pr-tz').value = d.tz_offset_minutes;
+      document.getElementById('pr-bps').value = d.default_commission_bps;
+      document.getElementById('pr-reject').checked = !!d.reject_unpriced;
+      document.getElementById('pr-prices').value = JSON.stringify(d.prices || [], null, 2);
+      document.getElementById('pr-sales').value = JSON.stringify(d.sales || [], null, 2);
+      try {
+        const st = await api('/admin/api/billing/stats');
+        document.getElementById('bill-writer').textContent = '账本 ' + st.db_file + ' · ' + (st.db_bytes / 1024 / 1024).toFixed(1) + ' MB · 已写 ' + fmtN(st.written) + ' · 待写 ' + st.pending + ' · 重复忽略 ' + st.ignored_duplicates + ' · 失败 ' + st.failed;
+      } catch (e) {}
+    }
+    document.getElementById('pr-save').addEventListener('click', async () => {
+      let prices, sales;
+      try { prices = JSON.parse(document.getElementById('pr-prices').value || '[]'); } catch (e) { toast('pr-msg', '价格表 JSON 无效: ' + e.message, true); return; }
+      try { sales = JSON.parse(document.getElementById('pr-sales').value || '[]'); } catch (e) { toast('pr-msg', '销售表 JSON 无效: ' + e.message, true); return; }
+      try {
+        await api('/admin/api/billing/pricing', { method: 'POST', body: JSON.stringify({
+          currency: document.getElementById('pr-currency').value,
+          tz_offset_minutes: Number(document.getElementById('pr-tz').value),
+          default_commission_bps: Number(document.getElementById('pr-bps').value),
+          reject_unpriced: document.getElementById('pr-reject').checked,
+          prices, sales,
+        }) });
+        toast('pr-msg', '已保存，立即对新请求生效');
+        await loadPricing(); await loadBillingMeta();
+      } catch (e) { toast('pr-msg', e.message, true); }
+    });
+    document.getElementById('bill-filter').addEventListener('submit', (e) => { e.preventDefault(); billPage = 0; loadBilling().catch((er) => toast('bill-msg', er.message, true)); });
+    document.getElementById('bf-today').addEventListener('click', () => { const d = localDate(new Date()); document.getElementById('bf-from').value = d; document.getElementById('bf-to').value = d; billPage = 0; loadBilling(); });
+    document.getElementById('bf-yesterday').addEventListener('click', () => { const d = localDate(new Date(Date.now() - 86400000)); document.getElementById('bf-from').value = d; document.getElementById('bf-to').value = d; billPage = 0; loadBilling(); });
+    document.getElementById('bf-month').addEventListener('click', () => { const n = new Date(); document.getElementById('bf-from').value = localDate(new Date(n.getFullYear(), n.getMonth(), 1)); document.getElementById('bf-to').value = localDate(n); billPage = 0; loadBilling(); });
+    document.getElementById('bf-export').addEventListener('click', () => {
+      const q = billQuery(); const tok = new URLSearchParams(location.search).get('token'); if (tok) q.set('token', tok);
+      window.open('/admin/api/billing/export?' + q.toString(), '_blank');
+    });
+    loadBillingMeta().then(() => loadBilling()).catch(() => {});
+
     loadAll().catch((e) => toast('acc-msg', e.message, true));
     setInterval(() => { loadAll().catch(() => {}); }, 4000);
   </script>

@@ -225,7 +225,7 @@ impl CursorClient {
             let text = String::from_utf8_lossy(&body_bytes);
             return Err(CursorError::Http(
                 status,
-                text[..200.min(text.len())].to_string(),
+                text.chars().take(200).collect(),
             ));
         }
         if let Ok(v) = serde_json::from_slice::<Value>(&body_bytes) {
@@ -279,7 +279,8 @@ impl CursorClient {
 }
 
 pub struct KeyUsageStore {
-    tokens: parking_lot::Mutex<HashMap<String, AtomicPair>>,
+    /// 无锁分片 map; 内部计数原子更新, 请求路径不再有全局互斥锁
+    tokens: dashmap::DashMap<String, AtomicPair>,
 }
 
 struct AtomicPair {
@@ -296,7 +297,7 @@ struct UsageEntry {
 impl KeyUsageStore {
     pub fn new() -> Self {
         Self {
-            tokens: parking_lot::Mutex::new(HashMap::new()),
+            tokens: dashmap::DashMap::new(),
         }
     }
 
@@ -313,9 +314,8 @@ impl KeyUsageStore {
             tracing::warn!(event = "usage_load", "usage.json malformed, ignoring");
             return;
         };
-        let mut inner = self.tokens.lock();
         for (k, v) in map {
-            inner.insert(
+            self.tokens.insert(
                 k,
                 AtomicPair {
                     tokens: AtomicU64::new(v.tokens),
@@ -323,25 +323,24 @@ impl KeyUsageStore {
                 },
             );
         }
-        tracing::info!(event = "usage_load", keys = inner.len(), "usage restored from disk");
+        tracing::info!(event = "usage_load", keys = self.tokens.len(), "usage restored from disk");
     }
 
     /// 落盘到 usage.json (原子写)
     pub fn save_to_disk(&self) {
-        let inner = self.tokens.lock();
-        let map: HashMap<String, UsageEntry> = inner
+        let map: HashMap<String, UsageEntry> = self
+            .tokens
             .iter()
-            .map(|(k, p)| {
+            .map(|r| {
                 (
-                    k.clone(),
+                    r.key().clone(),
                     UsageEntry {
-                        tokens: p.tokens.load(Ordering::Relaxed),
-                        requests: p.requests.load(Ordering::Relaxed),
+                        tokens: r.tokens.load(Ordering::Relaxed),
+                        requests: r.requests.load(Ordering::Relaxed),
                     },
                 )
             })
             .collect();
-        drop(inner);
         if let Ok(text) = serde_json::to_string_pretty(&map) {
             if let Err(e) = crate::config::atomic_write(&crate::config::usage_path(), &text) {
                 tracing::warn!(event = "usage_save", error = %e, "usage persist failed");
@@ -350,8 +349,13 @@ impl KeyUsageStore {
     }
 
     pub fn add(&self, key: &str, tokens: u64) {
-        let mut map = self.tokens.lock();
-        let entry = map.entry(key.to_string()).or_insert_with(|| AtomicPair {
+        // 快路径: key 已存在时只读分片锁 + 原子加, 无分配
+        if let Some(p) = self.tokens.get(key) {
+            p.tokens.fetch_add(tokens, Ordering::Relaxed);
+            p.requests.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let entry = self.tokens.entry(key.to_string()).or_insert_with(|| AtomicPair {
             tokens: AtomicU64::new(0),
             requests: AtomicU64::new(0),
         });
@@ -360,8 +364,7 @@ impl KeyUsageStore {
     }
 
     pub fn snapshot(&self, key: &str) -> (u64, u64) {
-        let map = self.tokens.lock();
-        match map.get(key) {
+        match self.tokens.get(key) {
             Some(p) => (
                 p.tokens.load(Ordering::Relaxed),
                 p.requests.load(Ordering::Relaxed),
@@ -372,20 +375,20 @@ impl KeyUsageStore {
 
     /// 全量快照 (用于 Prometheus 按 key 导出)
     pub fn snapshot_all(&self) -> Vec<(String, u64, u64)> {
-        let map = self.tokens.lock();
-        map.iter()
-            .map(|(k, p)| {
+        self.tokens
+            .iter()
+            .map(|r| {
                 (
-                    k.clone(),
-                    p.tokens.load(Ordering::Relaxed),
-                    p.requests.load(Ordering::Relaxed),
+                    r.key().clone(),
+                    r.tokens.load(Ordering::Relaxed),
+                    r.requests.load(Ordering::Relaxed),
                 )
             })
             .collect()
     }
 
     pub fn remove(&self, key: &str) {
-        self.tokens.lock().remove(key);
+        self.tokens.remove(key);
     }
 }
 
@@ -401,6 +404,8 @@ pub fn key_public(index: usize, rec: &ApiKeyRecord, used_tokens: u64, used_reque
         "expires_at": rec.expires_at,
         "token_limit": rec.token_limit,
         "request_limit": rec.request_limit,
+        "tags": rec.tags,
+        "sales_id": rec.sales_id,
         "used_tokens": used_tokens,
         "used_requests": used_requests,
         "tokens_remaining": rec.token_limit.map(|lim| lim.saturating_sub(used_tokens)),
@@ -476,6 +481,8 @@ mod tests {
             token_limit: Some(100),
             request_limit: Some(2),
             expires_at: None,
+            tags: vec![],
+            sales_id: None,
         };
         assert!(check_key_limits(&rec, 10, 1).is_ok());
         assert!(check_key_limits(&rec, 100, 1).unwrap_err().contains("token"));
@@ -495,6 +502,8 @@ mod tests {
             token_limit: None,
             request_limit: None,
             expires_at: Some(1_000_000_000), // 2001 年, 已过期
+            tags: vec![],
+            sales_id: None,
         };
         assert!(rec.is_expired());
         assert!(check_key_limits(&rec, 0, 0).unwrap_err().contains("expired"));

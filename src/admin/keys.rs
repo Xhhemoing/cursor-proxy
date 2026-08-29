@@ -33,6 +33,26 @@ pub struct AddKeyBody {
     pub request_limit: Option<u64>,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub sales_id: Option<String>,
+}
+
+/// 标签规范化: 去空白/去空/去重, 最多 20 个, 每个 ≤ 32 字符
+pub fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t: String = t.trim().chars().take(32).collect();
+        if t.is_empty() || out.contains(&t) {
+            continue;
+        }
+        out.push(t);
+        if out.len() >= 20 {
+            break;
+        }
+    }
+    out
 }
 
 /// 校验自定义 key 强度: >=16 字符, 非纯数字, 建议 sk- 前缀 (警告不拒绝)
@@ -63,6 +83,8 @@ pub async fn api_keys_add(
         token_limit: body.token_limit,
         request_limit: body.request_limit,
         expires_at: body.expires_at,
+        tags: normalize_tags(body.tags),
+        sales_id: body.sales_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
     };
     let snapshot = {
         let mut config = state.config.lock();
@@ -102,6 +124,9 @@ pub struct PatchKeyBody {
     pub token_limit: Option<Option<u64>>,
     pub request_limit: Option<Option<u64>>,
     pub expires_at: Option<Option<i64>>,
+    pub tags: Option<Vec<String>>,
+    /// Some(None) = 清除归属
+    pub sales_id: Option<Option<String>>,
 }
 
 /// POST /admin/api/keys/:index — 改名/描述/限额/启用/过期
@@ -137,6 +162,12 @@ pub async fn api_keys_patch(
         if let Some(exp) = body.expires_at {
             // 前端约定: 0 = 清除过期时间
             rec.expires_at = exp.filter(|&v| v > 0);
+        }
+        if let Some(tags) = body.tags {
+            rec.tags = normalize_tags(tags);
+        }
+        if let Some(sid) = body.sales_id {
+            rec.sales_id = sid.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         }
         let prefix: String = rec.key.chars().take(8).collect();
         (config.clone(), prefix)
@@ -227,6 +258,8 @@ mod tests {
             default_model: "grok-4.6".into(),
             max_concurrency_per_account: 8,
             admin_token: String::new(),
+            acquire_wait_ms: 0,
+            billing: crate::config::BillingConfig::default(),
         };
         let usage = quota::KeyUsageStore::new();
         usage.add("sk-secret-1234567", 42);
