@@ -410,8 +410,10 @@ async fn models_handler(
 async fn chat_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(body): Json<Value>,
 ) -> Result<Response, Response> {
+    let client_ip = addr.ip().to_string();
     let config = state.config.lock().clone();
     let used_key = check_auth(&headers, &config)?;
     if !used_key.is_empty() {
@@ -577,6 +579,7 @@ async fn chat_handler(
                 "latency_ms": latency,
                 "status": 200,
                 "stream": true,
+                "client_ip": client_ip,
             });
             info!(event = "request", %log_entry, "request completed");
             log_buf.push(log_entry);
@@ -612,6 +615,7 @@ async fn chat_handler(
                     "latency_ms": latency,
                     "status": 200,
                     "stream": false,
+                    "client_ip": client_ip,
                 });
                 info!(event = "request", %log_entry, "request completed");
                 state.log_buffer.push(log_entry);
