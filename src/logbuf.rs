@@ -1,14 +1,15 @@
 //! 内存日志 ring buffer: 固定容量, 线程安全, 供管理面板读取.
-//! 同时支持 JSONL 持久化到磁盘.
+//! 异步批量 JSONL 持久化到磁盘.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use tokio::sync::mpsc;
 
 pub struct LogBuffer {
     entries: Mutex<VecDeque<serde_json::Value>>,
     capacity: usize,
-    /// JSONL 持久化文件路径，None 表示不持久化
-    persist_path: Option<std::path::PathBuf>,
+    /// 异步持久化通道
+    persist_tx: Option<mpsc::Sender<serde_json::Value>>,
 }
 
 impl LogBuffer {
@@ -16,27 +17,27 @@ impl LogBuffer {
         Self {
             entries: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
-            persist_path: None,
+            persist_tx: None,
         }
     }
 
+    /// 创建带异步持久化的 LogBuffer
+    /// 后台任务每 100 条或 1 秒批量写一次磁盘
     pub fn with_persist(capacity: usize, path: std::path::PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel(1000);
+        // 启动异步落盘任务
+        tokio::spawn(persist_worker(rx, path));
         Self {
             entries: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
-            persist_path: Some(path),
+            persist_tx: Some(tx),
         }
     }
 
     pub fn push(&self, entry: serde_json::Value) {
-        // 持久化到 JSONL
-        if let Some(ref path) = self.persist_path {
-            let line = serde_json::to_string(&entry).unwrap_or_default() + "\n";
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        // 异步发送到持久化通道（非阻塞）
+        if let Some(ref tx) = self.persist_tx {
+            let _ = tx.try_send(entry.clone());
         }
 
         let mut entries = self.entries.lock().unwrap();
@@ -65,6 +66,56 @@ impl LogBuffer {
 
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
+    }
+}
+
+/// 异步批量落盘 worker
+async fn persist_worker(mut rx: mpsc::Receiver<serde_json::Value>, path: std::path::PathBuf) {
+    use tokio::io::AsyncWriteExt;
+
+    let mut batch = Vec::with_capacity(100);
+    let mut file = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(event = "log_persist_error", error = %e, "failed to open log file");
+            return;
+        }
+    };
+
+    loop {
+        // 批量接收，最多 100 条或超时 1 秒
+        batch.clear();
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rx.recv_many(&mut batch, 100),
+        )
+        .await
+        .unwrap_or(0);
+
+        if n == 0 && batch.is_empty() {
+            // 超时且无数据，flush 后等待
+            let _ = file.flush().await;
+            continue;
+        }
+
+        // 批量写入
+        for entry in batch.drain(..) {
+            let line = serde_json::to_string(&entry).unwrap_or_default() + "\n";
+            if let Err(e) = file.write_all(line.as_bytes()).await {
+                tracing::error!(event = "log_persist_error", error = %e, "failed to write log");
+                break;
+            }
+        }
+
+        // 批量 flush
+        if let Err(e) = file.flush().await {
+            tracing::error!(event = "log_persist_error", error = %e, "failed to flush log");
+        }
     }
 }
 

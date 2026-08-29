@@ -46,7 +46,7 @@ use crate::pool::AccountPool;
 use crate::translate::{upstream_to_openai_stream, upstream_to_openai_full, openai_error};
 
 pub struct AppState {
-    config: parking_lot::Mutex<AppConfig>,
+    config: arc_swap::ArcSwap<AppConfig>,
     pool: AccountPool,
     cursor: CursorClient,
     log_buffer: std::sync::Arc<logbuf::LogBuffer>,
@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = Arc::new(AppState {
-        config: parking_lot::Mutex::new(config.clone()),
+        config: arc_swap::ArcSwap::from_pointee(config.clone()),
         pool,
         cursor,
         log_buffer: std::sync::Arc::new(logbuf::LogBuffer::with_persist(
@@ -178,8 +178,21 @@ async fn main() -> anyhow::Result<()> {
                 
                 info!(event = "quota_probe", count = to_probe.len(), "probing cooling/exhausted accounts");
                 
-                for (id, acc) in to_probe {
-                    let snap = state.cursor.probe_quota(&acc.access_token, &acc.machine_id).await;
+                // 并发探测，限制并发数避免打爆上游
+                use futures_util::stream::{self, StreamExt};
+                let probe_results: Vec<_> = stream::iter(to_probe)
+                    .map(|(id, acc)| {
+                        let state = state.clone();
+                        async move {
+                            let snap = state.cursor.probe_quota(&acc.access_token, &acc.machine_id).await;
+                            (id, snap)
+                        }
+                    })
+                    .buffer_unordered(50) // 并发 50 个
+                    .collect()
+                    .await;
+                
+                for (id, snap) in probe_results {
                     let has_quota = snap.has_available_usage == Some(true);
                     let error = snap.error.is_some();
                     
@@ -305,7 +318,7 @@ async fn watch_config(state: Arc<AppState>) -> notify::Result<()> {
                 }
                 match AppConfig::load() {
                     Ok(new_cfg) => {
-                        *state.config.lock() = new_cfg;
+                        state.config.store(std::sync::Arc::new(new_cfg));
                         info!(event = "config_reload", "config.json reloaded");
                     }
                     Err(e) => {
@@ -398,7 +411,7 @@ async fn admin_auth_mw(
             .into_response();
     }
 
-    let config = state.config.lock().clone();
+    let config = state.config.load();
     let expected = if !config.admin_token.is_empty() {
         Some(config.admin_token.clone())
     } else if !config.api_keys.is_empty() {
@@ -442,7 +455,7 @@ async fn models_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, Response> {
-    let config = state.config.lock().clone();
+    let config = state.config.load();
     let _used_key = check_auth(&headers, &config)?;
     Ok(Json(json!({
         "object": "list",
@@ -463,7 +476,7 @@ async fn chat_handler(
     Json(body): Json<Value>,
 ) -> Result<Response, Response> {
     let client_ip = addr.ip().to_string();
-    let config = state.config.lock().clone();
+    let config = state.config.load();
     let used_key = check_auth(&headers, &config)?;
     if !used_key.is_empty() {
         if let Some(rec) = config.api_keys.iter().find(|k| k.key == used_key) {
@@ -562,17 +575,17 @@ async fn chat_handler(
     const MAX_RETRIES: usize = 3;
     let mut last_error = String::new();
     let mut frames_opt = None;
+    let mut current_permit = Some(_permit);
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
-            // 重新获取账号（排除当前失败的账号）
-            let retry_account = match state.pool.acquire().await {
-                Ok((acc, permit)) => {
-                    drop(permit);
-                    acc
-                }
+            // 释放旧 permit，获取新账号
+            drop(current_permit.take());
+            let (retry_account, new_permit) = match state.pool.acquire().await {
+                Ok((acc, permit)) => (acc, permit),
                 Err(_) => break, // 无可用账号，退出重试
             };
+            current_permit = Some(new_permit);
             // 更新账号信息用于重试
             account.access_token = retry_account.access_token;
             account.machine_id = retry_account.machine_id;

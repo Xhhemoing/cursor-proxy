@@ -12,6 +12,9 @@ use tokio::sync::Semaphore;
 use crate::config::Account;
 use crate::quota::QuotaSnapshot;
 
+/// 全局会话索引: session_id -> account_id
+type SessionIndex = Arc<DashMap<String, String>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcquireError {
     Empty,
@@ -28,8 +31,6 @@ pub struct Slot {
     account: Account,
     sem: Arc<Semaphore>,
     cooldown_until: parking_lot::Mutex<Option<Instant>>,
-    /// 会话粘性: 同一 session 优先路由到此账号
-    sticky_sessions: DashMap<String, Instant>,
 }
 
 impl Slot {
@@ -63,12 +64,16 @@ pub struct AccountPool {
     rr_index: Arc<AtomicUsize>,
     /// 有序 id 列表（用于轮询，变更时重建）
     ordered_ids: Arc<parking_lot::RwLock<Vec<String>>>,
+    /// 可用账号列表（缓存，避免每次遍历全部）
+    available_ids: Arc<parking_lot::RwLock<Vec<String>>>,
     /// 账号开关状态
     disabled: Arc<DashMap<String, bool>>,
     /// 原子化统计
     stats: Arc<DashMap<String, AccountStats>>,
     /// 额度快照
     quotas: Arc<DashMap<String, QuotaSnapshot>>,
+    /// 全局会话索引: session_id -> account_id（避免遍历 slot 查找）
+    session_index: SessionIndex,
     max_concurrency: usize,
 }
 
@@ -138,7 +143,6 @@ impl AccountPool {
                     account: acc,
                     sem: Arc::new(Semaphore::new(max_concurrency)),
                     cooldown_until: parking_lot::Mutex::new(None),
-                    sticky_sessions: DashMap::new(),
                 }),
             );
             ordered.push(id);
@@ -148,9 +152,11 @@ impl AccountPool {
             slots: Arc::new(slots),
             rr_index: Arc::new(AtomicUsize::new(0)),
             ordered_ids: Arc::new(parking_lot::RwLock::new(ordered)),
+            available_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             disabled: Arc::new(disabled),
             stats: Arc::new(stats),
             quotas: Arc::new(quotas),
+            session_index: Arc::new(DashMap::new()),
             max_concurrency,
         }
     }
@@ -164,6 +170,23 @@ impl AccountPool {
         let mut ids: Vec<String> = self.slots.iter().map(|r| r.key().clone()).collect();
         ids.sort();
         *self.ordered_ids.write() = ids;
+        self.rebuild_available_ids();
+    }
+
+    /// 重建可用账号列表（启用 + 非冷却 + 额度正常）
+    fn rebuild_available_ids(&self) {
+        let ids = self.ordered_ids.read();
+        let available: Vec<String> = ids
+            .iter()
+            .filter(|id| {
+                let enabled = !self.disabled.get(*id).map(|v| *v).unwrap_or(false);
+                let cooling = self.slots.get(*id).map(|s| s.is_cooling_down()).unwrap_or(false);
+                let quota_ok = !self.quota_blocks(id);
+                enabled && !cooling && quota_ok
+            })
+            .cloned()
+            .collect();
+        *self.available_ids.write() = available;
     }
 
     pub fn replace_accounts(&self, accounts: Vec<Account>) {
@@ -187,7 +210,6 @@ impl AccountPool {
                         account: acc,
                         sem: Arc::new(Semaphore::new(self.max_concurrency)),
                         cooldown_until: parking_lot::Mutex::new(None),
-                        sticky_sessions: DashMap::new(),
                     }),
                 );
             }
@@ -205,6 +227,8 @@ impl AccountPool {
             self.stats.remove(&id);
             self.quotas.remove(&id);
         }
+        // 清理指向已删除账号的会话索引
+        self.session_index.retain(|_, v| seen.contains(v));
         self.rebuild_ordered_ids();
     }
 
@@ -237,102 +261,77 @@ impl AccountPool {
     }
 
     fn try_acquire_by_session(&self, session_id: Option<&str>) -> AcquireTry {
-        let ids = self.ordered_ids.read();
-        if ids.is_empty() {
-            return AcquireTry::Empty;
-        }
-
-        // 1. 会话粘性: 检查是否有已绑定的账号
+        // 1. 会话粘性: 通过全局索引 O(1) 查找
         if let Some(sid) = session_id {
-            if let Some(slot) = self.find_sticky_slot(sid) {
-                if self.is_slot_available(&slot) {
-                    if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                        self.stats
-                            .entry(slot.account.id.clone())
-                            .or_default()
-                            .record_request();
-                        return AcquireTry::Got((slot.account.clone(), permit));
-                    }
-                }
-            }
-        }
-
-        // 2. 轮询遍历（无排序，O(n) 但 n 通常 < 100）
-        let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
-        let mut any_enabled = false;
-        let mut fallback: Option<Arc<Slot>> = None;
-
-        for i in 0..ids.len() {
-            let idx = (start + i) % ids.len();
-            let id = &ids[idx];
-            
-            if let Some(slot) = self.slots.get(id) {
-                let enabled = !self.disabled.get(id).map(|v| *v).unwrap_or(false);
-                if enabled {
-                    any_enabled = true;
-                }
-                
-                if self.is_slot_available(&slot) {
-                    // 会话哈希优先
-                    if let Some(sid) = session_id {
-                        let mut hasher = DefaultHasher::new();
-                        sid.hash(&mut hasher);
-                        if (hasher.finish() as usize) % ids.len() == idx {
-                            if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                                slot.sticky_sessions
-                                    .insert(sid.to_string(), Instant::now() + Duration::from_secs(3600));
-                                self.stats
-                                    .entry(slot.account.id.clone())
-                                    .or_default()
-                                    .record_request();
-                                return AcquireTry::Got((slot.account.clone(), permit));
-                            }
+            if let Some(account_id) = self.session_index.get(sid) {
+                if let Some(slot) = self.slots.get(&*account_id) {
+                    if self.is_slot_available(&slot) {
+                        if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
+                            self.stats
+                                .entry(slot.account.id.clone())
+                                .or_default()
+                                .record_request();
+                            return AcquireTry::Got((slot.account.clone(), permit));
                         }
                     }
-                    
-                    // 记录第一个可用作为 fallback
-                    if fallback.is_none() {
-                        fallback = Some(slot.clone());
+                }
+            }
+        }
+
+        // 2. 使用可用账号列表轮询（避免遍历全部账号）
+        let available = self.available_ids.read();
+        if available.is_empty() {
+            // 尝试重建可用列表
+            drop(available);
+            self.rebuild_available_ids();
+            let available = self.available_ids.read();
+            if available.is_empty() {
+                return AcquireTry::Empty;
+            }
+        }
+        let available = self.available_ids.read();
+
+        let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
+        let len = available.len();
+
+        for i in 0..len {
+            let idx = (start + i) % len;
+            let id = &available[idx];
+
+            if let Some(slot) = self.slots.get(id) {
+                // 会话哈希优先（在可用列表中）
+                if let Some(sid) = session_id {
+                    let mut hasher = DefaultHasher::new();
+                    sid.hash(&mut hasher);
+                    if (hasher.finish() as usize) % len == idx {
+                        if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
+                            // 绑定会话到账号
+                            self.session_index.insert(sid.to_string(), id.clone());
+                            self.stats
+                                .entry(slot.account.id.clone())
+                                .or_default()
+                                .record_request();
+                            return AcquireTry::Got((slot.account.clone(), permit));
+                        }
                     }
                 }
-            }
-        }
 
-        // 3. 使用 fallback 或返回 Busy/Empty
-        if let Some(slot) = fallback {
-            if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                if let Some(sid) = session_id {
-                    slot.sticky_sessions
-                        .insert(sid.to_string(), Instant::now() + Duration::from_secs(3600));
-                }
-                self.stats
-                    .entry(slot.account.id.clone())
-                    .or_default()
-                    .record_request();
-                return AcquireTry::Got((slot.account.clone(), permit));
-            }
-        }
-
-        if any_enabled {
-            AcquireTry::Busy
-        } else {
-            AcquireTry::Empty
-        }
-    }
-
-    fn find_sticky_slot(&self, session_id: &str) -> Option<Arc<Slot>> {
-        for entry in self.slots.iter() {
-            let slot = entry.value();
-            if let Some(expiry) = slot.sticky_sessions.get(session_id) {
-                if *expiry > Instant::now() {
-                    return Some(slot.clone());
-                } else {
-                    // 过期清理
-                    slot.sticky_sessions.remove(session_id);
+                // 普通轮询
+                if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
+                    if let Some(sid) = session_id {
+                        self.session_index.insert(sid.to_string(), id.clone());
+                    }
+                    self.stats
+                        .entry(slot.account.id.clone())
+                        .or_default()
+                        .record_request();
+                    return AcquireTry::Got((slot.account.clone(), permit));
                 }
             }
         }
-        None
+
+        // 可用列表非空但全部获取失败 → Busy
+        AcquireTry::Busy
     }
 
     fn is_slot_available(&self, slot: &Arc<Slot>) -> bool {

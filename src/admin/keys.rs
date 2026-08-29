@@ -16,7 +16,7 @@ use crate::AppState;
 
 /// GET /admin/api/keys — API key 列表 (脱敏 + 限额/用量)
 pub async fn api_keys_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let config = state.config.lock();
+    let config = state.config.load();
     Json(redacted_keys(&config, &state.key_usage))
 }
 
@@ -65,7 +65,7 @@ pub async fn api_keys_add(
         expires_at: body.expires_at,
     };
     let snapshot = {
-        let mut config = state.config.lock();
+        let mut config = (**state.config.load()).clone();
         if config.api_keys.iter().any(|k| k.key == key) {
             return (
                 StatusCode::CONFLICT,
@@ -74,17 +74,17 @@ pub async fn api_keys_add(
                 .into_response();
         }
         config.api_keys.push(rec);
-        config.clone()
+        config
     };
     if let Err(e) = config::save_config(&snapshot) {
-        let mut config = state.config.lock();
-        config.api_keys.pop();
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
             .into_response();
     }
+    // 热更新内存配置
+    state.config.store(std::sync::Arc::new(snapshot.clone()));
     let prefix: String = key.chars().take(8).collect();
     state.audit.key_op(
         "create",
@@ -111,7 +111,7 @@ pub async fn api_keys_patch(
     Json(body): Json<PatchKeyBody>,
 ) -> Response {
     let (snapshot, prefix) = {
-        let mut config = state.config.lock();
+        let mut config = (**state.config.load()).clone();
         let Some(rec) = config.api_keys.get_mut(index) else {
             return (
                 StatusCode::NOT_FOUND,
@@ -139,7 +139,7 @@ pub async fn api_keys_patch(
             rec.expires_at = exp.filter(|&v| v > 0);
         }
         let prefix: String = rec.key.chars().take(8).collect();
-        (config.clone(), prefix)
+        (config, prefix)
     };
     if let Err(e) = config::save_config(&snapshot) {
         return (
@@ -148,6 +148,7 @@ pub async fn api_keys_patch(
         )
             .into_response();
     }
+    state.config.store(std::sync::Arc::new(snapshot.clone()));
     state.audit.key_op("patch", &prefix, json!({"index": index}));
     Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
 }
@@ -158,7 +159,7 @@ pub async fn api_keys_delete(
     Path(index): Path<usize>,
 ) -> Response {
     let removed = {
-        let config = state.config.lock();
+        let config = state.config.load();
         if index >= config.api_keys.len() {
             return (
                 StatusCode::NOT_FOUND,
@@ -169,8 +170,7 @@ pub async fn api_keys_delete(
         config.api_keys[index].key.clone()
     };
     let snapshot = {
-        let config = state.config.lock();
-        let mut next = config.clone();
+        let mut next = (**state.config.load()).clone();
         next.api_keys.remove(index);
         next
     };
@@ -181,7 +181,7 @@ pub async fn api_keys_delete(
         )
             .into_response();
     }
-    *state.config.lock() = snapshot.clone();
+    state.config.store(std::sync::Arc::new(snapshot.clone()));
     state.key_usage.remove(&removed);
     let prefix: String = removed.chars().take(8).collect();
     state.audit.key_op("delete", &prefix, json!({"index": index}));

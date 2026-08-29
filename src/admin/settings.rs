@@ -45,7 +45,7 @@ pub async fn api_logs_recent(
 
 /// GET /admin/api/settings
 pub async fn api_settings_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let config = state.config.lock();
+    let config = state.config.load();
     let mut view = config.public_view();
     if let Some(obj) = view.as_object_mut() {
         obj.insert("upstreams".into(), json!(state.upstreams.keys().collect::<Vec<_>>()));
@@ -109,7 +109,7 @@ pub async fn api_settings_patch(
     }
 
     let (snapshot, restart_required, changed) = {
-        let mut config = state.config.lock();
+        let mut config = (**state.config.load()).clone();
         let mut changed: Vec<&str> = Vec::new();
         if let Some(model) = body.default_model {
             config.default_model = model.trim().to_string();
@@ -117,20 +117,14 @@ pub async fn api_settings_patch(
         }
         let mut restart = Vec::new();
         if let Some(t) = body.timeout_s {
-            if config.timeout_s != t {
-                config.timeout_s = t;
-                restart.push("timeout_s");
-                changed.push("timeout_s");
-            }
+            config.timeout_s = t;
+            restart.push("timeout_s");
         }
         if let Some(c) = body.max_concurrency_per_account {
-            if config.max_concurrency_per_account != c {
-                config.max_concurrency_per_account = c;
-                restart.push("max_concurrency_per_account");
-                changed.push("max_concurrency_per_account");
-            }
+            config.max_concurrency_per_account = c;
+            restart.push("max_concurrency_per_account");
         }
-        (config.clone(), restart, changed)
+        (config, restart, changed)
     };
 
     if let Err(e) = config::save_config(&snapshot) {
@@ -140,7 +134,7 @@ pub async fn api_settings_patch(
         )
             .into_response();
     }
-
+    state.config.store(std::sync::Arc::new(snapshot.clone()));
     state.audit.settings_op(&changed);
 
     Json(json!({
