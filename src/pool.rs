@@ -175,9 +175,10 @@ impl AccountPool {
             self.disabled.entry(id.clone()).or_insert(!acc.enabled);
 
             if let Some(mut slot) = self.slots.get_mut(&id) {
-                // 更新现有账号信息，保留冷却和会话状态
+                // 更新现有账号信息，保留冷却和会话状态，但重建 semaphore 以应用新的 max_concurrency
                 if let Some(s) = Arc::get_mut(&mut slot) {
                     s.account = acc;
+                    s.sem = Arc::new(Semaphore::new(self.max_concurrency));
                 }
             } else {
                 self.slots.insert(

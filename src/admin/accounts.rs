@@ -244,17 +244,80 @@ pub async fn api_accounts_import(
     let accounts: Vec<Account> = match serde_json::from_str::<Vec<Account>>(&body) {
         Ok(accs) => accs,
         Err(_) => {
-            // 尝试 CSV 格式: id,access_token,machine_id,refresh_token,enabled
+            // 尝试 CSV 格式，自动检测列名
+            let mut lines = body.lines();
+            let header = match lines.next() {
+                Some(h) => h.to_lowercase(),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "empty CSV"})),
+                    )
+                        .into_response();
+                }
+            };
+            let cols: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
+
+            // 检测列位置
+            let id_idx = cols.iter().position(|c| *c == "id" || *c == "account_id");
+            let token_idx = cols.iter().position(|c| *c == "access_token" || *c == "token");
+            let mid_idx = cols.iter().position(|c| *c == "machine_id" || *c == "machine");
+            let ref_idx = cols.iter().position(|c| *c == "refresh_token" || *c == "refresh");
+            let enabled_idx = cols.iter().position(|c| *c == "enabled" || *c == "disabled");
+
+            // 如果没有检测到列名，回退到默认顺序: id,access_token,machine_id,refresh_token,enabled
+            let (id_idx, token_idx, mid_idx, ref_idx, enabled_idx) = match (id_idx, token_idx, mid_idx) {
+                (Some(i), Some(t), Some(m)) => (i, t, m, ref_idx, enabled_idx),
+                _ => (0, 1, 2, Some(3), Some(4)),
+            };
+
             let mut accs = Vec::new();
-            for line in body.lines().skip(1) { // 跳过标题行
+            for line in lines {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
                 let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() >= 3 {
+                if parts.len() <= id_idx.max(token_idx).max(mid_idx) {
+                    continue;
+                }
+
+                let id = parts.get(id_idx).map(|s| s.trim().to_string()).unwrap_or_default();
+                let access_token = parts.get(token_idx).map(|s| s.trim().to_string()).unwrap_or_default();
+                let machine_id = parts.get(mid_idx).map(|s| s.trim().to_string()).unwrap_or_default();
+                let refresh_token = ref_idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string()).unwrap_or_default();
+
+                // enabled 列处理: 支持 "true"/"false" 或 "disabled" 列（true 表示禁用）
+                let enabled = match enabled_idx.and_then(|i| parts.get(i)) {
+                    Some(s) => {
+                        let s = s.trim().to_lowercase();
+                        if s == "true" || s == "1" || s == "yes" {
+                            // 如果列名是 disabled，则 true 表示禁用
+                            if cols.get(enabled_idx.unwrap()) == Some(&"disabled") {
+                                false
+                            } else {
+                                true
+                            }
+                        } else if s == "false" || s == "0" || s == "no" {
+                            if cols.get(enabled_idx.unwrap()) == Some(&"disabled") {
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            true // 默认启用
+                        }
+                    }
+                    None => true,
+                };
+
+                if !id.is_empty() && !access_token.is_empty() {
                     accs.push(Account {
-                        id: parts[0].trim().to_string(),
-                        access_token: parts[1].trim().to_string(),
-                        machine_id: parts[2].trim().to_string(),
-                        refresh_token: parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
-                        enabled: parts.get(4).map(|s| s.trim() == "true").unwrap_or(true),
+                        id,
+                        access_token,
+                        machine_id,
+                        refresh_token,
+                        enabled,
                         token_expires_at: None,
                         refresh_url: None,
                     });
@@ -263,7 +326,7 @@ pub async fn api_accounts_import(
             if accs.is_empty() {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "invalid format, expected JSON array or CSV"})),
+                    Json(json!({"error": "invalid format, expected JSON array or CSV with header"})),
                 )
                     .into_response();
             }
