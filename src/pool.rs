@@ -184,7 +184,8 @@ impl AccountPool {
 
     /// 重建可用账号列表（启用 + 非冷却 + 额度正常）
     /// 使用 arc-swap 原子替换，读侧完全无锁
-    fn rebuild_available_ids(&self) {
+    /// pub: admin API 禁用/启用账号后需要调用以确保立即生效
+    pub fn rebuild_available_ids(&self) {
         let ids = self.ordered_ids.read();
         let available: Vec<String> = ids
             .iter()
@@ -292,16 +293,18 @@ impl AccountPool {
 
         // 2. 可用账号列表轮询（arc-swap 无锁读，单次快照）
         let available = self.available_ids.load();
-        if available.is_empty() {
+        let available = if available.is_empty() {
             // 可用列表为空 → 尝试重建一次（冷启动或全部冷却）
             drop(available);
             self.rebuild_available_ids();
-            let available = self.available_ids.load();
-            if available.is_empty() {
+            let rebuilt = self.available_ids.load();
+            if rebuilt.is_empty() {
                 return AcquireTry::Empty;
             }
-        }
-        let available = self.available_ids.load();
+            rebuilt
+        } else {
+            available
+        };
 
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
         let len = available.len();
@@ -311,6 +314,11 @@ impl AccountPool {
             let id = &available[idx];
 
             if let Some(slot) = self.slots.get(id) {
+                // 防御性检查：缓存可能过期（如禁用后未重建），确保 slot 真正可用
+                if !self.is_slot_available(&slot) {
+                    continue;
+                }
+
                 // 会话哈希优先（在可用列表中）
                 if let Some(sid) = session_id {
                     let mut hasher = DefaultHasher::new();
