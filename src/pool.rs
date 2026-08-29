@@ -12,8 +12,14 @@ use tokio::sync::Semaphore;
 use crate::config::Account;
 use crate::quota::QuotaSnapshot;
 
-/// 全局会话索引: session_id -> account_id
-type SessionIndex = Arc<DashMap<String, String>>;
+/// 全局会话索引: session_id -> (account_id, last_seen)
+/// last_seen 用于 TTL GC，防止内存无限增长
+type SessionIndex = Arc<DashMap<String, (String, Instant)>>;
+
+/// 会话索引 TTL: 2 小时不活跃即回收
+const SESSION_TTL: Duration = Duration::from_secs(2 * 3600);
+/// 每 1024 次插入触发一次 GC（摊销成本）
+const SESSION_GC_EVERY: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcquireError {
@@ -64,16 +70,18 @@ pub struct AccountPool {
     rr_index: Arc<AtomicUsize>,
     /// 有序 id 列表（用于轮询，变更时重建）
     ordered_ids: Arc<parking_lot::RwLock<Vec<String>>>,
-    /// 可用账号列表（缓存，避免每次遍历全部）
-    available_ids: Arc<parking_lot::RwLock<Vec<String>>>,
+    /// 可用账号列表（arc-swap 无锁读，避免热路径 RwLock 竞争）
+    available_ids: Arc<arc_swap::ArcSwap<Vec<String>>>,
     /// 账号开关状态
     disabled: Arc<DashMap<String, bool>>,
     /// 原子化统计
     stats: Arc<DashMap<String, AccountStats>>,
     /// 额度快照
     quotas: Arc<DashMap<String, QuotaSnapshot>>,
-    /// 全局会话索引: session_id -> account_id（避免遍历 slot 查找）
+    /// 全局会话索引: session_id -> (account_id, last_seen)（避免遍历 slot 查找）
     session_index: SessionIndex,
+    /// 会话索引插入计数（用于摊销 GC）
+    session_insert_count: Arc<AtomicU64>,
     max_concurrency: usize,
 }
 
@@ -152,11 +160,12 @@ impl AccountPool {
             slots: Arc::new(slots),
             rr_index: Arc::new(AtomicUsize::new(0)),
             ordered_ids: Arc::new(parking_lot::RwLock::new(ordered)),
-            available_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            available_ids: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             disabled: Arc::new(disabled),
             stats: Arc::new(stats),
             quotas: Arc::new(quotas),
             session_index: Arc::new(DashMap::new()),
+            session_insert_count: Arc::new(AtomicU64::new(0)),
             max_concurrency,
         }
     }
@@ -174,6 +183,7 @@ impl AccountPool {
     }
 
     /// 重建可用账号列表（启用 + 非冷却 + 额度正常）
+    /// 使用 arc-swap 原子替换，读侧完全无锁
     fn rebuild_available_ids(&self) {
         let ids = self.ordered_ids.read();
         let available: Vec<String> = ids
@@ -186,7 +196,7 @@ impl AccountPool {
             })
             .cloned()
             .collect();
-        *self.available_ids.write() = available;
+        self.available_ids.store(Arc::new(available));
     }
 
     pub fn replace_accounts(&self, accounts: Vec<Account>) {
@@ -228,7 +238,7 @@ impl AccountPool {
             self.quotas.remove(&id);
         }
         // 清理指向已删除账号的会话索引
-        self.session_index.retain(|_, v| seen.contains(v));
+        self.session_index.retain(|_, (aid, _)| seen.contains(aid));
         self.rebuild_ordered_ids();
     }
 
@@ -261,10 +271,12 @@ impl AccountPool {
     }
 
     fn try_acquire_by_session(&self, session_id: Option<&str>) -> AcquireTry {
-        // 1. 会话粘性: 通过全局索引 O(1) 查找
+        // 1. 会话粘性: 通过全局索引 O(1) 查找，命中即刷新 last_seen
         if let Some(sid) = session_id {
-            if let Some(account_id) = self.session_index.get(sid) {
-                if let Some(slot) = self.slots.get(&*account_id) {
+            if let Some(mut entry) = self.session_index.get_mut(sid) {
+                let (account_id, last_seen) = entry.value_mut();
+                *last_seen = Instant::now();
+                if let Some(slot) = self.slots.get(account_id) {
                     if self.is_slot_available(&slot) {
                         if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
                             self.stats
@@ -278,18 +290,18 @@ impl AccountPool {
             }
         }
 
-        // 2. 使用可用账号列表轮询（避免遍历全部账号）
-        let available = self.available_ids.read();
+        // 2. 可用账号列表轮询（arc-swap 无锁读，单次快照）
+        let available = self.available_ids.load();
         if available.is_empty() {
-            // 尝试重建可用列表
+            // 可用列表为空 → 尝试重建一次（冷启动或全部冷却）
             drop(available);
             self.rebuild_available_ids();
-            let available = self.available_ids.read();
+            let available = self.available_ids.load();
             if available.is_empty() {
                 return AcquireTry::Empty;
             }
         }
-        let available = self.available_ids.read();
+        let available = self.available_ids.load();
 
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
         let len = available.len();
@@ -305,8 +317,8 @@ impl AccountPool {
                     sid.hash(&mut hasher);
                     if (hasher.finish() as usize) % len == idx {
                         if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                            // 绑定会话到账号
-                            self.session_index.insert(sid.to_string(), id.clone());
+                            // 绑定会话到账号（带 TTL 时间戳）
+                            self.bind_session(sid, id);
                             self.stats
                                 .entry(slot.account.id.clone())
                                 .or_default()
@@ -319,7 +331,7 @@ impl AccountPool {
                 // 普通轮询
                 if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
                     if let Some(sid) = session_id {
-                        self.session_index.insert(sid.to_string(), id.clone());
+                        self.bind_session(sid, id);
                     }
                     self.stats
                         .entry(slot.account.id.clone())
@@ -332,6 +344,28 @@ impl AccountPool {
 
         // 可用列表非空但全部获取失败 → Busy
         AcquireTry::Busy
+    }
+
+    /// 绑定会话到账号，带摊销 GC（每 1024 次插入清理过期条目）
+    fn bind_session(&self, sid: &str, account_id: &str) {
+        self.session_index
+            .insert(sid.to_string(), (account_id.to_string(), Instant::now()));
+        let n = self.session_insert_count.fetch_add(1, Ordering::Relaxed);
+        if n % SESSION_GC_EVERY == 0 {
+            self.gc_session_index();
+        }
+    }
+
+    /// 回收 TTL 过期的会话索引条目
+    fn gc_session_index(&self) {
+        let now = Instant::now();
+        self.session_index
+            .retain(|_, (_, last_seen)| now.duration_since(*last_seen) < SESSION_TTL);
+    }
+
+    /// 会话索引当前大小（监控用）
+    pub fn session_index_len(&self) -> usize {
+        self.session_index.len()
     }
 
     fn is_slot_available(&self, slot: &Arc<Slot>) -> bool {

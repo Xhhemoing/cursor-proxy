@@ -661,8 +661,8 @@ async fn chat_handler(
     };
 
     if stream {
-        // 流式 SSE
-        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::convert::Infallible>>(1000);
+        // 流式 SSE — 缓冲 64 足够平滑突发，防止高并发下内存膨胀
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::convert::Infallible>>(64);
         let pool = state.pool.clone();
         let aid = account_id.clone();
         let rid = request_id.clone();
@@ -683,6 +683,7 @@ async fn chat_handler(
                             input_tokens = u.0;
                             output_tokens = u.1;
                         }
+                        // 客户端断开即停，不阻塞转发循环
                         if tx.send(Ok(Bytes::from(sse))).await.is_err() {
                             break;
                         }
