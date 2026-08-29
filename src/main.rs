@@ -43,7 +43,7 @@ use tracing::{error, info, warn};
 use crate::config::AppConfig;
 use crate::cursor::CursorClient;
 use crate::pool::AccountPool;
-use crate::translate::{cursor_to_openai_stream, cursor_to_openai_full, openai_error};
+use crate::translate::{upstream_to_openai_stream, upstream_to_openai_full, openai_error};
 
 pub struct AppState {
     config: parking_lot::Mutex<AppConfig>,
@@ -470,10 +470,40 @@ async fn chat_handler(
     // 构造 Cursor 请求
     let cursor_body = cursor::build_cursor_body(messages, &model, max_tokens, temperature);
 
-    // 调用上游
-    let frames = match state
-        .cursor
-        .stream(&account.access_token, &account.machine_id, &cursor_body)
+    // 多上游路由：根据模型前缀选择上游
+    let upstream_name = if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
+        "openai"
+    } else {
+        "cursor"
+    };
+
+    let upstream = match state.upstreams.get(upstream_name) {
+        Some(u) => u,
+        None => {
+            state.pool.release(&account_id, true, 30);
+            state.metrics.observe_err();
+            error!(
+                event = "upstream_not_found",
+                req_id = %request_id,
+                upstream = %upstream_name,
+                "upstream not configured"
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(openai_error(&format!("upstream '{}' not configured", upstream_name), "upstream_error", 503)),
+            )
+                .into_response());
+        }
+    };
+
+    // 调用上游（统一通过 UpstreamClient::stream，自动处理 Cursor/OpenAI 差异）
+    let cursor_auth = match upstream {
+        crate::upstream::UpstreamClient::Cursor(_) => Some((account.access_token.as_str(), account.machine_id.as_str())),
+        crate::upstream::UpstreamClient::OpenAi(_) => None,
+    };
+
+    let frames = match upstream
+        .stream(&model, messages, max_tokens, temperature, cursor_auth)
         .await
     {
         Ok(f) => f,
@@ -481,15 +511,16 @@ async fn chat_handler(
             state.pool.release(&account_id, true, 30);
             state.metrics.observe_err();
             error!(
-                event = "cursor_error",
+                event = "upstream_error",
                 req_id = %request_id,
+                upstream = %upstream_name,
                 account = %account_id,
                 error = %e,
-                "cursor stream failed"
+                "upstream stream failed"
             );
             return Err((
                 StatusCode::BAD_GATEWAY,
-                Json(openai_error(&e.to_string(), "cursor_error", 502)),
+                Json(openai_error(&e.to_string(), "upstream_error", 502)),
             )
                 .into_response());
         }
@@ -510,7 +541,7 @@ async fn chat_handler(
         tokio::spawn(async move {
             let mut input_tokens = 0u64;
             let mut output_tokens = 0u64;
-            let mut stream = Box::pin(cursor_to_openai_stream(frames, &model_clone));
+            let mut stream = Box::pin(upstream_to_openai_stream(frames, &model_clone));
             while let Some(item) = stream.next().await {
                 match item {
                     Ok((sse, usage)) => {
@@ -562,7 +593,7 @@ async fn chat_handler(
             .unwrap())
     } else {
         // 非流式
-        match cursor_to_openai_full(frames, &model).await {
+        match upstream_to_openai_full(frames, &model).await {
             Ok((result, usage)) => {
                 let latency = start.elapsed().as_millis() as u64;
                 let log_entry = serde_json::json!({

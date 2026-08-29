@@ -71,11 +71,14 @@ fn extract_usage(obj: &Value) -> Option<(u64, u64)> {
     Some((prompt, completion))
 }
 
-/// 流式翻译: Cursor 帧流 → OpenAI SSE 流
-pub fn cursor_to_openai_stream(
-    frames: Pin<Box<dyn Stream<Item = Result<Value, crate::cursor::CursorError>> + Send>>,
+/// 流式翻译: 上游帧流 → OpenAI SSE 流（泛化错误类型，支持 Cursor/OpenAI 等任意上游）
+pub fn upstream_to_openai_stream<E>(
+    frames: Pin<Box<dyn Stream<Item = Result<Value, E>> + Send>>,
     model: &str,
-) -> impl Stream<Item = Result<(String, Option<(u64, u64)>), String>> {
+) -> impl Stream<Item = Result<(String, Option<(u64, u64)>), String>>
+where
+    E: std::fmt::Display + Send + 'static,
+{
     let chunk_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let model = model.to_string();
     let mut first = true;
@@ -134,11 +137,14 @@ pub fn cursor_to_openai_stream(
     )
 }
 
-/// 非流式翻译: 收集全部 text, 返回完整 ChatCompletion
-pub async fn cursor_to_openai_full(
-    mut frames: Pin<Box<dyn Stream<Item = Result<Value, crate::cursor::CursorError>> + Send>>,
+/// 非流式翻译: 收集全部 text, 返回完整 ChatCompletion（泛化错误类型）
+pub async fn upstream_to_openai_full<E>(
+    mut frames: Pin<Box<dyn Stream<Item = Result<Value, E>> + Send>>,
     model: &str,
-) -> Result<(Value, (u64, u64)), String> {
+) -> Result<(Value, (u64, u64)), String>
+where
+    E: std::fmt::Display + Send + 'static,
+{
     let chunk_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let mut text_parts = Vec::new();
     let mut usage = (0u64, 0u64);
