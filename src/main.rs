@@ -112,7 +112,10 @@ async fn main() -> anyhow::Result<()> {
         config: parking_lot::Mutex::new(config.clone()),
         pool,
         cursor,
-        log_buffer: std::sync::Arc::new(logbuf::LogBuffer::new(1000)),
+        log_buffer: std::sync::Arc::new(logbuf::LogBuffer::with_persist(
+            1000,
+            std::path::PathBuf::from(&config.log_file),
+        )),
         upstreams,
         key_usage: std::sync::Arc::new(quota::KeyUsageStore::new()),
         metrics: std::sync::Arc::new(metrics::Metrics::new()),
