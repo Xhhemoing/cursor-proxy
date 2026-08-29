@@ -119,6 +119,11 @@
         <label>machine_id <input id="f-acc-mid" required></label>
         <button type="submit">保存账号</button>
       </form>
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="btn-import">批量导入</button>
+        <button type="button" id="btn-export" class="ghost">导出备份</button>
+        <input type="file" id="file-import" accept=".json,.csv" style="display:none">
+      </div>
       <p class="toast" id="acc-msg"></p>
     </section>
 
@@ -444,6 +449,36 @@
         toast('acc-msg', '已探测全部账号');
         await loadAll();
       } catch (err) { toast('acc-msg', err.message, true); }
+    });
+    // 批量导入
+    document.getElementById('btn-import').addEventListener('click', () => {
+      document.getElementById('file-import').click();
+    });
+    document.getElementById('file-import').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      try {
+        const r = await api('/admin/api/accounts/import', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: text,
+        });
+        toast('acc-msg', '导入完成: ' + r.imported + ' 成功, ' + (r.errors || []).length + ' 失败');
+        await loadAll();
+      } catch (err) { toast('acc-msg', '导入失败: ' + err.message, true); }
+      e.target.value = '';
+    });
+    // 导出备份
+    document.getElementById('btn-export').addEventListener('click', async () => {
+      try {
+        const data = await api('/admin/api/accounts/export');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = el('a', { href: URL.createObjectURL(blob), download: 'cfp-accounts-' + new Date().toISOString().slice(0,10) + '.json' });
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast('acc-msg', '已导出 ' + data.count + ' 个账号');
+      } catch (err) { toast('acc-msg', '导出失败: ' + err.message, true); }
     });
     loadAll().catch((e) => toast('acc-msg', e.message, true));
     setInterval(() => { loadAll().catch(() => {}); }, 4000);
