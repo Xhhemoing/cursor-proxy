@@ -51,8 +51,69 @@ impl LogBuffer {
         entries.iter().rev().take(n).cloned().collect()
     }
 
+    /// 按条件查询日志
+    pub fn query(&self, filter: &LogFilter) -> Vec<serde_json::Value> {
+        let entries = self.entries.lock().unwrap();
+        entries
+            .iter()
+            .rev()
+            .filter(|e| filter.matches(e))
+            .take(filter.limit)
+            .cloned()
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
+    }
+}
+
+/// 日志查询过滤器
+#[derive(Debug, Default)]
+pub struct LogFilter {
+    pub model: Option<String>,
+    pub account: Option<String>,
+    pub status: Option<u16>,
+    pub stream: Option<bool>,
+    pub client_ip: Option<String>,
+    pub limit: usize,
+}
+
+impl LogFilter {
+    pub fn new() -> Self {
+        Self {
+            limit: 100,
+            ..Default::default()
+        }
+    }
+
+    fn matches(&self, entry: &serde_json::Value) -> bool {
+        if let Some(ref m) = self.model {
+            if entry.get("model").and_then(|v| v.as_str()) != Some(m) {
+                return false;
+            }
+        }
+        if let Some(ref a) = self.account {
+            if entry.get("account").and_then(|v| v.as_str()) != Some(a) {
+                return false;
+            }
+        }
+        if let Some(s) = self.status {
+            if entry.get("status").and_then(|v| v.as_u64()) != Some(s as u64) {
+                return false;
+            }
+        }
+        if let Some(st) = self.stream {
+            if entry.get("stream").and_then(|v| v.as_bool()) != Some(st) {
+                return false;
+            }
+        }
+        if let Some(ref ip) = self.client_ip {
+            if entry.get("client_ip").and_then(|v| v.as_str()) != Some(ip) {
+                return false;
+            }
+        }
+        true
     }
 }
 

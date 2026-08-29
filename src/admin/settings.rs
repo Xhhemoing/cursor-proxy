@@ -16,19 +16,30 @@ use crate::AppState;
 #[derive(Deserialize)]
 pub struct LogsQuery {
     pub n: Option<usize>,
+    pub model: Option<String>,
+    pub account: Option<String>,
+    pub status: Option<u16>,
+    pub stream: Option<bool>,
+    pub client_ip: Option<String>,
 }
 
-/// GET /admin/api/logs — 最近日志 (新→旧)
+/// GET /admin/api/logs — 最近日志 (新→旧)，支持筛选
 pub async fn api_logs_recent(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LogsQuery>,
 ) -> impl IntoResponse {
-    let n = q.n.unwrap_or(50).clamp(1, 200);
-    let logs = state.log_buffer.recent(n);
+    let n = q.n.unwrap_or(50).clamp(1, 500);
+    let mut filter = crate::logbuf::LogFilter::new();
+    filter.limit = n;
+    filter.model = q.model;
+    filter.account = q.account;
+    filter.status = q.status;
+    filter.stream = q.stream;
+    filter.client_ip = q.client_ip;
+    let logs = state.log_buffer.query(&filter);
     Json(json!({
         "logs": logs,
         "count": logs.len(),
-        "buffered": state.log_buffer.len(),
     }))
 }
 
