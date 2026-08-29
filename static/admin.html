@@ -59,6 +59,10 @@
     th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--line); }
     td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; font-family: "IBM Plex Mono", ui-monospace, monospace; }
     .table-scroll { overflow: auto; max-height: 42vh; }
+    .pagination { display: flex; gap: 6px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+    .pagination button { padding: 4px 10px; font-size: 12px; }
+    .pagination .page-info { color: var(--muted); font-size: 12px; margin: 0 8px; }
+    .pagination .page-btn.active { background: var(--accent); color: #14110c; }
     .toast { min-height: 18px; color: var(--muted); font-size: 12px; margin: 8px 0 0; }
     .toast.err { color: var(--bad); }
     .log {
@@ -150,6 +154,7 @@
           <tbody id="acc-body"></tbody>
         </table>
       </div>
+      <div class="pagination" id="acc-pagination"></div>
       <form id="acc-form" class="row" style="margin-top:10px">
         <label>ID <input id="f-acc-id" required></label>
         <label>access_token <input id="f-acc-tok" type="password" required></label>
@@ -229,6 +234,10 @@
       if (q.error) bits.push('err ' + q.error);
       return bits.join(' · ') || '已探测无数据';
     }
+    // 分页状态
+    let accPage = 1;
+    const ACC_PAGE_SIZE = 10;
+
     function renderAccounts(rows) {
       const body = document.getElementById('acc-body');
       body.replaceChildren();
@@ -258,7 +267,14 @@
         }
         return a.id.localeCompare(b.id);
       });
-      filtered.forEach((acc) => {
+
+      // 分页
+      const totalPages = Math.ceil(filtered.length / ACC_PAGE_SIZE);
+      if (accPage > totalPages) accPage = totalPages || 1;
+      const start = (accPage - 1) * ACC_PAGE_SIZE;
+      const pageRows = filtered.slice(start, start + ACC_PAGE_SIZE);
+
+      pageRows.forEach((acc) => {
         const tr = el('tr');
         // 复选框
         const chk = el('input', { type: 'checkbox', class: 'acc-check', 'data-id': acc.id });
@@ -320,9 +336,41 @@
         tr.appendChild(op);
         body.appendChild(tr);
       });
+
+      // 渲染分页控件
+      renderPagination(filtered.length, totalPages);
       // 更新全选状态
       updateCheckAll();
     }
+
+    function renderPagination(total, totalPages) {
+      const box = document.getElementById('acc-pagination');
+      box.replaceChildren();
+      if (totalPages <= 1) return;
+
+      const prev = el('button', { type: 'button', class: 'ghost' }, '上一页');
+      prev.disabled = accPage <= 1;
+      prev.addEventListener('click', () => { accPage--; loadAll(); });
+      box.appendChild(prev);
+
+      for (let i = 1; i <= totalPages; i++) {
+        if (totalPages > 7 && i > 2 && i < totalPages - 1 && Math.abs(i - accPage) > 1) {
+          if (i === 3 || i === totalPages - 2) box.appendChild(el('span', { class: 'page-info' }, '…'));
+          continue;
+        }
+        const btn = el('button', { type: 'button', class: 'page-btn' + (i === accPage ? ' active' : '') }, String(i));
+        btn.addEventListener('click', () => { accPage = i; loadAll(); });
+        box.appendChild(btn);
+      }
+
+      const next = el('button', { type: 'button', class: 'ghost' }, '下一页');
+      next.disabled = accPage >= totalPages;
+      next.addEventListener('click', () => { accPage++; loadAll(); });
+      box.appendChild(next);
+
+      box.appendChild(el('span', { class: 'page-info' }, `共 ${total} 条, 第 ${accPage}/${totalPages} 页`));
+    }
+
     function updateCheckAll() {
       const all = document.getElementById('acc-check-all');
       const checks = document.querySelectorAll('.acc-check');
@@ -577,9 +625,9 @@
       } catch (err) { toast('acc-msg', '导出失败: ' + err.message, true); }
     });
     // 搜索/筛选/排序事件
-    document.getElementById('acc-search').addEventListener('input', () => loadAll());
-    document.getElementById('acc-filter').addEventListener('change', () => loadAll());
-    document.getElementById('acc-sort').addEventListener('change', () => loadAll());
+    document.getElementById('acc-search').addEventListener('input', () => { accPage = 1; loadAll(); });
+    document.getElementById('acc-filter').addEventListener('change', () => { accPage = 1; loadAll(); });
+    document.getElementById('acc-sort').addEventListener('change', () => { accPage = 1; loadAll(); });
     // 全选
     document.getElementById('acc-check-all').addEventListener('change', (e) => {
       document.querySelectorAll('.acc-check').forEach(c => c.checked = e.target.checked);
