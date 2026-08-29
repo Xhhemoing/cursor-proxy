@@ -28,9 +28,10 @@ pub struct Slot {
     account: Account,
     sem: Arc<Semaphore>,
     cooldown_until: parking_lot::Mutex<Option<Instant>>,
-    /// 会话粘性: 同一 session 优先路由到此账号
-    sticky_sessions: DashMap<String, Instant>,
 }
+
+/// 会话粘性 TTL
+const STICKY_TTL: Duration = Duration::from_secs(3600);
 
 impl Slot {
     fn is_cooling_down(&self) -> bool {
@@ -69,7 +70,11 @@ pub struct AccountPool {
     stats: Arc<DashMap<String, AccountStats>>,
     /// 额度快照
     quotas: Arc<DashMap<String, QuotaSnapshot>>,
+    /// 会话粘性反向索引: session_id -> (account_id, 过期时间). O(1) 查找, 后台定时 GC
+    sessions: Arc<DashMap<String, (String, Instant)>>,
     max_concurrency: usize,
+    /// 全部繁忙时最长排队等待; 0 = 不排队
+    acquire_wait: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -138,7 +143,6 @@ impl AccountPool {
                     account: acc,
                     sem: Arc::new(Semaphore::new(max_concurrency)),
                     cooldown_until: parking_lot::Mutex::new(None),
-                    sticky_sessions: DashMap::new(),
                 }),
             );
             ordered.push(id);
@@ -151,12 +155,37 @@ impl AccountPool {
             disabled: Arc::new(disabled),
             stats: Arc::new(stats),
             quotas: Arc::new(quotas),
+            sessions: Arc::new(DashMap::new()),
             max_concurrency,
+            acquire_wait: Duration::ZERO,
         }
+    }
+
+    /// 设置繁忙时的排队等待上限
+    pub fn with_acquire_wait(mut self, wait: Duration) -> Self {
+        self.acquire_wait = wait;
+        self
     }
 
     pub fn max_concurrency(&self) -> usize {
         self.max_concurrency
+    }
+
+    /// 清理过期会话绑定 (后台定时调用)
+    pub fn gc_sessions(&self) -> usize {
+        let now = Instant::now();
+        let before = self.sessions.len();
+        self.sessions.retain(|_, (_, exp)| *exp > now);
+        before - self.sessions.len()
+    }
+
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    fn bind_session(&self, session_id: &str, account_id: &str) {
+        self.sessions
+            .insert(session_id.to_string(), (account_id.to_string(), Instant::now() + STICKY_TTL));
     }
 
     /// 重建有序 id 列表（账号变更时调用）
@@ -187,7 +216,6 @@ impl AccountPool {
                         account: acc,
                         sem: Arc::new(Semaphore::new(self.max_concurrency)),
                         cooldown_until: parking_lot::Mutex::new(None),
-                        sticky_sessions: DashMap::new(),
                     }),
                 );
             }
@@ -204,6 +232,7 @@ impl AccountPool {
             self.disabled.remove(&id);
             self.stats.remove(&id);
             self.quotas.remove(&id);
+            self.sessions.retain(|_, (aid, _)| aid != &id);
         }
         self.rebuild_ordered_ids();
     }
@@ -217,16 +246,22 @@ impl AccountPool {
         &self,
         session_id: Option<&str>,
     ) -> Result<(Account, tokio::sync::OwnedSemaphorePermit), AcquireError> {
-        match self.try_acquire_by_session(session_id) {
-            AcquireTry::Got(pair) => Ok(pair),
-            AcquireTry::Empty => Err(AcquireError::Empty),
-            AcquireTry::Busy => {
-                // 短暂退避后重试一次
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                match self.try_acquire_by_session(session_id) {
-                    AcquireTry::Got(pair) => Ok(pair),
-                    AcquireTry::Empty => Err(AcquireError::Empty),
-                    AcquireTry::Busy => Err(AcquireError::Busy),
+        // 全部繁忙时在 acquire_wait 内指数退避排队, 而不是立刻 503;
+        // 非流式请求持有槽位时间长, 没有排队会在到达并发上限时成功率断崖
+        let deadline = Instant::now() + self.acquire_wait;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            match self.try_acquire_by_session(session_id) {
+                AcquireTry::Got(pair) => return Ok(pair),
+                AcquireTry::Empty => return Err(AcquireError::Empty),
+                AcquireTry::Busy => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(AcquireError::Busy);
+                    }
+                    let sleep = backoff.min(deadline - now);
+                    tokio::time::sleep(sleep).await;
+                    backoff = (backoff * 2).min(Duration::from_millis(100));
                 }
             }
         }
@@ -279,8 +314,7 @@ impl AccountPool {
                         sid.hash(&mut hasher);
                         if (hasher.finish() as usize) % ids.len() == idx {
                             if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                                slot.sticky_sessions
-                                    .insert(sid.to_string(), Instant::now() + Duration::from_secs(3600));
+                                self.bind_session(sid, &slot.account.id);
                                 self.stats
                                     .entry(slot.account.id.clone())
                                     .or_default()
@@ -302,8 +336,7 @@ impl AccountPool {
         if let Some(slot) = fallback {
             if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
                 if let Some(sid) = session_id {
-                    slot.sticky_sessions
-                        .insert(sid.to_string(), Instant::now() + Duration::from_secs(3600));
+                    self.bind_session(sid, &slot.account.id);
                 }
                 self.stats
                     .entry(slot.account.id.clone())
@@ -321,18 +354,22 @@ impl AccountPool {
     }
 
     fn find_sticky_slot(&self, session_id: &str) -> Option<Arc<Slot>> {
-        for entry in self.slots.iter() {
-            let slot = entry.value();
-            if let Some(expiry) = slot.sticky_sessions.get(session_id) {
-                if *expiry > Instant::now() {
-                    return Some(slot.clone());
-                } else {
-                    // 过期清理
-                    slot.sticky_sessions.remove(session_id);
-                }
+        let (account_id, expiry) = {
+            let entry = self.sessions.get(session_id)?;
+            entry.value().clone()
+        };
+        if expiry <= Instant::now() {
+            self.sessions.remove(session_id);
+            return None;
+        }
+        match self.slots.get(&account_id) {
+            Some(slot) => Some(slot.clone()),
+            None => {
+                // 账号已被删除
+                self.sessions.remove(session_id);
+                None
             }
         }
-        None
     }
 
     fn is_slot_available(&self, slot: &Arc<Slot>) -> bool {
@@ -690,6 +727,33 @@ mod tests {
         assert_eq!(score.score, 100);
         assert!(score.enabled);
         assert!(!score.cooldown_active);
+    }
+
+    #[tokio::test]
+    async fn busy_waits_then_succeeds() {
+        let pool = AccountPool::new(vec![acc("a", true)], 1)
+            .with_acquire_wait(Duration::from_millis(500));
+        let (_, p1) = pool.acquire().await.unwrap();
+        let pool2 = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(p1);
+        });
+        let t = Instant::now();
+        let (a, _p2) = pool2.acquire().await.unwrap();
+        assert_eq!(a.id, "a");
+        assert!(t.elapsed() < Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn session_gc_clears_expired() {
+        let pool = AccountPool::new(vec![acc("a", true)], 2);
+        let (_a, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
+        assert_eq!(pool.session_count(), 1);
+        assert_eq!(pool.gc_sessions(), 0);
+        pool.sessions.insert("dead".into(), ("a".into(), Instant::now() - Duration::from_secs(1)));
+        assert_eq!(pool.gc_sessions(), 1);
+        assert_eq!(pool.session_count(), 1);
     }
 
     #[test]

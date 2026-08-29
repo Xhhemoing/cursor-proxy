@@ -1,14 +1,17 @@
 //! 内存日志 ring buffer: 固定容量, 线程安全, 供管理面板读取.
-//! 同时支持 JSONL 持久化到磁盘.
+//! 同时支持 JSONL 持久化到磁盘 (专用后台线程 + BufWriter, 请求路径不做任何文件 I/O).
 
 use std::collections::VecDeque;
+use std::io::Write;
+use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub struct LogBuffer {
     entries: Mutex<VecDeque<serde_json::Value>>,
     capacity: usize,
-    /// JSONL 持久化文件路径，None 表示不持久化
-    persist_path: Option<std::path::PathBuf>,
+    /// 持久化通道: 请求线程只做一次无锁 send, 写盘在专用线程
+    persist_tx: Option<mpsc::Sender<String>>,
 }
 
 impl LogBuffer {
@@ -16,34 +19,39 @@ impl LogBuffer {
         Self {
             entries: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
-            persist_path: None,
+            persist_tx: None,
         }
     }
 
     pub fn with_persist(capacity: usize, path: std::path::PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::Builder::new()
+            .name("log-writer".into())
+            .spawn(move || persist_loop(path, rx))
+            .expect("spawn log writer thread");
         Self {
             entries: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
-            persist_path: Some(path),
+            persist_tx: Some(tx),
         }
     }
 
-    pub fn push(&self, entry: serde_json::Value) {
-        // 持久化到 JSONL
-        if let Some(ref path) = self.persist_path {
-            let line = serde_json::to_string(&entry).unwrap_or_default() + "\n";
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    /// 推入一条日志; `line` 为已序列化的 JSON (调用方通常已经有了, 避免二次序列化)
+    pub fn push_with_line(&self, entry: serde_json::Value, line: String) {
+        if let Some(tx) = &self.persist_tx {
+            // 写线程挂了也不能影响请求
+            let _ = tx.send(line);
         }
-
         let mut entries = self.entries.lock().unwrap();
         if entries.len() >= self.capacity {
             entries.pop_front();
         }
         entries.push_back(entry);
+    }
+
+    pub fn push(&self, entry: serde_json::Value) {
+        let line = serde_json::to_string(&entry).unwrap_or_default();
+        self.push_with_line(entry, line);
     }
 
     pub fn recent(&self, n: usize) -> Vec<serde_json::Value> {
@@ -65,6 +73,53 @@ impl LogBuffer {
 
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
+    }
+}
+
+/// 后台写盘循环: 句柄常驻 + BufWriter, 攒批或 200ms 空闲即 flush.
+fn persist_loop(path: std::path::PathBuf, rx: mpsc::Receiver<String>) {
+    let open = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f))
+    };
+    let mut writer = open().ok();
+    let mut pending = 0usize;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                if writer.is_none() {
+                    writer = open().ok();
+                }
+                if let Some(w) = writer.as_mut() {
+                    if w.write_all(line.as_bytes()).and_then(|_| w.write_all(b"\n")).is_err() {
+                        writer = None; // 下次重新打开
+                        continue;
+                    }
+                    pending += 1;
+                    if pending >= 256 {
+                        let _ = w.flush();
+                        pending = 0;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if pending > 0 {
+                    if let Some(w) = writer.as_mut() {
+                        let _ = w.flush();
+                    }
+                    pending = 0;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(w) = writer.as_mut() {
+                    let _ = w.flush();
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -139,5 +194,28 @@ mod tests {
         assert_eq!(recent[0]["n"], 4);
         assert_eq!(recent[1]["n"], 3);
         assert_eq!(buf.len(), 3);
+    }
+
+    #[test]
+    fn persist_writes_jsonl() {
+        let dir = std::env::temp_dir().join(format!("cfp-log-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.log");
+        {
+            let buf = LogBuffer::with_persist(10, path.clone());
+            buf.push(json!({"a": 1}));
+            buf.push(json!({"a": 2}));
+            // drop → 通道关闭 → 写线程 flush 退出
+        }
+        // 等写线程收尾
+        for _ in 0..50 {
+            if std::fs::read_to_string(&path).map(|s| s.lines().count() == 2).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

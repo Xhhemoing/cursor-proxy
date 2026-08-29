@@ -1,8 +1,7 @@
 //! Cursor Connect 协议异步客户端: 帧编解码 + TLS + 流式读取.
 
 use bytes::BytesMut;
-use futures_util::stream::{Stream, StreamExt};
-use http_body_util::BodyExt;
+use futures_util::stream::Stream;
 use hyper::body::{Body as HttpBody, Incoming};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -144,13 +143,21 @@ impl CursorClient {
     }
 
     pub fn new(backend: &str, timeout_s: u64) -> anyhow::Result<Self> {
+        // 连接层: 显式 connect 超时 (默认无限, SYN 卡死会占用槽位) + TCP keepalive/nodelay
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+        http.set_connect_timeout(Some(std::time::Duration::from_secs(10)));
+        http.set_keepalive(Some(std::time::Duration::from_secs(30)));
+        http.set_nodelay(true);
+        // ALPN 同时提供 h2 + http/1.1: 只启 h2 会让所有请求挤在一条连接上,
+        // 撞服务端 MAX_CONCURRENT_STREAMS 后在客户端内部排队
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()
-            .enable_http2()
-            .build();
+            .enable_all_versions()
+            .wrap_connector(http);
         let client = Client::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(10000)
+            .pool_max_idle_per_host(256)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build(https);
         Ok(Self {
@@ -188,20 +195,26 @@ impl CursorClient {
             .body(http_body_util::Full::new(hyper::body::Bytes::from(envelope)))
             .map_err(|e| CursorError::Network(e.to_string()))?;
 
-        let resp = self
-            .client
-            .request(req)
+        // 客户端侧硬超时: 响应头必须在 timeout_s 内到达; 帧级空闲超时由调用方控制
+        let timeout = std::time::Duration::from_secs(self.timeout_s.max(1));
+        let resp = tokio::time::timeout(timeout, self.client.request(req))
             .await
+            .map_err(|_| CursorError::Network(format!("upstream response headers timeout after {}s", self.timeout_s)))?
             .map_err(|e| CursorError::Network(e.to_string()))?;
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let body_bytes = http_body_util::BodyExt::collect(resp.into_body())
-                .await
-                .map_err(|e| CursorError::Network(e.to_string()))?
-                .to_bytes();
+            let body_bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                http_body_util::BodyExt::collect(resp.into_body()),
+            )
+            .await
+            .map_err(|_| CursorError::Network("error body read timeout".into()))?
+            .map_err(|e| CursorError::Network(e.to_string()))?
+            .to_bytes();
             let text = String::from_utf8_lossy(&body_bytes);
-            return Err(CursorError::Http(status, text[..200.min(text.len())].to_string()));
+            // 按字符截断; 按字节切 &str 会在多字节边界 panic (panic=abort 直接掉进程)
+            return Err(CursorError::Http(status, text.chars().take(200).collect()));
         }
 
         Ok(Box::pin(FrameStream {

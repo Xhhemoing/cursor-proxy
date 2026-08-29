@@ -29,6 +29,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 # 日志
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"  # 非阻塞 stdout 日志
 # 工具
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
@@ -44,6 +45,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tower-http = { version = "0.5", features = ["fs"] }  # 静态文件服务
 subtle = "2"  # 恒定时间比较 (API key 防时序攻击)
 parking_lot = "0.12"  # 无 poison 的 Mutex/RwLock
+rusqlite = { version = "0.32", features = ["bundled"] }  # 计费账本 (SQLite WAL)
 notify = { version = "6", default-features = false, features = ["macos_kqueue"] }  # 配置热重载
 
 [profile.release]
