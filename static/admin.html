@@ -100,13 +100,50 @@
 
     <section class="panel">
       <h2>号池</h2>
-      <div class="row" style="margin-bottom:10px">
-        <button type="button" id="btn-probe-all">探测全部额度</button>
+      <!-- 快速导入 -->
+      <div class="row" style="margin-bottom:10px;gap:6px">
+        <button type="button" id="btn-probe-all">探测全部</button>
+        <button type="button" id="btn-import">导入文件</button>
+        <button type="button" id="btn-paste-import" class="ghost">粘贴导入</button>
+        <button type="button" id="btn-export" class="ghost">导出备份</button>
+        <input type="file" id="file-import" accept=".json,.csv" style="display:none">
       </div>
+      <!-- 高级管理: 搜索/筛选/批量操作 -->
+      <div class="row" style="margin-bottom:10px;gap:6px;flex-wrap:wrap">
+        <input id="acc-search" placeholder="搜索 ID..." style="min-width:120px;flex:1">
+        <select id="acc-filter">
+          <option value="all">全部</option>
+          <option value="enabled">可用</option>
+          <option value="disabled">已禁用</option>
+          <option value="cooldown">冷却中</option>
+          <option value="error">有错误</option>
+        </select>
+        <select id="acc-sort">
+          <option value="id">按 ID</option>
+          <option value="requests">按请求数</option>
+          <option value="errors">按错误数</option>
+          <option value="quota">按配额</option>
+        </select>
+        <button type="button" id="btn-select-all" class="ghost">全选</button>
+        <button type="button" id="btn-batch-enable" class="ghost">批量启用</button>
+        <button type="button" id="btn-batch-disable" class="ghost">批量禁用</button>
+        <button type="button" id="btn-batch-delete" class="danger">批量删除</button>
+      </div>
+      <!-- 粘贴导入对话框 -->
+      <dialog id="paste-dialog" style="background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:16px;max-width:600px">
+        <h3 style="margin:0 0 10px;font-size:14px">粘贴批量导入</h3>
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px">每行一个账号，格式: <code>id,access_token,machine_id[,refresh_token]</code></p>
+        <textarea id="paste-text" rows="8" style="width:100%;background:#14110c;color:var(--ink);border:1px solid var(--line);padding:8px;font:12px/1.4 monospace"></textarea>
+        <div class="row" style="margin-top:10px;justify-content:flex-end">
+          <button type="button" id="paste-cancel" class="ghost">取消</button>
+          <button type="button" id="paste-submit">导入</button>
+        </div>
+      </dialog>
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
+              <th style="width:30px"><input type="checkbox" id="acc-check-all"></th>
               <th>ID</th><th>请求</th><th>错误</th><th>在飞</th><th>额度</th><th>状态</th><th>操作</th>
             </tr>
           </thead>
@@ -117,13 +154,9 @@
         <label>ID <input id="f-acc-id" required></label>
         <label>access_token <input id="f-acc-tok" type="password" required></label>
         <label>machine_id <input id="f-acc-mid" required></label>
+        <label>refresh_token <input id="f-acc-ref" type="password" placeholder="可选"></label>
         <button type="submit">保存账号</button>
       </form>
-      <div class="row" style="margin-top:8px">
-        <button type="button" id="btn-import">批量导入</button>
-        <button type="button" id="btn-export" class="ghost">导出备份</button>
-        <input type="file" id="file-import" accept=".json,.csv" style="display:none">
-      </div>
       <p class="toast" id="acc-msg"></p>
     </section>
 
@@ -200,11 +233,36 @@
       const body = document.getElementById('acc-body');
       body.replaceChildren();
       if (!rows || !rows.length) {
-        const tr = el('tr'); const td = el('td', { colspan: '7' }, '号池为空'); td.className = 'empty';
+        const tr = el('tr'); const td = el('td', { colspan: '8' }, '号池为空'); td.className = 'empty';
         tr.appendChild(td); body.appendChild(tr); return;
       }
-      rows.forEach((acc) => {
+      // 应用搜索/筛选/排序
+      const search = (document.getElementById('acc-search').value || '').toLowerCase();
+      const filter = document.getElementById('acc-filter').value;
+      const sortBy = document.getElementById('acc-sort').value;
+      let filtered = rows.filter(acc => {
+        if (search && !acc.id.toLowerCase().includes(search)) return false;
+        if (filter === 'enabled' && !acc.enabled) return false;
+        if (filter === 'disabled' && acc.enabled) return false;
+        if (filter === 'cooldown' && !acc.cooldown) return false;
+        if (filter === 'error' && acc.errors === 0) return false;
+        return true;
+      });
+      filtered.sort((a, b) => {
+        if (sortBy === 'requests') return b.requests - a.requests;
+        if (sortBy === 'errors') return b.errors - a.errors;
+        if (sortBy === 'quota') {
+          const qa = a.quota?.usage_percent ?? 999;
+          const qb = b.quota?.usage_percent ?? 999;
+          return qa - qb;
+        }
+        return a.id.localeCompare(b.id);
+      });
+      filtered.forEach((acc) => {
         const tr = el('tr');
+        // 复选框
+        const chk = el('input', { type: 'checkbox', class: 'acc-check', 'data-id': acc.id });
+        const chkTd = el('td'); chkTd.appendChild(chk); tr.appendChild(chkTd);
         tr.appendChild(el('td', null, acc.id));
         tr.appendChild(el('td', null, String(acc.requests)));
         const err = el('td', null, String(acc.errors));
@@ -262,6 +320,16 @@
         tr.appendChild(op);
         body.appendChild(tr);
       });
+      // 更新全选状态
+      updateCheckAll();
+    }
+    function updateCheckAll() {
+      const all = document.getElementById('acc-check-all');
+      const checks = document.querySelectorAll('.acc-check');
+      all.checked = checks.length > 0 && Array.from(checks).every(c => c.checked);
+    }
+    function getSelectedIds() {
+      return Array.from(document.querySelectorAll('.acc-check:checked')).map(c => c.dataset.id);
     }
     function fmtExp(k) {
       if (k.expires_at == null) return '永不';
@@ -435,11 +503,13 @@
             id: document.getElementById('f-acc-id').value.trim(),
             access_token: document.getElementById('f-acc-tok').value.trim(),
             machine_id: document.getElementById('f-acc-mid').value.trim(),
+            refresh_token: document.getElementById('f-acc-ref').value.trim(),
             enabled: true,
           }),
         });
         toast('acc-msg', '账号已保存并热加载');
         document.getElementById('f-acc-tok').value = '';
+        document.getElementById('f-acc-ref').value = '';
         await loadAll();
       } catch (err) { toast('acc-msg', err.message, true); }
     });
@@ -469,6 +539,32 @@
       } catch (err) { toast('acc-msg', '导入失败: ' + err.message, true); }
       e.target.value = '';
     });
+    // 粘贴导入
+    const pasteDialog = document.getElementById('paste-dialog');
+    document.getElementById('btn-paste-import').addEventListener('click', () => {
+      document.getElementById('paste-text').value = '';
+      pasteDialog.showModal();
+    });
+    document.getElementById('paste-cancel').addEventListener('click', () => {
+      pasteDialog.close();
+    });
+    document.getElementById('paste-submit').addEventListener('click', async () => {
+      const text = document.getElementById('paste-text').value.trim();
+      if (!text) { toast('acc-msg', '内容为空', true); return; }
+      // 转换为 CSV 格式
+      const lines = text.split('\n').filter(l => l.trim());
+      const csv = 'id,access_token,machine_id,refresh_token\n' + lines.join('\n');
+      try {
+        const r = await api('/admin/api/accounts/import', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: csv,
+        });
+        toast('acc-msg', '粘贴导入完成: ' + r.imported + ' 成功, ' + (r.errors || []).length + ' 失败');
+        pasteDialog.close();
+        await loadAll();
+      } catch (err) { toast('acc-msg', '导入失败: ' + err.message, true); }
+    });
     // 导出备份
     document.getElementById('btn-export').addEventListener('click', async () => {
       try {
@@ -479,6 +575,50 @@
         URL.revokeObjectURL(a.href);
         toast('acc-msg', '已导出 ' + data.count + ' 个账号');
       } catch (err) { toast('acc-msg', '导出失败: ' + err.message, true); }
+    });
+    // 搜索/筛选/排序事件
+    document.getElementById('acc-search').addEventListener('input', () => loadAll());
+    document.getElementById('acc-filter').addEventListener('change', () => loadAll());
+    document.getElementById('acc-sort').addEventListener('change', () => loadAll());
+    // 全选
+    document.getElementById('acc-check-all').addEventListener('change', (e) => {
+      document.querySelectorAll('.acc-check').forEach(c => c.checked = e.target.checked);
+    });
+    document.getElementById('btn-select-all').addEventListener('click', () => {
+      const all = document.getElementById('acc-check-all');
+      all.checked = !all.checked;
+      all.dispatchEvent(new Event('change'));
+    });
+    // 批量启用
+    document.getElementById('btn-batch-enable').addEventListener('click', async () => {
+      const ids = getSelectedIds();
+      if (!ids.length) { toast('acc-msg', '未选择账号', true); return; }
+      for (const id of ids) {
+        try { await api('/admin/api/accounts/' + encodeURIComponent(id) + '/enabled', { method: 'POST', body: JSON.stringify({ enabled: true }) }); } catch (e) {}
+      }
+      toast('acc-msg', '批量启用完成: ' + ids.length + ' 个');
+      await loadAll();
+    });
+    // 批量禁用
+    document.getElementById('btn-batch-disable').addEventListener('click', async () => {
+      const ids = getSelectedIds();
+      if (!ids.length) { toast('acc-msg', '未选择账号', true); return; }
+      for (const id of ids) {
+        try { await api('/admin/api/accounts/' + encodeURIComponent(id) + '/enabled', { method: 'POST', body: JSON.stringify({ enabled: false }) }); } catch (e) {}
+      }
+      toast('acc-msg', '批量禁用完成: ' + ids.length + ' 个');
+      await loadAll();
+    });
+    // 批量删除
+    document.getElementById('btn-batch-delete').addEventListener('click', async () => {
+      const ids = getSelectedIds();
+      if (!ids.length) { toast('acc-msg', '未选择账号', true); return; }
+      if (!confirm('确定删除 ' + ids.length + ' 个账号？')) return;
+      for (const id of ids) {
+        try { await api('/admin/api/accounts/' + encodeURIComponent(id), { method: 'DELETE' }); } catch (e) {}
+      }
+      toast('acc-msg', '批量删除完成: ' + ids.length + ' 个');
+      await loadAll();
     });
     loadAll().catch((e) => toast('acc-msg', e.message, true));
     setInterval(() => { loadAll().catch(() => {}); }, 4000);
