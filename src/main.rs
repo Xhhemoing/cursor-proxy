@@ -166,6 +166,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/accounts/:id/cooldown/clear", post(admin::api_account_clear_cooldown))
         .route("/admin/api/accounts/:id/probe", post(admin::api_account_probe))
         .route("/admin/api/accounts/probe-all", post(admin::api_account_probe_all))
+        .route("/admin/api/accounts/import", post(admin::api_accounts_import))
+        .route("/admin/api/accounts/export", get(admin::api_accounts_export))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
         .route("/admin/api/logs", get(admin::api_logs_recent))

@@ -232,5 +232,80 @@ pub async fn api_account_probe_all(State(state): State<Arc<AppState>>) -> impl I
             out.push(json!({"id": id, "quota": snap}));
         }
     }
-    Json(json!({"status": "ok", "accounts": out}))
+    Json(json!({"status": "ok", "probed": out.len(), "results": out}))
+}
+
+/// POST /admin/api/accounts/import — 批量导入账号（JSON 数组或 CSV）
+pub async fn api_accounts_import(
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> Response {
+    // 尝试解析为 JSON 数组
+    let accounts: Vec<Account> = match serde_json::from_str::<Vec<Account>>(&body) {
+        Ok(accs) => accs,
+        Err(_) => {
+            // 尝试 CSV 格式: id,access_token,machine_id,refresh_token,enabled
+            let mut accs = Vec::new();
+            for line in body.lines().skip(1) { // 跳过标题行
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 3 {
+                    accs.push(Account {
+                        id: parts[0].trim().to_string(),
+                        access_token: parts[1].trim().to_string(),
+                        machine_id: parts[2].trim().to_string(),
+                        refresh_token: parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
+                        enabled: parts.get(4).map(|s| s.trim() == "true").unwrap_or(true),
+                        token_expires_at: None,
+                        refresh_url: None,
+                    });
+                }
+            }
+            if accs.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid format, expected JSON array or CSV"})),
+                )
+                    .into_response();
+            }
+            accs
+        }
+    };
+
+    let mut imported = 0;
+    let mut errors = Vec::new();
+    for acc in accounts {
+        let acc_id = acc.id.clone();
+        if acc.id.is_empty() || acc.access_token.is_empty() {
+            errors.push(json!({"id": acc_id, "error": "id and access_token required"}));
+            continue;
+        }
+        match config::upsert_account(acc) {
+            Ok(accounts) => {
+                state.pool.replace_accounts(accounts);
+                imported += 1;
+            }
+            Err(e) => {
+                errors.push(json!({"id": acc_id, "error": e.to_string()}));
+            }
+        }
+    }
+
+    state.audit.account_op("import", "batch", json!({"imported": imported, "errors": errors.len()}));
+    Json(json!({
+        "status": "ok",
+        "imported": imported,
+        "errors": errors,
+        "pool": state.pool.stats(),
+    }))
+    .into_response()
+}
+
+/// GET /admin/api/accounts/export — 导出账号备份
+pub async fn api_accounts_export(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rows = state.pool.account_rows();
+    Json(json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "count": rows.len(),
+        "accounts": rows,
+    }))
 }
