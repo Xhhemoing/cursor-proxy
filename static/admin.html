@@ -492,12 +492,56 @@ function updateSelBar(){
 async function batchOp(op, label){
   const ids=[...S.selected]; if(!ids.length) return;
   if(op==='delete' && !confirm(`确认删除 ${ids.length} 个账号？`)) return;
+  
+  // 显示进度条（使用 textContent 防 XSS）
+  const progressId = 'batch-progress-' + Date.now();
+  const progressDiv = document.createElement('div');
+  progressDiv.id = progressId;
+  progressDiv.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel);border:1px solid var(--line);padding:20px;z-index:1000;min-width:300px;';
+  const labelDiv = document.createElement('div');
+  labelDiv.style.marginBottom = '10px';
+  labelDiv.textContent = label + '中... ';
+  const countSpan = document.createElement('span');
+  countSpan.id = progressId + '-text';
+  countSpan.textContent = '0/' + ids.length;
+  labelDiv.appendChild(countSpan);
+  const progressBar = document.createElement('progress');
+  progressBar.id = progressId + '-bar';
+  progressBar.max = ids.length;
+  progressBar.value = 0;
+  progressBar.style.cssText = 'width:100%;height:20px;';
+  progressDiv.appendChild(labelDiv);
+  progressDiv.appendChild(progressBar);
+  document.body.appendChild(progressDiv);
+  
+  let done = 0;
+  const updateProgress = () => {
+    done++;
+    const bar = document.getElementById(progressId+'-bar');
+    const text = document.getElementById(progressId+'-text');
+    if(bar) bar.value = done;
+    if(text) text.textContent = done + '/' + ids.length;
+  };
+  
   try{
-    const r=await api('/admin/api/accounts/batch',{method:'POST',body:JSON.stringify({ids,op})});
+    // 并发执行，每完成一个更新进度
+    await Promise.all(ids.map(async id => {
+      try{
+        if(op==='enable') await api('/admin/api/accounts/'+encodeURIComponent(id)+'/enabled',{method:'POST',body:JSON.stringify({enabled:true})});
+        else if(op==='disable') await api('/admin/api/accounts/'+encodeURIComponent(id)+'/enabled',{method:'POST',body:JSON.stringify({enabled:false})});
+        else if(op==='clear_cooldown') await api('/admin/api/accounts/'+encodeURIComponent(id)+'/cooldown/clear',{method:'POST'});
+        else if(op==='delete') await api('/admin/api/accounts/'+encodeURIComponent(id),{method:'DELETE'});
+      }catch(e){ console.error('batch op failed for', id, e); }
+      updateProgress();
+    }));
+    
     toast(label+' 完成：'+ids.length+' 个');
     if(op==='delete'||op==='disable') ids.forEach(i=>S.selected.delete(i));
     updateSelBar(); loadPool(true);
   }catch(e){ toast(e.message,true); }
+  finally{
+    document.getElementById(progressId)?.remove();
+  }
 }
 $('#batch-enable').onclick=()=>batchOp('enable','批量启用');
 $('#batch-disable').onclick=()=>batchOp('disable','批量禁用');
