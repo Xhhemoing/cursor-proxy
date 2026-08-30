@@ -55,34 +55,71 @@ pub fn openai_full_response(chunk_id: &str, model: &str, text: &str, usage: Opti
     })
 }
 
-/// 从 Cursor 帧提取 usage
-fn extract_usage(obj: &Value) -> Option<(u64, u64)> {
+/// 一次请求的 token 用量 (四类分别计价)
+///
+/// `input` 为**不含缓存**的输入 tokens: OpenAI 风格 `prompt_tokens_details.cached_tokens` 是
+/// prompt 的子集, 解析时已扣除; Anthropic 风格 `cache_read_input_tokens` 本身就独立于 input_tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl Usage {
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write
+    }
+    pub fn to_openai_json(&self) -> Value {
+        json!({
+            "prompt_tokens": self.input + self.cache_read,
+            "completion_tokens": self.output,
+            "total_tokens": self.total(),
+            "prompt_tokens_details": { "cached_tokens": self.cache_read },
+            "cache_creation_input_tokens": self.cache_write,
+        })
+    }
+}
+
+fn pick_u64(u: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
+}
+
+/// 从上游帧提取 usage (兼容 Cursor extendedUsage / OpenAI / Anthropic 命名)
+fn extract_usage(obj: &Value) -> Option<Usage> {
     let u = obj.get("extendedUsage").or_else(|| obj.get("usage"))?;
-    let prompt = u.get("promptTokens")
-        .or_else(|| u.get("inputTokens"))
-        .or_else(|| u.get("prompt_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let completion = u.get("completionTokens")
-        .or_else(|| u.get("outputTokens"))
-        .or_else(|| u.get("output_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    Some((prompt, completion))
+    let mut input = pick_u64(u, &["promptTokens", "inputTokens", "prompt_tokens", "input_tokens"]).unwrap_or(0);
+    let output = pick_u64(u, &["completionTokens", "outputTokens", "completion_tokens", "output_tokens"]).unwrap_or(0);
+    // 独立字段 (Anthropic 风格): 不属于 input
+    let mut cache_read = pick_u64(u, &["cacheReadTokens", "cacheReadInputTokens", "cache_read_input_tokens", "cache_read_tokens"]).unwrap_or(0);
+    let cache_write = pick_u64(u, &["cacheWriteTokens", "cacheCreationInputTokens", "cache_creation_input_tokens", "cache_write_tokens"]).unwrap_or(0);
+    // 子集字段 (OpenAI 风格): 从 prompt 中扣除
+    if cache_read == 0 {
+        let cached = u.get("promptTokensDetails").or_else(|| u.get("prompt_tokens_details"))
+            .and_then(|d| pick_u64(d, &["cachedTokens", "cached_tokens"]))
+            .or_else(|| pick_u64(u, &["cachedTokens", "cached_tokens"]))
+            .unwrap_or(0);
+        if cached > 0 {
+            cache_read = cached;
+            input = input.saturating_sub(cached);
+        }
+    }
+    Some(Usage { input, output, cache_read, cache_write })
 }
 
 /// 流式翻译: 上游帧流 → OpenAI SSE 流（泛化错误类型，支持 Cursor/OpenAI 等任意上游）
 pub fn upstream_to_openai_stream<E>(
     frames: Pin<Box<dyn Stream<Item = Result<Value, E>> + Send>>,
     model: &str,
-) -> impl Stream<Item = Result<(String, Option<(u64, u64)>), String>>
+) -> impl Stream<Item = Result<(String, Option<Usage>), String>>
 where
     E: std::fmt::Display + Send + 'static,
 {
     let chunk_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let model = model.to_string();
     let mut first = true;
-    let mut usage: Option<(u64, u64)> = None;
+    let mut usage: Option<Usage> = None;
 
     futures_util::stream::unfold(
         (frames, chunk_id, model, first, usage),
@@ -141,13 +178,13 @@ where
 pub async fn upstream_to_openai_full<E>(
     mut frames: Pin<Box<dyn Stream<Item = Result<Value, E>> + Send>>,
     model: &str,
-) -> Result<(Value, (u64, u64)), String>
+) -> Result<(Value, Usage), String>
 where
     E: std::fmt::Display + Send + 'static,
 {
     let chunk_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let mut text = String::with_capacity(4096);
-    let mut usage = (0u64, 0u64);
+    let mut usage = Usage::default();
 
     while let Some(item) = frames.next().await {
         let obj = item.map_err(|e| e.to_string())?;
@@ -164,10 +201,5 @@ where
         }
     }
 
-    let usage_json = json!({
-        "prompt_tokens": usage.0,
-        "completion_tokens": usage.1,
-        "total_tokens": usage.0 + usage.1,
-    });
-    Ok((openai_full_response(&chunk_id, model, &text, Some(usage_json)), usage))
+    Ok((openai_full_response(&chunk_id, model, &text, Some(usage.to_openai_json())), usage))
 }

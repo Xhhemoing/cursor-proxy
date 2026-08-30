@@ -270,11 +270,13 @@ pub async fn api_pricing_patch(
             if m.is_empty() || m.len() > 120 {
                 return bad("price rule: model required (<=120 chars)");
             }
-            if !r.input_per_m.is_finite() || !r.output_per_m.is_finite() || r.input_per_m < 0.0 || r.output_per_m < 0.0 {
-                return bad(format!("price rule '{}': prices must be >= 0", m));
-            }
-            if r.input_per_m > 1e9 || r.output_per_m > 1e9 {
-                return bad(format!("price rule '{}': price too large", m));
+            for v in [r.input_per_m, r.output_per_m, r.cache_read_per_m, r.cache_write_per_m] {
+                if !v.is_finite() || v < 0.0 {
+                    return bad(format!("price rule '{}': prices must be >= 0", m));
+                }
+                if v > 1e9 {
+                    return bad(format!("price rule '{}': price too large", m));
+                }
             }
             if !seen.insert(m.to_string()) {
                 return bad(format!("duplicate price rule '{}'", m));

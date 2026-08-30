@@ -20,6 +20,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{ApiKeyRecord, BillingConfig, ModelPrice};
+pub use crate::translate::Usage;
 
 pub const NANO_PER_UNIT: i64 = 1_000_000_000;
 
@@ -32,6 +33,8 @@ pub const NANO_PER_UNIT: i64 = 1_000_000_000;
 pub struct PriceQuote {
     pub input_micro: u64,
     pub output_micro: u64,
+    pub cache_read_micro: u64,
+    pub cache_write_micro: u64,
     /// 是否命中价格规则 (未命中时两者为 0, 账单标 unpriced)
     pub priced: bool,
 }
@@ -66,11 +69,15 @@ pub fn quote(cfg: &BillingConfig, model: &str) -> PriceQuote {
         Some(p) => PriceQuote {
             input_micro: p.input_micro(),
             output_micro: p.output_micro(),
+            cache_read_micro: p.cache_read_micro(),
+            cache_write_micro: p.cache_write_micro(),
             priced: true,
         },
         None => PriceQuote {
             input_micro: 0,
             output_micro: 0,
+            cache_read_micro: 0,
+            cache_write_micro: 0,
             priced: false,
         },
     }
@@ -78,9 +85,11 @@ pub fn quote(cfg: &BillingConfig, model: &str) -> PriceQuote {
 
 /// 成本 (nano). tokens × 每 1M 单价 (micro) = pico, 半入舍到 nano. 全程整数.
 #[inline]
-pub fn cost_nano(input_tokens: u64, output_tokens: u64, q: &PriceQuote) -> i64 {
-    let pico = (input_tokens as u128) * (q.input_micro as u128)
-        + (output_tokens as u128) * (q.output_micro as u128);
+pub fn cost_nano(u: &Usage, q: &PriceQuote) -> i64 {
+    let pico = (u.input as u128) * (q.input_micro as u128)
+        + (u.output as u128) * (q.output_micro as u128)
+        + (u.cache_read as u128) * (q.cache_read_micro as u128)
+        + (u.cache_write as u128) * (q.cache_write_micro as u128);
     ((pico + 500) / 1000).min(i64::MAX as u128) as i64
 }
 
@@ -170,8 +179,12 @@ pub struct BillingRecord {
     pub account: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub input_price_micro: u64,
     pub output_price_micro: u64,
+    pub cache_read_price_micro: u64,
+    pub cache_write_price_micro: u64,
     pub priced: bool,
     pub cost_nano: i64,
     pub commission_nano: i64,
@@ -190,8 +203,7 @@ impl BillingRecord {
         req_id: &str,
         model: &str,
         account: &str,
-        input_tokens: u64,
-        output_tokens: u64,
+        usage: Usage,
         stream: bool,
         status: u16,
         latency_ms: u64,
@@ -199,7 +211,7 @@ impl BillingRecord {
     ) -> Self {
         // 只有成功完成的请求计费; 失败/超时记录 0 元留痕
         let (cost, comm) = if status == 200 {
-            let c = cost_nano(input_tokens, output_tokens, &ctx.quote);
+            let c = cost_nano(&usage, &ctx.quote);
             (c, commission_nano(c, ctx.commission_bps))
         } else {
             (0, 0)
@@ -214,10 +226,14 @@ impl BillingRecord {
             commission_bps: ctx.commission_bps,
             model: model.to_string(),
             account: account.to_string(),
-            input_tokens,
-            output_tokens,
+            input_tokens: usage.input,
+            output_tokens: usage.output,
+            cache_read_tokens: usage.cache_read,
+            cache_write_tokens: usage.cache_write,
             input_price_micro: ctx.quote.input_micro,
             output_price_micro: ctx.quote.output_micro,
+            cache_read_price_micro: ctx.quote.cache_read_micro,
+            cache_write_price_micro: ctx.quote.cache_write_micro,
             priced: ctx.quote.priced,
             cost_nano: cost,
             commission_nano: comm,
@@ -306,6 +322,7 @@ impl Ledger {
         let db_path = db_path.as_ref().to_path_buf();
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         let (tx, rx) = mpsc::channel::<Msg>();
         let pending = Arc::new(AtomicU64::new(0));
         let written = Arc::new(AtomicU64::new(0));
@@ -379,6 +396,24 @@ impl Ledger {
         conn.busy_timeout(Duration::from_secs(5))?;
         Ok(conn)
     }
+}
+
+/// 增量迁移: 老库补缓存列 (SQLite ALTER TABLE ADD COLUMN 带默认值, 对既有行安全)
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(billing_records)")?;
+    let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
+    for (name, ddl) in [
+        ("cache_read_tokens", "ALTER TABLE billing_records ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0"),
+        ("cache_write_tokens", "ALTER TABLE billing_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
+        ("cache_read_price_micro", "ALTER TABLE billing_records ADD COLUMN cache_read_price_micro INTEGER NOT NULL DEFAULT 0"),
+        ("cache_write_price_micro", "ALTER TABLE billing_records ADD COLUMN cache_write_price_micro INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !cols.iter().any(|c| c == name) {
+            conn.execute_batch(ddl)?;
+            tracing::info!(event = "billing_migrate", column = name, "added column");
+        }
+    }
+    Ok(())
 }
 
 fn writer_loop(
@@ -463,8 +498,9 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
             "INSERT OR IGNORE INTO billing_records (
                 ts_ms, req_id, key_hash, key_prefix, key_name, sales_id, commission_bps,
                 model, account, input_tokens, output_tokens, input_price_micro, output_price_micro,
-                priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags,
+                cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         )?;
         let mut ins_tag =
             tx.prepare_cached("INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)")?;
@@ -492,6 +528,10 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 r.latency_ms as i64,
                 r.client_ip,
                 tags_json,
+                r.cache_read_tokens as i64,
+                r.cache_write_tokens as i64,
+                r.cache_read_price_micro as i64,
+                r.cache_write_price_micro as i64,
             ])?;
             if n == 0 {
                 dups += 1;
@@ -664,8 +704,12 @@ fn row_to_json(row: &rusqlite::Row<'_>, tz_offset_minutes: i32) -> rusqlite::Res
         "account": row.get::<_, String>("account")?,
         "input_tokens": row.get::<_, i64>("input_tokens")?,
         "output_tokens": row.get::<_, i64>("output_tokens")?,
+        "cache_read_tokens": row.get::<_, i64>("cache_read_tokens")?,
+        "cache_write_tokens": row.get::<_, i64>("cache_write_tokens")?,
         "input_price_per_m": fmt_money(row.get::<_, i64>("input_price_micro")? * 1000),
         "output_price_per_m": fmt_money(row.get::<_, i64>("output_price_micro")? * 1000),
+        "cache_read_price_per_m": fmt_money(row.get::<_, i64>("cache_read_price_micro")? * 1000),
+        "cache_write_price_per_m": fmt_money(row.get::<_, i64>("cache_write_price_micro")? * 1000),
         "priced": row.get::<_, i64>("priced")? != 0,
         "cost_nano": cost,
         "cost": fmt_money(cost),
@@ -789,6 +833,8 @@ pub fn summary(
             SUM(CASE WHEN r.status = 200 THEN 1 ELSE 0 END) AS ok, \
             SUM(r.input_tokens) AS input_tokens, \
             SUM(r.output_tokens) AS output_tokens, \
+            SUM(r.cache_read_tokens) AS cache_read_tokens, \
+            SUM(r.cache_write_tokens) AS cache_write_tokens, \
             SUM(r.cost_nano) AS cost_nano, \
             SUM(r.commission_nano) AS commission_nano, \
             SUM(CASE WHEN r.priced = 0 AND r.status = 200 THEN 1 ELSE 0 END) AS unpriced, \
@@ -807,6 +853,8 @@ pub fn summary(
                 "ok": r.get::<_, i64>("ok")?,
                 "input_tokens": r.get::<_, Option<i64>>("input_tokens")?.unwrap_or(0),
                 "output_tokens": r.get::<_, Option<i64>>("output_tokens")?.unwrap_or(0),
+                "cache_read_tokens": r.get::<_, Option<i64>>("cache_read_tokens")?.unwrap_or(0),
+                "cache_write_tokens": r.get::<_, Option<i64>>("cache_write_tokens")?.unwrap_or(0),
                 "cost_nano": cost,
                 "cost": fmt_money(cost),
                 "commission_nano": comm,
@@ -849,7 +897,7 @@ pub fn export_csv(
     let lim = max_rows as i64;
     args.push(&lim);
     let mut out = String::with_capacity(64 * 1024);
-    out.push_str("time,req_id,key_prefix,key_name,sales_id,commission_bps,model,account,input_tokens,output_tokens,input_price_per_m,output_price_per_m,priced,cost,commission,stream,status,latency_ms,client_ip,tags\n");
+    out.push_str("time,req_id,key_prefix,key_name,sales_id,commission_bps,model,account,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,input_price_per_m,output_price_per_m,cache_read_price_per_m,cache_write_price_per_m,priced,cost,commission,stream,status,latency_ms,client_ip,tags\n");
     let rows = stmt.query_map(params_from_iter(args), |r| {
         let tags: String = r.get("tags")?;
         let tags_v: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
@@ -864,8 +912,12 @@ pub fn export_csv(
             r.get::<_, String>("account")?,
             r.get::<_, i64>("input_tokens")?.to_string(),
             r.get::<_, i64>("output_tokens")?.to_string(),
+            r.get::<_, i64>("cache_read_tokens")?.to_string(),
+            r.get::<_, i64>("cache_write_tokens")?.to_string(),
             fmt_money(r.get::<_, i64>("input_price_micro")? * 1000),
             fmt_money(r.get::<_, i64>("output_price_micro")? * 1000),
+            fmt_money(r.get::<_, i64>("cache_read_price_micro")? * 1000),
+            fmt_money(r.get::<_, i64>("cache_write_price_micro")? * 1000),
             (r.get::<_, i64>("priced")? != 0).to_string(),
             fmt_money(r.get("cost_nano")?),
             fmt_money(r.get("commission_nano")?),
@@ -905,8 +957,13 @@ mod tests {
             model: model.into(),
             input_per_m: i,
             output_per_m: o,
+            cache_read_per_m: 0.0,
+            cache_write_per_m: 0.0,
             note: String::new(),
         }
+    }
+    fn u(i: u64, o: u64) -> Usage {
+        Usage { input: i, output: o, cache_read: 0, cache_write: 0 }
     }
 
     #[test]
@@ -927,9 +984,12 @@ mod tests {
     #[test]
     fn money_is_exact_integer_math() {
         // $3 / 1M input, $15 / 1M output
-        let q = PriceQuote { input_micro: 3_000_000, output_micro: 15_000_000, priced: true };
+        let q = PriceQuote { input_micro: 3_000_000, output_micro: 15_000_000, cache_read_micro: 300_000, cache_write_micro: 3_750_000, priced: true };
         // 1234 in + 567 out → 1234*3 + 567*15 = 3702 + 8505 = 12207 micro = 0.012207
-        let c = cost_nano(1234, 567, &q);
+        let c = cost_nano(&u(1234, 567), &q);
+        // 缓存: 1000 读 @0.3 + 200 写 @3.75 → 300 + 750 = 1050 micro
+        let cc = cost_nano(&Usage { input: 0, output: 0, cache_read: 1000, cache_write: 200 }, &q);
+        assert_eq!(cc, 1_050_000);
         assert_eq!(c, 12_207_000);
         assert_eq!(fmt_money(c), "0.012207");
         // 15% commission, 四舍五入到 nano
@@ -942,7 +1002,7 @@ mod tests {
         assert_eq!(fmt_money(1_000_000_000), "1.00");
         assert_eq!(fmt_money(-1_500_000_000), "-1.50");
         // 超大量不溢出
-        let big = cost_nano(u64::MAX / 4, u64::MAX / 4, &q);
+        let big = cost_nano(&u(u64::MAX / 4, u64::MAX / 4), &q);
         assert_eq!(big, i64::MAX);
     }
 
@@ -984,7 +1044,26 @@ mod tests {
     }
 
     fn rec(ctx: &BillingCtx, req: &str, model: &str, inp: u64, out: u64, status: u16) -> BillingRecord {
-        BillingRecord::build(ctx, req, model, "acc1", inp, out, false, status, 100, "127.0.0.1")
+        BillingRecord::build(ctx, req, model, "acc1", u(inp, out), false, status, 100, "127.0.0.1")
+    }
+
+    #[test]
+    fn migrate_adds_cache_columns_to_old_db() {
+        let db = tmp_db();
+        {
+            let c = Connection::open(&db).unwrap();
+            // 老 schema (无缓存列)
+            c.execute_batch("CREATE TABLE billing_records (id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, req_id TEXT NOT NULL UNIQUE, key_hash TEXT NOT NULL, key_prefix TEXT NOT NULL, key_name TEXT NOT NULL, sales_id TEXT, commission_bps INTEGER NOT NULL, model TEXT NOT NULL, account TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, input_price_micro INTEGER NOT NULL, output_price_micro INTEGER NOT NULL, priced INTEGER NOT NULL, cost_nano INTEGER NOT NULL, commission_nano INTEGER NOT NULL, stream INTEGER NOT NULL, status INTEGER NOT NULL, latency_ms INTEGER NOT NULL, client_ip TEXT NOT NULL, tags TEXT NOT NULL);
+                INSERT INTO billing_records VALUES (1, 1, 'old', 'h', 'p', 'n', NULL, 0, 'm', 'a', 10, 20, 0, 0, 0, 0, 0, 0, 200, 1, '', '[]');").unwrap();
+        }
+        let ledger = Ledger::open(&db).unwrap();
+        let conn = ledger.reader().unwrap();
+        let (rows, n) = query_records(&conn, &Filter::default(), 10, 0, 0).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(rows[0]["cache_read_tokens"], 0);
+        let sum = summary(&conn, &Filter::default(), GroupBy::None, 0).unwrap();
+        assert_eq!(sum[0]["input_tokens"], 10);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]

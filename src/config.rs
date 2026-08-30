@@ -87,6 +87,12 @@ pub struct ModelPrice {
     pub input_per_m: f64,
     /// 每 1M 输出 tokens 价格
     pub output_per_m: f64,
+    /// 每 1M 缓存读 tokens 价格 (默认 0)
+    #[serde(default)]
+    pub cache_read_per_m: f64,
+    /// 每 1M 缓存写 tokens 价格 (默认 0)
+    #[serde(default)]
+    pub cache_write_per_m: f64,
     #[serde(default)]
     pub note: String,
 }
@@ -98,6 +104,12 @@ impl ModelPrice {
     }
     pub fn output_micro(&self) -> u64 {
         money_to_micro(self.output_per_m)
+    }
+    pub fn cache_read_micro(&self) -> u64 {
+        money_to_micro(self.cache_read_per_m)
+    }
+    pub fn cache_write_micro(&self) -> u64 {
+        money_to_micro(self.cache_write_per_m)
     }
 }
 
