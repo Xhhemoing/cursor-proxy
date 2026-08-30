@@ -465,10 +465,10 @@
         </div>
         <dialog id="px-import-dialog">
           <h3>批量导入代理</h3>
-          <p>每行一个，支持 <code>http://user:pass@host:port</code> · <code>host:port</code> · <code>host:port:user:pass</code> · <code>user:pass@host:port</code> · 逗号/空格/Tab 分隔的 <code>host,port,user,pass</code>；<code>#</code> 开头为注释，重复 URL 自动跳过</p>
-          <textarea id="px-import-text" rows="10" placeholder="1.2.3.4:8080:user:pass&#10;http://user:pass@5.6.7.8:3128&#10;9.9.9.9,8000,u,p"></textarea>
+          <p>每行一个，支持 <code>http://</code> <code>https://</code> <code>socks5://user:pass@host:port</code> · <code>host:port</code> · <code>host:port:user:pass</code> · <code>user:pass@host:port</code> · 逗号/空格/Tab 分隔的 <code>host,port,user,pass</code>；<code>#</code> 开头为注释，重复 URL 自动跳过</p>
+          <textarea id="px-import-text" rows="10" placeholder="socks5://user:pass@1.2.3.4:1080&#10;http://user:pass@5.6.7.8:3128&#10;9.9.9.9:8000:u:p&#10;7.7.7.7,8000,u,p"></textarea>
           <div class="fields" style="margin-top:12px">
-            <label>协议 <select id="px-import-kind"><option value="http">http</option><option value="https">https</option></select></label>
+            <label>协议 <select id="px-import-kind"><option value="http">http</option><option value="https">https</option><option value="socks5">socks5</option></select></label>
             <label>ID 前缀 <input id="px-import-prefix" placeholder="px" style="width:90px"></label>
             <label>区域 <input id="px-import-region" placeholder="可空" style="width:90px"></label>
             <label>标签 <input id="px-import-tags" placeholder="逗号分隔" style="width:140px"></label>
@@ -1623,7 +1623,7 @@
     }
     document.getElementById('btn-proxy-add').addEventListener('click', async () => {
       const id = prompt('节点 ID'); if (!id) return;
-      const url = prompt('代理 URL (http://user:pass@host:port)'); if (!url) return;
+      const url = prompt('代理 URL (http:// 或 socks5://user:pass@host:port)'); if (!url) return;
       const region = prompt('区域 (可空)', '') || '';
       const tags = splitTags(prompt('标签逗号分隔', '') || '');
       try {

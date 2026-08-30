@@ -198,12 +198,38 @@ pub struct CursorClient {
 }
 
 /// 经 HTTP 代理 CONNECT 的客户端, 连接器类型与直连不同, 所以分开存.
+type ProxyBody = http_body_util::Full<hyper::body::Bytes>;
+
 #[derive(Clone)]
-struct ProxiedClient {
-    inner: Client<
-        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::proxy::Tunnel<HttpConnector>>,
-        http_body_util::Full<hyper::body::Bytes>,
-    >,
+enum ProxiedClient {
+    Http(
+        Client<
+            hyper_rustls::HttpsConnector<
+                hyper_util::client::legacy::connect::proxy::Tunnel<HttpConnector>,
+            >,
+            ProxyBody,
+        >,
+    ),
+    Socks5(
+        Client<
+            hyper_rustls::HttpsConnector<
+                hyper_util::client::legacy::connect::proxy::SocksV5<HttpConnector>,
+            >,
+            ProxyBody,
+        >,
+    ),
+}
+
+impl ProxiedClient {
+    async fn request(
+        &self,
+        req: hyper::Request<ProxyBody>,
+    ) -> Result<hyper::Response<Incoming>, hyper_util::client::legacy::Error> {
+        match self {
+            ProxiedClient::Http(c) => c.request(req).await,
+            ProxiedClient::Socks5(c) => c.request(req).await,
+        }
+    }
 }
 
 impl CursorClient {
@@ -243,27 +269,50 @@ impl CursorClient {
         let proxy_uri: hyper::Uri = format!("http://{}:{}", parsed.host, parsed.port)
             .parse()
             .map_err(|e| anyhow::anyhow!("proxy uri: {e}"))?;
-        let mut tunnel =
-            hyper_util::client::legacy::connect::proxy::Tunnel::new(proxy_uri, http);
-        if let (Some(u), Some(p)) = (&parsed.user, &parsed.pass) {
-            use base64::Engine;
-            let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
-            let hv = hyper::header::HeaderValue::from_str(&format!("Basic {token}"))
-                .map_err(|e| anyhow::anyhow!("proxy auth header: {e}"))?;
-            tunnel = tunnel.with_auth(hv);
-        }
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_all_versions()
-            .wrap_connector(tunnel);
-        let inner = Client::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(32)
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .build(https);
+        let proxied = if parsed.socks5 {
+            let mut socks =
+                hyper_util::client::legacy::connect::proxy::SocksV5::new(proxy_uri, http);
+            if let Some(u) = parsed.user.as_deref().filter(|u| !u.is_empty()) {
+                socks = socks.with_auth(u.to_string(), parsed.pass.clone().unwrap_or_default());
+            }
+            // 域名交给代理端解析, 避免本机 DNS 泄漏/被污染
+            socks = socks.local_dns(false);
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_webpki_roots()
+                .https_or_http()
+                .enable_all_versions()
+                .wrap_connector(socks);
+            ProxiedClient::Socks5(
+                Client::builder(TokioExecutor::new())
+                    .pool_max_idle_per_host(32)
+                    .pool_idle_timeout(std::time::Duration::from_secs(90))
+                    .build(https),
+            )
+        } else {
+            let mut tunnel =
+                hyper_util::client::legacy::connect::proxy::Tunnel::new(proxy_uri, http);
+            if let (Some(u), Some(p)) = (&parsed.user, &parsed.pass) {
+                use base64::Engine;
+                let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
+                let hv = hyper::header::HeaderValue::from_str(&format!("Basic {token}"))
+                    .map_err(|e| anyhow::anyhow!("proxy auth header: {e}"))?;
+                tunnel = tunnel.with_auth(hv);
+            }
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_webpki_roots()
+                .https_or_http()
+                .enable_all_versions()
+                .wrap_connector(tunnel);
+            ProxiedClient::Http(
+                Client::builder(TokioExecutor::new())
+                    .pool_max_idle_per_host(32)
+                    .pool_idle_timeout(std::time::Duration::from_secs(90))
+                    .build(https),
+            )
+        };
         Ok(Self {
             client: build_direct_client()?,
-            proxied: Some(ProxiedClient { inner }),
+            proxied: Some(proxied),
             backend: backend.to_string(),
             timeout_s,
             proxy_id: Some(proxy_id.to_string()),
@@ -329,7 +378,7 @@ impl CursorClient {
         req: hyper::Request<http_body_util::Full<hyper::body::Bytes>>,
     ) -> Result<hyper::Response<Incoming>, hyper_util::client::legacy::Error> {
         if let Some(p) = &self.proxied {
-            p.inner.request(req).await
+            p.request(req).await
         } else {
             self.client.request(req).await
         }
@@ -547,3 +596,5 @@ mod tests {
         assert_eq!(body["conversationId"], a);
     }
 }
+
+

@@ -146,10 +146,10 @@ pub async fn api_proxies_import(
     Json(body): Json<ProxyImportBody>,
 ) -> Response {
     let scheme = body.kind.as_deref().unwrap_or("http");
-    let kind = if scheme.eq_ignore_ascii_case("https") {
-        proxypool::ProxyKind::Https
-    } else {
-        proxypool::ProxyKind::Http
+    let default_kind = match scheme.to_ascii_lowercase().as_str() {
+        "https" => proxypool::ProxyKind::Https,
+        "socks5" | "socks5h" | "socks" => proxypool::ProxyKind::Socks5,
+        _ => proxypool::ProxyKind::Http,
     };
     let prefix = body
         .id_prefix
@@ -200,6 +200,13 @@ pub async fn api_proxies_import(
             if !existing_ids.contains(&id) {
                 break id;
             }
+        };
+        // 行自带 scheme 时以行为准
+        let kind = match url.split("://").next().unwrap_or("") {
+            "socks5" | "socks5h" | "socks" => proxypool::ProxyKind::Socks5,
+            "https" => proxypool::ProxyKind::Https,
+            "http" => proxypool::ProxyKind::Http,
+            _ => default_kind,
         };
         added.push(ProxyNode {
             id,
@@ -343,7 +350,7 @@ pub async fn probe_nodes(state: &Arc<AppState>, ids: Option<&[String]>) -> Vec<s
 
 async fn probe_one(url: &str, timeout: std::time::Duration) -> Result<String, String> {
     let parsed = proxypool::parse_proxy_url(url)?;
-    let stream = proxypool::connect_via_http_proxy(&parsed, "api.ipify.org", 443, timeout).await?;
+    let stream = proxypool::connect_via_proxy(&parsed, "api.ipify.org", 443, timeout).await?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(
         rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore {

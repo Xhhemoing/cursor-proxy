@@ -717,6 +717,8 @@ pub struct ParsedProxy {
     pub user: Option<String>,
     pub pass: Option<String>,
     pub https: bool,
+    /// socks5:// 或 socks5h://
+    pub socks5: bool,
 }
 
 pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
@@ -725,8 +727,11 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
         .split_once("://")
         .ok_or_else(|| "proxy url must be http://host:port".to_string())?;
     let scheme = scheme.to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err(format!("unsupported proxy scheme '{scheme}' (http/https CONNECT only)"));
+    let socks5 = matches!(scheme.as_str(), "socks5" | "socks5h" | "socks");
+    if !socks5 && scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "unsupported proxy scheme '{scheme}' (http / https / socks5)"
+        ));
     }
     let (creds, hostport) = if let Some((c, h)) = rest.split_once('@') {
         (Some(c), h)
@@ -740,7 +745,8 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
             .map_err(|_| format!("invalid proxy port '{p}'"))?;
         (h.trim_start_matches('[').trim_end_matches(']').to_string(), port)
     } else {
-        (hostport.to_string(), if scheme == "https" { 443 } else { 80 })
+        let default_port = if socks5 { 1080 } else if scheme == "https" { 443 } else { 80 };
+        (hostport.to_string(), default_port)
     };
     if host.is_empty() {
         return Err("empty proxy host".into());
@@ -758,6 +764,7 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
         user,
         pass,
         https: scheme == "https",
+        socks5,
     })
 }
 
@@ -786,6 +793,123 @@ fn from_hex(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// 按代理协议 (HTTP CONNECT / SOCKS5) 建立到 target 的 TCP 隧道.
+pub async fn connect_via_proxy(
+    proxy: &ParsedProxy,
+    target_host: &str,
+    target_port: u16,
+    timeout: Duration,
+) -> Result<tokio::net::TcpStream, String> {
+    if proxy.socks5 {
+        connect_via_socks5(proxy, target_host, target_port, timeout).await
+    } else {
+        connect_via_http_proxy(proxy, target_host, target_port, timeout).await
+    }
+}
+
+/// SOCKS5 (RFC 1928) + 用户名密码认证 (RFC 1929). 目标以域名交给代理端解析 (socks5h 语义).
+pub async fn connect_via_socks5(
+    proxy: &ParsedProxy,
+    target_host: &str,
+    target_port: u16,
+    timeout: Duration,
+) -> Result<tokio::net::TcpStream, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let connect_fut = tokio::net::TcpStream::connect((proxy.host.as_str(), proxy.port));
+    let mut stream = tokio::time::timeout(timeout, connect_fut)
+        .await
+        .map_err(|_| format!("socks5 {}:{} connect timeout", proxy.host, proxy.port))?
+        .map_err(|e| format!("socks5 {}:{} connect: {e}", proxy.host, proxy.port))?;
+    stream.set_nodelay(true).ok();
+    let deadline = Instant::now() + timeout;
+
+    macro_rules! io {
+        ($fut:expr, $what:literal) => {
+            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), $fut)
+                .await
+                .map_err(|_| concat!("socks5 ", $what, " timeout").to_string())?
+                .map_err(|e| format!(concat!("socks5 ", $what, ": {}"), e))?
+        };
+    }
+
+    let has_auth = matches!(&proxy.user, Some(u) if !u.is_empty());
+    // greeting: VER NMETHODS METHODS
+    let greeting: &[u8] = if has_auth { &[5, 2, 0, 2] } else { &[5, 1, 0] };
+    io!(stream.write_all(greeting), "greeting write");
+    let mut resp = [0u8; 2];
+    io!(stream.read_exact(&mut resp), "greeting read");
+    if resp[0] != 5 {
+        return Err(format!("socks5 bad version {}", resp[0]));
+    }
+    match resp[1] {
+        0 => {}
+        2 => {
+            if !has_auth {
+                return Err("socks5 proxy requires username/password".into());
+            }
+            let u = proxy.user.as_deref().unwrap_or("").as_bytes();
+            let pw = proxy.pass.as_deref().unwrap_or("").as_bytes();
+            if u.len() > 255 || pw.len() > 255 {
+                return Err("socks5 credentials too long".into());
+            }
+            let mut auth = Vec::with_capacity(3 + u.len() + pw.len());
+            auth.push(1);
+            auth.push(u.len() as u8);
+            auth.extend_from_slice(u);
+            auth.push(pw.len() as u8);
+            auth.extend_from_slice(pw);
+            io!(stream.write_all(&auth), "auth write");
+            let mut ar = [0u8; 2];
+            io!(stream.read_exact(&mut ar), "auth read");
+            if ar[1] != 0 {
+                return Err("socks5 authentication failed".into());
+            }
+        }
+        0xff => return Err("socks5 no acceptable auth method".into()),
+        m => return Err(format!("socks5 unsupported auth method {m}")),
+    }
+    // CONNECT: VER CMD RSV ATYP(3=domain) LEN HOST PORT
+    let host = target_host.as_bytes();
+    if host.len() > 255 {
+        return Err("socks5 target host too long".into());
+    }
+    let mut req = Vec::with_capacity(7 + host.len());
+    req.extend_from_slice(&[5, 1, 0, 3, host.len() as u8]);
+    req.extend_from_slice(host);
+    req.extend_from_slice(&target_port.to_be_bytes());
+    io!(stream.write_all(&req), "connect write");
+    let mut head = [0u8; 4];
+    io!(stream.read_exact(&mut head), "connect read");
+    if head[1] != 0 {
+        let why = match head[1] {
+            1 => "general failure",
+            2 => "connection not allowed by ruleset",
+            3 => "network unreachable",
+            4 => "host unreachable",
+            5 => "connection refused",
+            6 => "ttl expired",
+            7 => "command not supported",
+            8 => "address type not supported",
+            _ => "unknown error",
+        };
+        return Err(format!("socks5 connect failed: {why} ({})", head[1]));
+    }
+    // 吃掉 BND.ADDR + BND.PORT
+    let addr_len = match head[3] {
+        1 => 4,
+        4 => 16,
+        3 => {
+            let mut l = [0u8; 1];
+            io!(stream.read_exact(&mut l), "bind addr read");
+            l[0] as usize
+        }
+        t => return Err(format!("socks5 bad bind atyp {t}")),
+    };
+    let mut rest = vec![0u8; addr_len + 2];
+    io!(stream.read_exact(&mut rest), "bind addr read");
+    Ok(stream)
 }
 
 /// 经 HTTP CONNECT 隧道连到 target_host:target_port, 再包 TLS.
@@ -857,7 +981,7 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 }
 
 /// 把批量导入里的一行宽松地解析成规范代理 URL. 支持:
-/// - `http://user:pass@host:port` / `https://...` (原样校验)
+/// - `http://user:pass@host:port` / `https://...` / `socks5://...` (原样校验)
 /// - `user:pass@host:port`
 /// - `host:port`
 /// - `host:port:user:pass`
@@ -872,6 +996,7 @@ pub fn parse_proxy_line(line: &str, default_scheme: &str) -> Result<Option<Strin
     let line = line.split(" #").next().unwrap_or(line).trim();
     let scheme = match default_scheme.trim().to_ascii_lowercase().as_str() {
         "https" => "https",
+        "socks5" | "socks5h" | "socks" => "socks5",
         _ => "http",
     };
     if line.contains("://") {
@@ -1079,7 +1204,12 @@ mod tests {
         assert!(parse_proxy_line("", "http").unwrap().is_none());
         assert!(parse_proxy_line("# c", "http").unwrap().is_none());
         assert!(parse_proxy_line("1.2.3.4:abc", "http").is_err());
-        assert!(parse_proxy_line("socks5://1.2.3.4:1080", "http").is_err());
+        assert_eq!(ok("socks5://u:p@1.2.3.4:1080"), "socks5://u:p@1.2.3.4:1080");
+        assert_eq!(parse_proxy_line("1.2.3.4:1080:u:p", "socks5").unwrap().unwrap(), "socks5://u:p@1.2.3.4:1080");
+        assert!(parse_proxy_line("ftp://1.2.3.4:21", "http").is_err());
+        let sp = parse_proxy_url("socks5://1.2.3.4").unwrap();
+        assert!(sp.socks5);
+        assert_eq!(sp.port, 1080);
         let p = parse_proxy_url(&ok("1.2.3.4:8080:u:p@ss")).unwrap();
         assert_eq!(p.pass.as_deref(), Some("p@ss"));
     }
