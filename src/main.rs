@@ -12,6 +12,7 @@ mod config;
 mod cursor;
 mod pool;
 mod translate;
+mod protocol;
 mod admin;
 mod logbuf;
 mod quota;
@@ -44,7 +45,9 @@ use tracing::{error, info, warn};
 use crate::config::{ApiKeyRecord, AppConfig};
 use crate::cursor::CursorClient;
 use crate::pool::AccountPool;
-use crate::translate::{upstream_to_openai_stream, upstream_to_openai_full, openai_error};
+use crate::translate::{
+    openai_error, upstream_to_dialect_full, upstream_to_dialect_stream, Dialect,
+};
 
 pub struct AppState {
     /// 热路径无锁读 (ArcSwap); admin 用 lock() 取可写 guard
@@ -272,6 +275,8 @@ async fn main() -> anyhow::Result<()> {
         // 1M-token 上下文请求体可达 ~3.2MB（kimi-k3 等长上下文模型），
         // axum 默认 DefaultBodyLimit 为 2MB 会以 413 拦截，这里放宽到 64MB。
         .route("/v1/chat/completions", post(chat_handler))
+        .route("/v1/messages", post(messages_handler))
+        .route("/v1/responses", post(responses_handler))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .merge(admin_routes)
         .with_state(state.clone());
@@ -375,7 +380,13 @@ fn check_auth<'a>(headers: &HeaderMap, config: &'a AppConfig) -> Result<Option<&
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let token = auth.strip_prefix("Bearer ").unwrap_or("").trim();
+    let bearer = auth.strip_prefix("Bearer ").unwrap_or("").trim();
+    let x_api = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    let token = if !bearer.is_empty() { bearer } else { x_api };
     let token_bytes = token.as_bytes();
     for rec in &config.api_keys {
         let key_bytes = rec.key.as_bytes();
@@ -523,6 +534,48 @@ async fn chat_handler(
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(body): Json<Value>,
 ) -> Result<Response, Response> {
+    inference_handler(state, headers, addr, body, Dialect::Chat).await
+}
+
+async fn messages_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<Value>,
+) -> Result<Response, Response> {
+    let chat = crate::protocol::anthropic_to_openai_chat(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(openai_error(&e, "invalid_request_error", 400)),
+        )
+            .into_response()
+    })?;
+    inference_handler(state, headers, addr, chat, Dialect::Anthropic).await
+}
+
+async fn responses_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<Value>,
+) -> Result<Response, Response> {
+    let chat = crate::protocol::responses_to_openai_chat(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(openai_error(&e, "invalid_request_error", 400)),
+        )
+            .into_response()
+    })?;
+    inference_handler(state, headers, addr, chat, Dialect::Responses).await
+}
+
+async fn inference_handler(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    addr: std::net::SocketAddr,
+    body: Value,
+    dialect: Dialect,
+) -> Result<Response, Response> {
     let client_ip = addr.ip().to_string();
     let config = state.config.load();
     let key_rec = check_auth(&headers, &config)?;
@@ -568,6 +621,20 @@ async fn chat_handler(
         .map(|v| v as u32)
         .or_else(|| crate::cursor::default_max_tokens_for(&model));
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
+    let tools = body.get("tools").cloned();
+    let tool_choice = body.get("tool_choice").cloned();
+    let parallel_tool_calls = body.get("parallel_tool_calls").and_then(|v| v.as_bool());
+    if crate::protocol::hosted_web_search(tools.as_ref()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(openai_error(
+                "hosted web_search is not supported; pass a client-side function tool instead",
+                "unsupported_feature",
+                400,
+            )),
+        )
+            .into_response());
+    }
 
     // 计费上下文: 此刻快照单价与分成, 贯穿整个请求
     let bctx = billing::BillingCtx::from_key(&config.billing, key_rec, &model);
@@ -677,7 +744,16 @@ async fn chat_handler(
         };
 
         match upstream
-            .stream(&model, messages, max_tokens, temperature, cursor_auth)
+            .stream(
+                &model,
+                messages,
+                max_tokens,
+                temperature,
+                cursor_auth,
+                tools.as_ref(),
+                tool_choice.as_ref(),
+                parallel_tool_calls,
+            )
             .await
         {
             Ok(f) => {
@@ -753,7 +829,7 @@ async fn chat_handler(
             // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
             let _permit = current_permit.take().expect("permit must exist");
             let mut usage = translate::Usage::default();
-            let mut stream = Box::pin(upstream_to_openai_stream(frames, &model_clone));
+            let mut stream = Box::pin(upstream_to_dialect_stream(frames, &model_clone, dialect));
             loop {
                 // 帧级空闲超时: 上游 hang 住不能让槽位永久泄漏
                 let item = match tokio::time::timeout(upstream_timeout, stream.next()).await {
@@ -831,7 +907,11 @@ async fn chat_handler(
     } else {
         // 非流式: 总超时, 上游 hang 住时释放槽位并返回 504
         let _permit = current_permit.take().expect("permit must exist");
-        let full = match tokio::time::timeout(upstream_timeout, upstream_to_openai_full(frames, &model)).await {
+        let full = match tokio::time::timeout(
+            upstream_timeout,
+            upstream_to_dialect_full(frames, &model, dialect),
+        )
+        .await {
             Ok(r) => r,
             Err(_) => {
                 state.pool.release(&account_id, true, 10);

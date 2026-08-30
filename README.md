@@ -16,6 +16,14 @@ cargo build --release
 
 默认模型 `kimi-k3`（Cursor 实测 ~1,048,576 上下文）。客户端不传 `max_tokens` 时注入 32,768 长输出预算，上游超时默认 1800s。计费币种统一 `RMB`（`CNY`/`人民币` 写入时归一）。
 
+原生协议：
+
+- Claude Code：`POST /v1/messages`（`x-api-key` 或 Bearer；`tools` / `tool_use` / `tool_result`）
+- Codex：`POST /v1/responses`（`input` 里的 `function_call` / `function_call_output`）
+- OpenAI Chat：`POST /v1/chat/completions` 同样转发 `tools` / `tool_calls`
+
+不支持托管 `web_search`（Cursor 无对应能力，直接 400）。
+
 ## 128G 机器稳定运行
 
 网关本身常驻只有十几 MB，真正会拖垮 128G 主机的是无上限日志、SQLite WAL、畸形上游帧、以及 systemd 无内存/重启上限。默认已做：

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::pin::Pin;
 use futures_util::stream::{Stream, StreamExt};
 
-use crate::cursor::{CursorClient, CursorError, build_cursor_body};
+use crate::cursor::{CursorClient, CursorError, build_cursor_body_with_tools};
 
 /// 上游类型
 #[derive(Debug, Clone, PartialEq)]
@@ -47,17 +47,30 @@ impl UpstreamClient {
         max_tokens: Option<u32>,
         temperature: Option<f64>,
         cursor_auth: Option<(&str, &str)>,  // (access_token, machine_id) 仅 Cursor 用
+        tools: Option<&Value>,
+        tool_choice: Option<&Value>,
+        parallel_tool_calls: Option<bool>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError> {
         match self {
             Self::Cursor(client) => {
                 let (token, mid) = cursor_auth.ok_or_else(|| UpstreamError::Config("cursor auth required".into()))?;
-                let body = build_cursor_body(messages, model, max_tokens, temperature);
+                let body = build_cursor_body_with_tools(
+                    messages,
+                    model,
+                    max_tokens,
+                    temperature,
+                    tools,
+                    tool_choice,
+                    parallel_tool_calls,
+                );
                 let stream = client.stream(token, mid, &body).await
                     .map_err(|e| UpstreamError::Cursor(e))?;
                 Ok(Box::pin(stream.map(|r| r.map_err(UpstreamError::Cursor))))
             }
             Self::OpenAi(client) => {
-                let stream = client.stream(model, messages, max_tokens, temperature).await
+                let stream = client
+                    .stream(model, messages, max_tokens, temperature, tools, tool_choice)
+                    .await
                     .map_err(|e| UpstreamError::OpenAi(e))?;
                 Ok(Box::pin(stream.map(|r| r.map_err(UpstreamError::OpenAi))))
             }
@@ -93,6 +106,8 @@ impl OpenAiClient {
         messages: &[Value],
         max_tokens: Option<u32>,
         temperature: Option<f64>,
+        tools: Option<&Value>,
+        tool_choice: Option<&Value>,
     ) -> Result<impl Stream<Item = Result<Value, OpenAiError>>, OpenAiError> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut body = serde_json::json!({
@@ -105,6 +120,12 @@ impl OpenAiClient {
         }
         if let Some(t) = temperature {
             body["temperature"] = serde_json::json!(t);
+        }
+        if let Some(tools) = tools {
+            body["tools"] = tools.clone();
+        }
+        if let Some(tc) = tool_choice {
+            body["tool_choice"] = tc.clone();
         }
 
         let resp = self.client

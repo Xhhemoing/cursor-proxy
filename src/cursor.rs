@@ -108,32 +108,29 @@ pub fn build_cursor_body(
     max_tokens: Option<u32>,
     temperature: Option<f64>,
 ) -> Value {
-    let cursor_msgs: Vec<Value> = messages
-        .iter()
-        .map(|m| {
-            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-            let content = m.get("content").unwrap_or(&Value::Null);
-            let text = match content {
-                Value::String(s) => s.clone(),
-                Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|p| {
-                        if p.get("type").and_then(|v| v.as_str()) == Some("text") {
-                            p.get("text").and_then(|v| v.as_str()).map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                _ => String::new(),
-            };
+    build_cursor_body_with_tools(messages, model, max_tokens, temperature, None, None, None)
+}
+
+pub fn build_cursor_body_with_tools(
+    messages: &[Value],
+    model: &str,
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    tools: Option<&Value>,
+    tool_choice: Option<&Value>,
+    parallel_tool_calls: Option<bool>,
+) -> Value {
+    let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
+    if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
+        cursor_msgs.insert(
+            0,
             json!({
-                "role": role,
-                "parts": {"parts": [{"text": {"text": text}}]},
-            })
-        })
-        .collect();
+                "role": "user",
+                "system": true,
+                "parts": {"parts": [{"text": {"text": hint}}]},
+            }),
+        );
+    }
 
     let mut body = json!({
         "requestedModel": {"modelId": model},
@@ -146,6 +143,17 @@ pub fn build_cursor_body(
     }
     if let Some(t) = temperature {
         body["temperature"] = json!(t);
+    }
+    let cursor_tools = crate::protocol::cursor_tools_from_client(tools);
+    if !cursor_tools.is_empty() {
+        body["tools"] = json!(cursor_tools);
+        let mut cfg = json!({});
+        if let Some(p) = parallel_tool_calls {
+            cfg["parallelToolCalls"] = json!(p);
+        }
+        if !cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            body["modelConfig"] = cfg;
+        }
     }
     body
 }
@@ -405,5 +413,29 @@ mod tests {
         assert_eq!(context_window_for("kimi-k3"), 1_048_576);
         assert_eq!(default_max_tokens_for("kimi-k3"), Some(32_768));
         assert_eq!(default_max_tokens_for("claude-sonnet-4-6"), None);
+    }
+
+    #[test]
+    fn tools_go_into_cursor_body() {
+        let msgs = vec![json!({"role": "user", "content": "ls"})];
+        let tools = json!([{
+            "type": "function",
+            "function": {"name": "bash", "description": "sh", "parameters": {"type": "object"}}
+        }]);
+        let body = build_cursor_body_with_tools(
+            &msgs,
+            "kimi-k3",
+            Some(128),
+            None,
+            Some(&tools),
+            Some(&json!("required")),
+            Some(false),
+        );
+        assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["modelConfig"]["parallelToolCalls"], false);
+        assert!(body["messages"][0]["parts"]["parts"][0]["text"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("must call a tool"));
     }
 }
