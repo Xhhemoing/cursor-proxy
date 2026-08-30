@@ -50,6 +50,7 @@ impl UpstreamClient {
         tools: Option<&Value>,
         tool_choice: Option<&Value>,
         parallel_tool_calls: Option<bool>,
+        conversation_id: Option<&str>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError> {
         match self {
             Self::Cursor(client) => {
@@ -62,6 +63,7 @@ impl UpstreamClient {
                     tools,
                     tool_choice,
                     parallel_tool_calls,
+                    conversation_id,
                 );
                 let stream = client.stream(token, mid, &body).await
                     .map_err(|e| UpstreamError::Cursor(e))?;

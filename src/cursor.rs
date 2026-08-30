@@ -108,7 +108,29 @@ pub fn build_cursor_body(
     max_tokens: Option<u32>,
     temperature: Option<f64>,
 ) -> Value {
-    build_cursor_body_with_tools(messages, model, max_tokens, temperature, None, None, None)
+    build_cursor_body_with_tools(
+        messages,
+        model,
+        max_tokens,
+        temperature,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+/// 稳定 conversationId: 同一 session 在同一号上复用, Cursor 前缀缓存才能命中.
+pub fn conversation_id_for(session_id: Option<&str>, account_id: Option<&str>) -> String {
+    match (session_id, account_id) {
+        (Some(sid), Some(aid)) if !sid.is_empty() => {
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("cfp:{aid}:{sid}").as_bytes()).to_string()
+        }
+        (Some(sid), None) if !sid.is_empty() => {
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("cfp:{sid}").as_bytes()).to_string()
+        }
+        _ => Uuid::new_v4().to_string(),
+    }
 }
 
 pub fn build_cursor_body_with_tools(
@@ -119,6 +141,7 @@ pub fn build_cursor_body_with_tools(
     tools: Option<&Value>,
     tool_choice: Option<&Value>,
     parallel_tool_calls: Option<bool>,
+    conversation_id: Option<&str>,
 ) -> Value {
     let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
     if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
@@ -134,7 +157,10 @@ pub fn build_cursor_body_with_tools(
 
     let mut body = json!({
         "requestedModel": {"modelId": model},
-        "conversationId": Uuid::new_v4().to_string(),
+        "conversationId": conversation_id
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         "messages": cursor_msgs,
         "stream": true,
     });
@@ -430,6 +456,7 @@ mod tests {
             Some(&tools),
             Some(&json!("required")),
             Some(false),
+            None,
         );
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["modelConfig"]["parallelToolCalls"], false);
@@ -437,5 +464,19 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("must call a tool"));
+    }
+
+    #[test]
+    fn conversation_id_is_stable_for_same_session() {
+        let a = conversation_id_for(Some("job-k3"), Some("acc-5"));
+        let b = conversation_id_for(Some("job-k3"), Some("acc-5"));
+        let c = conversation_id_for(Some("job-k3"), Some("acc-2"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let msgs = vec![json!({"role": "user", "content": "hi"})];
+        let body = build_cursor_body_with_tools(
+            &msgs, "kimi-k3", None, None, None, None, None, Some(&a),
+        );
+        assert_eq!(body["conversationId"], a);
     }
 }

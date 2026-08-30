@@ -24,15 +24,17 @@ cargo build --release
 
 不支持托管 `web_search`（Cursor 无对应能力，直接 400）。
 
+蒸馏缓存：同一 `user` 或 `X-Session-Id` 会粘到同一号，并把 Cursor `conversationId` 做成稳定 UUID v5。共享前缀的多轮才能命中 `cache_read`。每号默认并发 **5**（128G 上可热改，别开到 20，容易 429）。
+
 ## 128G 机器稳定运行
 
 网关本身常驻只有十几 MB，真正会拖垮 128G 主机的是无上限日志、SQLite WAL、畸形上游帧、以及 systemd 无内存/重启上限。默认已做：
 
 1. Tokio 固定 16 worker（不跟 32 核一对一膨胀）
-2. `proxy.log` 超过 512MiB 轮转，保留 3 代（`CFP_LOG_MAX_BYTES` / `CFP_LOG_KEEP`）
+2. `proxy.log` 超过 1GiB 轮转，保留 4 代（`CFP_LOG_MAX_BYTES` / `CFP_LOG_KEEP`）
 3. 计费库每 60s `wal_checkpoint(TRUNCATE)`，打开时 `wal_autocheckpoint=1000`
 4. Connect 帧 / 解码缓冲上限 16MiB，畸形长度不再把进程打爆
-5. 部署单元 `deploy/cursor-proxy.service`：`MemoryMax=8G`、`Restart=always`、`StartLimitBurst=5`、`LimitNOFILE=65535`
+5. 部署单元 `deploy/cursor-proxy.service`：`MemoryMax=16G`、`MemoryHigh=4G`、`Restart=always`、`StartLimitBurst=5`、`LimitNOFILE=65535`
 
 拷到 128G 机：
 

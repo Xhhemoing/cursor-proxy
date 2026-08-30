@@ -13,7 +13,7 @@
   "timeout_s": 1800,
   "log_file": "proxy.log",
   "default_model": "kimi-k3",
-  "max_concurrency_per_account": 8,
+  "max_concurrency_per_account": 5,
   "acquire_wait_ms": 5000,
   "admin_token": "CHANGE_ME_ADMIN_TOKEN",
   "billing": {

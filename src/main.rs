@@ -653,11 +653,18 @@ async fn inference_handler(
         warn!(event = "billing_unpriced", req_id = %request_id, model = %model, "no price rule matched; billed 0");
     }
 
-    // 提取 session_id 用于会话一致性（OpenAI user 字段或自定义 header）
-    let session_id = body
+    // 提取 session_id 用于会话一致性 + Cursor conversationId（缓存命中依赖二者同号）
+    let session_owned: Option<String> = body
         .get("user")
         .and_then(|v| v.as_str())
-        .or_else(|| headers.get("x-session-id").and_then(|v| v.to_str().ok()));
+        .map(|s| s.to_string())
+        .or_else(|| {
+            headers
+                .get("x-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        });
+    let session_id = session_owned.as_deref();
 
     // 选号（会话一致性）
     let (mut account, permit) = match state.pool.acquire_by_session(session_id).await {
@@ -680,6 +687,7 @@ async fn inference_handler(
         }
     };
     let mut account_id = account.id.clone();
+    let mut conv_id = crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
 
     // 多上游路由：根据模型前缀选择上游
     let upstream_name = if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
@@ -728,6 +736,7 @@ async fn inference_handler(
             account.access_token = retry_account.access_token;
             account.machine_id = retry_account.machine_id;
             account_id = retry_account.id.clone();
+            conv_id = crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
             info!(
                 event = "retry",
                 req_id = %request_id,
@@ -753,6 +762,7 @@ async fn inference_handler(
                 tools.as_ref(),
                 tool_choice.as_ref(),
                 parallel_tool_calls,
+                Some(conv_id.as_str()),
             )
             .await
         {

@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-appender = "0.2"  # 非阻塞 stdout 日志
 # 工具
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 base64 = "0.22"
 bytes = "1"
 futures-util = "0.3"

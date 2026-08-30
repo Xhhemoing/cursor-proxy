@@ -16,12 +16,12 @@ OOMPolicy=kill
 LimitNOFILE=65535
 TasksMax=4096
 # 128Gi 机器上给网关硬上限, 防止日志/号池/请求体把整机吃光; 实测常驻约 8-20MiB.
-MemoryHigh=2G
-MemoryMax=8G
+MemoryHigh=4G
+MemoryMax=16G
 Environment=RUST_LOG=info
 Environment=TOKIO_WORKER_THREADS=16
-Environment=CFP_LOG_MAX_BYTES=536870912
-Environment=CFP_LOG_KEEP=3
+Environment=CFP_LOG_MAX_BYTES=1073741824
+Environment=CFP_LOG_KEEP=4
 
 [Install]
 WantedBy=default.target

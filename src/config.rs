@@ -166,7 +166,7 @@ fn default_model() -> String {
     "kimi-k3".into()
 }
 fn default_max_concurrency() -> usize {
-    8
+    5
 }
 fn default_acquire_wait_ms() -> u64 {
     5000
