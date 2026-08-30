@@ -29,6 +29,9 @@ pub struct AppConfig {
     /// 计费: 模型价格表 / 销售分成 / 时区
     #[serde(default)]
     pub billing: BillingConfig,
+    /// HTTP 出口代理池 + 账号分配规则
+    #[serde(default)]
+    pub proxy: crate::proxypool::ProxyPoolConfig,
 }
 
 /// 计费配置. 价格单位: 每 1M tokens 的货币金额 (最多 6 位小数, 内部转 micro 整数).
@@ -267,6 +270,7 @@ impl AppConfig {
                 admin_token: String::new(),
                 acquire_wait_ms: default_acquire_wait_ms(),
                 billing: BillingConfig::default(),
+                proxy: crate::proxypool::ProxyPoolConfig::default(),
             });
         }
         let text = std::fs::read_to_string(&path)?;
@@ -302,6 +306,9 @@ impl AppConfig {
             "billing_price_rules": self.billing.prices.len(),
             "api_key_count": self.api_keys.len(),
             "admin_auth": !self.admin_token.is_empty() || !self.api_keys.is_empty(),
+            "proxy_enabled": self.proxy.enabled,
+            "proxy_nodes": self.proxy.nodes.len(),
+            "proxy_require": self.proxy.require_proxy,
         })
     }
 }
@@ -418,6 +425,12 @@ pub struct Account {
     /// 自定义 refresh 端点，为空则用默认 OAuth 风格
     #[serde(default)]
     pub refresh_url: Option<String>,
+    /// 手动绑定的出口代理 id; 空 = 走自动规则
+    #[serde(default)]
+    pub proxy_id: Option<String>,
+    /// 账号标签, 用于自动分配规则匹配
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -476,6 +489,8 @@ pub fn upsert_account(account: Account) -> anyhow::Result<Vec<Account>> {
         }
         existing.refresh_token = account.refresh_token;
         existing.enabled = account.enabled;
+        existing.proxy_id = account.proxy_id;
+        existing.tags = account.tags;
     } else {
         accounts.push(account);
     }
@@ -526,6 +541,8 @@ mod tests {
                 enabled: true,
                 token_expires_at: None,
                 refresh_url: None,
+                proxy_id: None,
+                tags: Vec::new(),
             }];
             atomic_write(
                 &accounts_path(),

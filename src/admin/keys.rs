@@ -304,6 +304,7 @@ mod tests {
             admin_token: String::new(),
             acquire_wait_ms: 0,
             billing: crate::config::BillingConfig::default(),
+            proxy: crate::proxypool::ProxyPoolConfig::default(),
         };
         let usage = quota::KeyUsageStore::new();
         usage.add("sk-secret-1234567", 42);

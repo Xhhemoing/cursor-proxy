@@ -31,7 +31,7 @@ impl Metrics {
         pool: &crate::pool::AccountPool,
         usage: &crate::quota::KeyUsageStore,
     ) -> String {
-        let stats = pool.stats();
+        let stats = pool.summary();
         let total = stats["total_accounts"].as_u64().unwrap_or(0);
         let avail = stats["available"].as_u64().unwrap_or(0);
         let inflight = stats["inflight"].as_u64().unwrap_or(0);
@@ -78,6 +78,8 @@ mod tests {
                 enabled: true,
                 token_expires_at: None,
                 refresh_url: None,
+                proxy_id: None,
+                tags: Vec::new(),
             }],
             2,
         );

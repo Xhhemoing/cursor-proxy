@@ -21,6 +21,7 @@ mod upstream;
 mod audit;
 mod billing;
 mod ratelimit;
+mod proxypool;
 pub mod error;
 
 use std::sync::Arc;
@@ -62,6 +63,65 @@ pub struct AppState {
     rate_limiter: std::sync::Arc<ratelimit::RateLimiter>,
     /// 计费账本 (SQLite 单写线程)
     ledger: std::sync::Arc<billing::Ledger>,
+    proxies: std::sync::Arc<proxypool::ProxyPool>,
+    cursor_factory: CursorFactory,
+}
+
+/// 按出口代理缓存 CursorClient. 直连共用一个, 每个 proxy_id 一个.
+pub struct CursorFactory {
+    backend: String,
+    timeout_s: u64,
+    pub direct: CursorClient,
+    proxied: dashmap::DashMap<String, CursorClient>,
+}
+
+impl CursorFactory {
+    fn new(backend: &str, timeout_s: u64) -> anyhow::Result<Self> {
+        Ok(Self {
+            backend: backend.to_string(),
+            timeout_s,
+            direct: CursorClient::new(backend, timeout_s)?,
+            proxied: dashmap::DashMap::new(),
+        })
+    }
+
+    pub fn invalidate(&self) {
+        self.proxied.clear();
+    }
+
+    pub fn for_node(&self, node: Option<&proxypool::ProxyNode>) -> anyhow::Result<CursorClient> {
+        match node {
+            None => Ok(self.direct.clone()),
+            Some(n) => {
+                if let Some(c) = self.proxied.get(&n.id) {
+                    return Ok(c.clone());
+                }
+                let c = CursorClient::new_via_http_proxy(
+                    &self.backend,
+                    self.timeout_s,
+                    &n.id,
+                    &n.url,
+                )?;
+                self.proxied.insert(n.id.clone(), c.clone());
+                Ok(c)
+            }
+        }
+    }
+
+    pub fn resolve_for(
+        &self,
+        pool: &proxypool::ProxyPool,
+        account: &config::Account,
+    ) -> Result<(CursorClient, Option<String>), String> {
+        let node = pool.resolve(
+            &account.id,
+            account.proxy_id.as_deref(),
+            &account.tags,
+        )?;
+        let id = node.as_ref().map(|n| n.id.clone());
+        let client = self.for_node(node.as_ref()).map_err(|e| e.to_string())?;
+        Ok((client, id))
+    }
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 16)]
@@ -98,8 +158,10 @@ async fn main() -> anyhow::Result<()> {
     let pool = AccountPool::new(accounts, config.max_concurrency_per_account)
         .with_acquire_wait(Duration::from_millis(config.acquire_wait_ms));
 
-    // 初始化 Cursor 客户端
-    let cursor = CursorClient::new(&config.backend, config.timeout_s)?;
+    // 初始化 Cursor 客户端工厂 (直连 + 按出口缓存)
+    let cursor_factory = CursorFactory::new(&config.backend, config.timeout_s)?;
+    let cursor = cursor_factory.direct.clone();
+    let proxies = std::sync::Arc::new(proxypool::ProxyPool::new(config.proxy.clone()));
 
     // 初始化上游客户端
     let mut upstreams = std::collections::HashMap::new();
@@ -139,6 +201,8 @@ async fn main() -> anyhow::Result<()> {
         ),
         rate_limiter: std::sync::Arc::new(ratelimit::RateLimiter::new()),
         ledger: std::sync::Arc::new(billing::Ledger::open(&config.billing.db_file)?),
+        proxies,
+        cursor_factory,
     });
     info!(
         event = "billing_init",
@@ -187,6 +251,12 @@ async fn main() -> anyhow::Result<()> {
                     info!(event = "session_gc", removed, live = state.pool.session_count(), "expired sessions cleared");
                 }
                 state.ledger.request_checkpoint();
+                if state.proxies.is_enabled() {
+                    let n = admin::probe_nodes(&state, None).await.len();
+                    if n > 0 {
+                        info!(event = "proxy_probe", count = n, "egress proxies probed");
+                    }
+                }
                 let cooling = state.pool.cooling_accounts();
                 let quota_exhausted = state.pool.quota_exhausted_accounts();
                 
@@ -209,7 +279,12 @@ async fn main() -> anyhow::Result<()> {
                     .map(|(id, acc)| {
                         let state = state.clone();
                         async move {
-                            let snap = state.cursor.probe_quota(&acc.access_token, &acc.machine_id).await;
+                            let client = state
+                                .cursor_factory
+                                .resolve_for(&state.proxies, &acc)
+                                .map(|(c, _)| c)
+                                .unwrap_or_else(|_| state.cursor.clone());
+                            let snap = client.probe_quota(&acc.access_token, &acc.machine_id).await;
                             (id, snap)
                         }
                     })
@@ -252,6 +327,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/accounts/export", get(admin::api_accounts_export))
         .route("/admin/api/accounts/batch", post(admin::api_accounts_batch))
         .route("/admin/api/pool/health", get(admin::api_pool_health))
+        .route("/admin/api/proxies", get(admin::api_proxies_get).post(admin::api_proxies_patch))
+        .route("/admin/api/proxies/probe", post(admin::api_proxies_probe))
+        .route("/admin/api/proxies/rebalance", post(admin::api_proxies_rebalance))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
         .route("/admin/api/keys/:index/reveal", get(admin::api_keys_reveal))
@@ -354,6 +432,8 @@ async fn watch_config(state: Arc<AppState>) -> notify::Result<()> {
                 }
                 match AppConfig::load() {
                     Ok(new_cfg) => {
+                        state.proxies.replace(new_cfg.proxy.clone());
+                        state.cursor_factory.invalidate();
                         let mut guard = state.config.lock();
                         *guard = new_cfg;
                         drop(guard);
@@ -424,7 +504,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "pool": state.pool.stats(),
+        "pool": state.pool.summary(),
     }))
 }
 
@@ -747,6 +827,21 @@ async fn inference_handler(
         }
 
         // 调用上游（统一通过 UpstreamClient::stream，自动处理 Cursor/OpenAI 差异）
+        let (cursor_override, proxy_used) = match upstream {
+            crate::upstream::UpstreamClient::Cursor(_) => {
+                match state.cursor_factory.resolve_for(&state.proxies, &account) {
+                    Ok((c, pid)) => (Some(c), pid),
+                    Err(e) => {
+                        state.pool.release(&account_id, true, 15);
+                        state.metrics.observe_err();
+                        error!(event = "proxy_assign", req_id = %request_id, account = %account_id, error = %e, "proxy assign failed");
+                        last_error = e;
+                        continue;
+                    }
+                }
+            }
+            crate::upstream::UpstreamClient::OpenAi(_) => (None, None),
+        };
         let cursor_auth = match upstream {
             crate::upstream::UpstreamClient::Cursor(_) => Some((account.access_token.as_str(), account.machine_id.as_str())),
             crate::upstream::UpstreamClient::OpenAi(_) => None,
@@ -763,10 +858,14 @@ async fn inference_handler(
                 tool_choice.as_ref(),
                 parallel_tool_calls,
                 Some(conv_id.as_str()),
+                cursor_override.as_ref(),
             )
             .await
         {
             Ok(f) => {
+                if let Some(pid) = &proxy_used {
+                    info!(event = "proxy_used", req_id = %request_id, account = %account_id, proxy = %pid, "egress selected");
+                }
                 frames_opt = Some(f);
                 break;
             }

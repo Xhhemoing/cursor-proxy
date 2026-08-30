@@ -267,6 +267,7 @@
       <nav id="nav">
         <div class="grp">运营</div>
         <a href="#pool" data-page="pool">号池<span class="badge" id="nav-pool-badge"></span></a>
+        <a href="#proxies" data-page="proxies">IP 代理池<span class="badge" id="nav-proxy-badge"></span></a>
         <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
         <a href="#billing" data-page="billing">计费账单</a>
         <div class="grp">观测</div>
@@ -330,12 +331,28 @@
           <div class="fields">
             <label class="wide">搜索 <input id="acc-search" placeholder="账号 ID"></label>
             <label>状态 <select id="acc-filter">
-              <option value="all">全部</option><option value="enabled">可用</option><option value="disabled">已禁用</option>
-              <option value="cooldown">冷却中</option><option value="error">有错误</option>
+              <option value="attention">需关注</option>
+              <option value="all">全部</option>
+              <option value="enabled">可用</option>
+              <option value="disabled">已禁用</option>
+              <option value="cooldown">冷却中</option>
+              <option value="quota">额度耗尽</option>
+              <option value="error">有错误</option>
+              <option value="unhealthy">健康&lt;50</option>
             </select></label>
             <label>排序 <select id="acc-sort">
-              <option value="id">按 ID</option><option value="requests">请求数 高到低</option>
-              <option value="errors">错误数 高到低</option><option value="quota">配额 低到高</option>
+              <option value="attention">异常顶置</option>
+              <option value="id">按 ID</option>
+              <option value="requests">请求数 高到低</option>
+              <option value="errors">错误数 高到低</option>
+              <option value="quota">配额 低到高</option>
+              <option value="health">健康 低到高</option>
+            </select></label>
+            <label>每页 <select id="acc-page-size">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
             </select></label>
           </div>
           <div class="foot">
@@ -355,6 +372,8 @@
               <label>access_token <input id="f-acc-tok" type="password" required></label>
               <label>machine_id <input id="f-acc-mid" required></label>
               <label>refresh_token <input id="f-acc-ref" type="password" placeholder="可选"></label>
+              <label>出口代理 ID <input id="f-acc-proxy" placeholder="空=自动规则"></label>
+              <label>标签 <input id="f-acc-tags" placeholder="逗号分隔, 匹配规则"></label>
               <div><button type="submit">保存账号</button></div>
             </form>
           </div>
@@ -366,7 +385,7 @@
               <thead>
                 <tr>
                   <th style="width:44px"><input type="checkbox" id="acc-check-all"></th>
-                  <th>ID</th><th class="num">请求</th><th class="num">错误</th><th class="num">在飞</th><th>额度</th><th>状态</th><th>健康</th><th></th>
+                  <th>ID</th><th class="num">请求</th><th class="num">错误</th><th class="num">在飞</th><th>额度</th><th>出口</th><th>状态</th><th>健康</th><th></th>
                 </tr>
               </thead>
               <tbody id="acc-body"></tbody>
@@ -383,6 +402,64 @@
             <button type="button" id="paste-submit">导入</button>
           </div>
         </dialog>
+      </section>
+
+      <section class="page" id="page-proxies">
+        <div class="page-head">
+          <div><h2>IP 代理池</h2><p>出口节点 · 手动/自动分配 · 连通性与出口 IP</p></div>
+          <div class="actions">
+            <button type="button" class="ghost" id="btn-proxy-probe">探测全部</button>
+            <button type="button" class="ghost" id="btn-proxy-rebalance">按规则重绑</button>
+            <button type="button" id="btn-proxy-save">保存配置</button>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="l">节点</div><div class="v" id="px-total">–</div><div class="s">出口总数</div></div>
+          <div class="stat"><div class="l">健康</div><div class="v ok" id="px-ok">–</div><div class="s">探测通过</div></div>
+          <div class="stat"><div class="l">异常</div><div class="v warn" id="px-bad">–</div><div class="s">连续失败</div></div>
+          <div class="stat"><div class="l">已绑账号</div><div class="v" id="px-bound">–</div><div class="s">运行时绑定</div></div>
+          <div class="stat"><div class="l">判断</div><div class="v" id="px-judge">–</div><div class="s" id="px-judge-s">智能检测</div></div>
+        </div>
+        <div class="panel" id="px-findings-panel" style="margin-bottom:16px">
+          <div class="ph"><h3>智能判断</h3><p>重复出口 IP · 死节点仍绑定 · 过载 · 未探测</p></div>
+          <div class="pb" id="px-findings"><div class="empty">暂无</div></div>
+        </div>
+        <form id="px-form" class="filter">
+          <div class="fields">
+            <label class="inline"><input type="checkbox" id="px-enabled"> 启用代理池</label>
+            <label class="inline"><input type="checkbox" id="px-require"> 无代理则拒绝</label>
+            <label>默认模式 <select id="px-mode">
+              <option value="hash">hash 粘性</option>
+              <option value="round_robin">round_robin</option>
+              <option value="least_accounts">least_accounts</option>
+              <option value="exclusive">exclusive 一号一 IP</option>
+            </select></label>
+            <label>探测间隔秒 <input id="px-interval" type="number" min="0" max="3600"></label>
+          </div>
+        </form>
+        <div class="panel">
+          <div class="ph"><h3>节点</h3><p>URL 密码脱敏 · 绑定数 / 出口 IP / 延迟</p></div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>ID</th><th>URL</th><th>区域</th><th>标签</th><th class="num">绑定</th><th>出口 IP</th><th class="num">延迟</th><th>状态</th></tr></thead>
+              <tbody id="px-body"></tbody>
+            </table>
+          </div>
+          <div class="foot-row">
+            <button type="button" class="ghost" id="btn-proxy-add">追加节点</button>
+            <p class="toast" id="px-msg" style="margin:0"></p>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <div class="ph"><h3>自动规则</h3><p>优先级高的先匹配 · 账号可另设手动 proxy_id</p></div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>ID</th><th>前缀</th><th>账号标签</th><th>节点标签</th><th>区域</th><th>模式</th><th class="num">优先级</th><th>开</th></tr></thead>
+              <tbody id="px-rules"></tbody>
+            </table>
+          </div>
+          <div class="foot-row"><button type="button" class="ghost" id="btn-rule-add">追加规则</button></div>
+        </div>
       </section>
 
       <!-- ================= Keys ================= -->
@@ -618,8 +695,9 @@
     }
     // 分页状态
     let accPage = 1;
-    const ACC_PAGE_SIZE = 12;
+    const ACC_PAGE_SIZE = 50;
     let accView = 'card';
+    let accQueryBusy = false;
     try { accView = localStorage.getItem('cfp.accView') || 'card'; } catch (e) {}
     function applyAccView() {
       document.getElementById('acc-cards').style.display = accView === 'card' ? '' : 'none';
@@ -660,52 +738,30 @@
       return c;
     }
 
-    function renderAccounts(rows) {
+    function renderAccounts(pool) {
+      const rows = pool.accounts || [];
       const body = document.getElementById('acc-body');
       const cards = document.getElementById('acc-cards');
       body.replaceChildren(); cards.replaceChildren();
       applyAccView();
-      if (!rows || !rows.length) {
-        const tr = el('tr'); const td = el('td', { colspan: '9' }, '号池为空'); td.className = 'empty';
+      const filtered = pool.filtered != null ? pool.filtered : rows.length;
+      const total = pool.total_accounts != null ? pool.total_accounts : rows.length;
+      const pages = pool.pages || 1;
+      accPage = pool.page || accPage || 1;
+      if (!rows.length) {
+        const tr = el('tr'); const td = el('td', { colspan: '10' }, filtered ? '本页无数据' : '号池为空'); td.className = 'empty';
         tr.appendChild(td); body.appendChild(tr);
-        cards.appendChild(el('div', { class: 'empty' }, '号池为空'));
-        document.getElementById('acc-count').textContent = '';
-        renderPagination(0, 0);
+        cards.appendChild(el('div', { class: 'empty' }, filtered ? '本页无数据' : '号池为空'));
+        document.getElementById('acc-count').textContent = '0 / 匹配 ' + filtered + ' / 全部 ' + total;
+        renderPagination(filtered, pages);
         return;
       }
-      // 应用搜索/筛选/排序
-      const search = (document.getElementById('acc-search').value || '').toLowerCase();
-      const filter = document.getElementById('acc-filter').value;
-      const sortBy = document.getElementById('acc-sort').value;
-      let filtered = rows.filter(acc => {
-        if (search && !acc.id.toLowerCase().includes(search)) return false;
-        if (filter === 'enabled' && !acc.enabled) return false;
-        if (filter === 'disabled' && acc.enabled) return false;
-        if (filter === 'cooldown' && !acc.cooldown) return false;
-        if (filter === 'error' && acc.errors === 0) return false;
-        return true;
-      });
-      filtered.sort((a, b) => {
-        if (sortBy === 'requests') return b.requests - a.requests;
-        if (sortBy === 'errors') return b.errors - a.errors;
-        if (sortBy === 'quota') {
-          const qa = a.quota?.usage_percent ?? 999;
-          const qb = b.quota?.usage_percent ?? 999;
-          return qa - qb;
-        }
-        return a.id.localeCompare(b.id);
-      });
+      const start = ((accPage - 1) * (pool.page_size || rows.length)) + 1;
+      document.getElementById('acc-count').textContent = start + '–' + (start + rows.length - 1) + ' / 匹配 ' + filtered + ' / 全部 ' + total
+        + ' · 冷却 ' + (pool.cooling || 0) + ' · 额度堵 ' + (pool.quota_blocked || 0) + ' · 出错 ' + (pool.erroring || 0);
 
-      // 分页
-      const totalPages = Math.ceil(filtered.length / ACC_PAGE_SIZE);
-      if (accPage > totalPages) accPage = totalPages || 1;
-      const start = (accPage - 1) * ACC_PAGE_SIZE;
-      const pageRows = filtered.slice(start, start + ACC_PAGE_SIZE);
-      document.getElementById('acc-count').textContent = (filtered.length ? (start + 1) + '–' + (start + pageRows.length) : '0') + ' / 共 ' + filtered.length + ' / 全部 ' + rows.length;
-
-      pageRows.forEach((acc) => {
+      rows.forEach((acc) => {
         const tr = el('tr');
-        // 复选框
         const chk = el('input', { type: 'checkbox', class: 'acc-check', 'data-id': acc.id });
         const chkTd = el('td'); chkTd.appendChild(chk); tr.appendChild(chkTd);
         tr.appendChild(el('td', null, acc.id));
@@ -716,6 +772,8 @@
         tr.appendChild(el('td', { class: 'num' }, String(acc.inflight) + ' / ' + String(acc.max_concurrency)));
         const qtd = el('td', { class: 'text' }, fmtQuota(acc.quota));
         tr.appendChild(qtd);
+        const egress = (acc.assigned_proxy || acc.proxy_id || '直连') + (acc.proxy_mode === 'manual' ? ' 手动' : acc.proxy_mode === 'auto' ? ' 自动' : '');
+        tr.appendChild(el('td', { class: 'text' }, egress));
         const [label, cls] = statusCell(acc);
         const st = el('td'); st.appendChild(el('span', { class: 'pill ' + cls }, label)); tr.appendChild(st);
         const ht = el('td'); ht.appendChild(healthPill(acc)); tr.appendChild(ht);
@@ -771,9 +829,7 @@
         }
       });
 
-      // 渲染分页控件
-      renderPagination(filtered.length, totalPages);
-      // 更新全选状态
+      renderPagination(filtered, pages);
       updateCheckAll();
     }
 
@@ -961,12 +1017,22 @@
         box.appendChild(row);
       });
     }
+    function poolQuery() {
+      const q = new URLSearchParams();
+      q.set('q', document.getElementById('acc-search').value || '');
+      q.set('filter', document.getElementById('acc-filter').value || 'attention');
+      q.set('sort', document.getElementById('acc-sort').value || 'attention');
+      q.set('page', String(accPage || 1));
+      q.set('page_size', document.getElementById('acc-page-size').value || '50');
+      return q.toString();
+    }
     async function loadAll() {
-      const [pool, settings, keys, logs] = await Promise.all([
-        api('/admin/api/pool'),
+      const [pool, settings, keys, logs, proxies] = await Promise.all([
+        api('/admin/api/pool?' + poolQuery()),
         api('/admin/api/settings'),
         api('/admin/api/keys'),
         api('/admin/api/logs?n=40'),
+        api('/admin/api/proxies').catch(() => ({ nodes: [], total: 0, healthy: 0, unhealthy: 0, bound_accounts: 0 })),
       ]);
       document.getElementById('k-total').textContent = pool.total_accounts;
       document.getElementById('k-avail').textContent = pool.available;
@@ -978,11 +1044,12 @@
       document.getElementById('f-model').value = settings.default_model;
       document.getElementById('f-timeout').value = settings.timeout_s;
       document.getElementById('f-conc').value = settings.max_concurrency_per_account;
-      renderAccounts(pool.accounts);
+      renderAccounts(pool);
       renderKeys(keys);
       renderLogs(logs.logs);
+      renderProxies(proxies);
       document.getElementById('nav-pool-badge').textContent = pool.available + '/' + pool.total_accounts;
-      document.getElementById('k-cooling').textContent = String((pool.accounts || []).filter((a) => a.cooldown).length);
+      document.getElementById('k-cooling').textContent = String(pool.cooling || 0);
       document.getElementById('nav-keys-badge').textContent = String((keys.keys || []).length);
       const kv = document.getElementById('settings-kv');
       kv.replaceChildren();
@@ -1010,7 +1077,7 @@
       document.getElementById('ov-cur').textContent = r.currency ? '(' + r.currency + ')' : '';
     }
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'keys', 'billing', 'settings', 'logs'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'settings', 'logs'];
     function showPage(name) {
       // 支持 #billing/records 直达 tab
       const [base, sub] = (name || '').split('/');
@@ -1103,6 +1170,8 @@
             machine_id: document.getElementById('f-acc-mid').value.trim(),
             refresh_token: document.getElementById('f-acc-ref').value.trim(),
             enabled: true,
+            proxy_id: document.getElementById('f-acc-proxy').value.trim() || null,
+            tags: splitTags(document.getElementById('f-acc-tags').value),
           }),
         });
         toast('acc-msg', '账号已保存并热加载');
@@ -1472,6 +1541,136 @@
     });
     loadBillingMeta().then(() => { if (location.hash === '#billing') return loadBilling(); }).catch(() => {});
 
+    let pxDraft = { nodes: [], rules: [] };
+    function renderProxies(data) {
+      if (!data) return;
+      document.getElementById('px-total').textContent = data.total || 0;
+      document.getElementById('px-ok').textContent = data.healthy || 0;
+      document.getElementById('px-bad').textContent = data.unhealthy || 0;
+      document.getElementById('px-bound').textContent = data.bound_accounts || 0;
+      document.getElementById('nav-proxy-badge').textContent = (data.healthy || 0) + '/' + (data.total || 0);
+      document.getElementById('px-enabled').checked = !!data.enabled;
+      document.getElementById('px-require').checked = !!data.require_proxy;
+      document.getElementById('px-mode').value = data.default_mode || 'hash';
+      document.getElementById('px-interval').value = data.probe_interval_s || 60;
+      const judge = data.judge || {};
+      const sev = judge.severity || 'ok';
+      const jv = document.getElementById('px-judge');
+      jv.textContent = sev === 'ok' ? '正常' : (sev === 'bad' ? '严重' : '警告');
+      jv.className = 'v ' + (sev === 'ok' ? 'ok' : sev === 'bad' ? 'warn' : 'warn');
+      document.getElementById('px-judge-s').textContent = (judge.findings || []).length + ' 条发现';
+      const box = document.getElementById('px-findings');
+      box.replaceChildren();
+      const findings = judge.findings || [];
+      if (!findings.length) box.appendChild(el('div', { class: 'empty' }, '暂无异常'));
+      findings.slice(0, 20).forEach((f) => {
+        const row = el('div', { class: 'err' });
+        row.appendChild(el('span', { class: 'pill ' + (f.level === 'bad' ? 'bad' : f.level === 'warn' ? 'warn' : 'gray') }, f.level || 'info'));
+        row.appendChild(document.createTextNode(' ' + (f.msg || '')));
+        box.appendChild(row);
+      });
+      pxDraft.nodes = (data.nodes || []).map((n) => ({ ...n, url_raw: n.url }));
+      pxDraft.rules = data.rules || [];
+      const body = document.getElementById('px-body');
+      body.replaceChildren();
+      (data.nodes || []).forEach((n) => {
+        const tr = el('tr');
+        tr.appendChild(el('td', { class: 'mono' }, n.id));
+        tr.appendChild(el('td', { class: 'text' }, n.url));
+        tr.appendChild(el('td', null, n.region || '—'));
+        tr.appendChild(el('td', null, (n.tags || []).join(',') || '—'));
+        tr.appendChild(el('td', { class: 'num' }, String(n.bound_accounts || 0)));
+        const h = n.health || {};
+        tr.appendChild(el('td', { class: 'mono' }, h.egress_ip || '—'));
+        tr.appendChild(el('td', { class: 'num' }, h.latency_ms != null ? h.latency_ms + 'ms' : '—'));
+        const ok = n.enabled === false ? '停用' : (h.ok === false ? '异常' : '健康');
+        const pill = el('span', { class: 'pill ' + (ok === '健康' ? 'ok' : ok === '异常' ? 'warn' : '') }, ok);
+        const st = el('td'); st.appendChild(pill); tr.appendChild(st);
+        body.appendChild(tr);
+      });
+      const rb = document.getElementById('px-rules');
+      rb.replaceChildren();
+      (data.rules || []).forEach((r) => {
+        const tr = el('tr');
+        [r.id, r.account_prefix || '*', (r.account_tags || []).join(',') || '—', (r.proxy_tags || []).join(',') || '—', r.region || '—', r.mode || 'hash', String(r.priority || 0), r.enabled ? '是' : '否']
+          .forEach((v) => tr.appendChild(el('td', null, v)));
+        rb.appendChild(tr);
+      });
+    }
+    document.getElementById('btn-proxy-add').addEventListener('click', async () => {
+      const id = prompt('节点 ID'); if (!id) return;
+      const url = prompt('代理 URL (http://user:pass@host:port)'); if (!url) return;
+      const region = prompt('区域 (可空)', '') || '';
+      const tags = splitTags(prompt('标签逗号分隔', '') || '');
+      try {
+        const cur = await api('/admin/api/proxies');
+        const nodes = (cur.nodes || []).map((n) => ({
+          id: n.id, url: n.url, kind: n.kind, region: n.region, tags: n.tags,
+          enabled: n.enabled, max_accounts: n.max_accounts, note: n.note,
+        }));
+        nodes.push({ id, url, region, tags, enabled: true, max_accounts: 0, note: '' });
+        await api('/admin/api/proxies', { method: 'POST', body: JSON.stringify({ nodes }) });
+        toast('px-msg', '已追加 ' + id);
+        await loadAll();
+      } catch (e) { toast('px-msg', e.message, true); }
+    });
+    document.getElementById('btn-rule-add').addEventListener('click', async () => {
+      const id = prompt('规则 ID'); if (!id) return;
+      const prefix = prompt('账号前缀 (空=全部)', '') || '';
+      const accTags = splitTags(prompt('账号标签', '') || '');
+      const pxTags = splitTags(prompt('节点标签', '') || '');
+      const region = prompt('区域', '') || '';
+      const mode = prompt('模式 hash/round_robin/least_accounts/exclusive', 'hash') || 'hash';
+      const priority = Number(prompt('优先级', '10') || '10');
+      try {
+        const cur = await api('/admin/api/proxies');
+        const rules = cur.rules || [];
+        rules.push({ id, enabled: true, account_prefix: prefix, account_tags: accTags, proxy_tags: pxTags, region, mode, priority });
+        await api('/admin/api/proxies', { method: 'POST', body: JSON.stringify({ rules }) });
+        toast('px-msg', '规则已加');
+        await loadAll();
+      } catch (e) { toast('px-msg', e.message, true); }
+    });
+    document.getElementById('btn-proxy-save').addEventListener('click', async () => {
+      try {
+        await api('/admin/api/proxies', { method: 'POST', body: JSON.stringify({
+          enabled: document.getElementById('px-enabled').checked,
+          require_proxy: document.getElementById('px-require').checked,
+          default_mode: document.getElementById('px-mode').value,
+          probe_interval_s: Number(document.getElementById('px-interval').value || 60),
+        }) });
+        toast('px-msg', '已保存');
+        await loadAll();
+      } catch (e) { toast('px-msg', e.message, true); }
+    });
+    document.getElementById('btn-proxy-probe').addEventListener('click', async () => {
+      try {
+        const r = await api('/admin/api/proxies/probe', { method: 'POST', body: '{}' });
+        toast('px-msg', '探测 ' + r.probed + ' 个');
+        await loadAll();
+      } catch (e) { toast('px-msg', e.message, true); }
+    });
+    document.getElementById('btn-proxy-rebalance').addEventListener('click', async () => {
+      try {
+        const r = await api('/admin/api/proxies/rebalance', { method: 'POST' });
+        toast('px-msg', '重绑 ' + r.reassigned + ' 个账号');
+        await loadAll();
+      } catch (e) { toast('px-msg', e.message, true); }
+    });
+
+    ['acc-search','acc-filter','acc-sort','acc-page-size'].forEach((id) => {
+      const n = document.getElementById(id);
+      if (!n) return;
+      const ev = id === 'acc-search' ? 'input' : 'change';
+      let t = null;
+      n.addEventListener(ev, () => {
+        accPage = 1;
+        if (id === 'acc-search') {
+          clearTimeout(t);
+          t = setTimeout(() => loadAll().catch(() => {}), 250);
+        } else loadAll().catch(() => {});
+      });
+    });
     showPage(location.hash.slice(1));
     loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });
     setInterval(() => { if (!document.hidden) loadAll().catch(() => setLive(false)); }, 5000);

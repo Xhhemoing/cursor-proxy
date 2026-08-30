@@ -32,5 +32,37 @@
     "sales": [
       { "id": "alice", "name": "Alice", "commission_bps": 1500 }
     ]
+  },
+  "proxy": {
+    "enabled": false,
+    "require_proxy": false,
+    "default_mode": "hash",
+    "probe_interval_s": 60,
+    "probe_timeout_ms": 8000,
+    "fail_threshold": 3,
+    "nodes": [
+      {
+        "id": "us-1",
+        "url": "http://user:pass@1.2.3.4:8080",
+        "kind": "http",
+        "region": "us",
+        "tags": ["residential"],
+        "enabled": true,
+        "max_accounts": 0,
+        "note": "示例, 勿提交真实密码"
+      }
+    ],
+    "rules": [
+      {
+        "id": "vip-us",
+        "enabled": true,
+        "account_prefix": "",
+        "account_tags": ["vip"],
+        "proxy_tags": ["residential"],
+        "region": "us",
+        "mode": "hash",
+        "priority": 10
+      }
+    ]
   }
 }

@@ -212,7 +212,6 @@ impl CursorClient {
             .body(http_body_util::Full::new(hyper::body::Bytes::from(payload.as_slice())))
             .map_err(|e| CursorError::Network(e.to_string()))?;
         let resp = self
-            .http()
             .request(req)
             .await
             .map_err(|e| CursorError::Network(e.to_string()))?;

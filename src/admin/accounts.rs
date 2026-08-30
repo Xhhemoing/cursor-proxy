@@ -1,7 +1,7 @@
 //! 账号管理 API.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -13,18 +13,81 @@ use std::sync::Arc;
 use crate::config::{self, Account};
 use crate::AppState;
 
-/// GET /admin/api/pool — 号池统计
-pub async fn api_pool_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.pool.stats())
+/// GET /admin/api/pool — 号池统计（支持 q/filter/sort/page，默认不全量返回账号）
+#[derive(Deserialize, Default)]
+pub struct PoolQuery {
+    pub q: Option<String>,
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+    pub proxy_id: Option<String>,
+    /// 1 = 兼容旧面板，返回全部账号
+    pub all: Option<u8>,
+}
+
+pub async fn api_pool_stats(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PoolQuery>,
+) -> impl IntoResponse {
+    if q.all == Some(1) && q.page.is_none() {
+        return Json(state.pool.stats());
+    }
+    let mut stats = state.pool.query_accounts(
+        q.q.as_deref().unwrap_or(""),
+        q.filter.as_deref().unwrap_or("all"),
+        q.sort.as_deref().unwrap_or("attention"),
+        q.page.unwrap_or(1),
+        q.page_size.unwrap_or(50),
+        q.proxy_id.as_deref().unwrap_or(""),
+    );
+    enrich_proxy_bindings(&state, &mut stats);
+    Json(stats)
+}
+
+fn enrich_proxy_bindings(state: &AppState, stats: &mut serde_json::Value) {
+    if let Some(arr) = stats.get_mut("accounts").and_then(|v| v.as_array_mut()) {
+        for acc in arr {
+            let id = acc["id"].as_str().unwrap_or("").to_string();
+            let manual = acc["proxy_id"].as_str().unwrap_or("").to_string();
+            let assigned = if !manual.is_empty() {
+                Some(manual.clone())
+            } else {
+                state.proxies.binding_of(&id)
+            };
+            acc["assigned_proxy"] = json!(assigned);
+            acc["proxy_mode"] = json!(if !manual.is_empty() {
+                "manual"
+            } else if assigned.is_some() {
+                "auto"
+            } else {
+                "direct"
+            });
+        }
+    }
 }
 
 /// GET /admin/api/accounts — 账号列表
-pub async fn api_accounts_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let stats = state.pool.stats();
+pub async fn api_accounts_list(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PoolQuery>,
+) -> impl IntoResponse {
+    let mut stats = state.pool.query_accounts(
+        q.q.as_deref().unwrap_or(""),
+        q.filter.as_deref().unwrap_or("all"),
+        q.sort.as_deref().unwrap_or("attention"),
+        q.page.unwrap_or(1),
+        q.page_size.unwrap_or(50),
+        q.proxy_id.as_deref().unwrap_or(""),
+    );
+    enrich_proxy_bindings(&state, &mut stats);
     Json(json!({
         "accounts": stats.get("accounts").cloned().unwrap_or(json!([])),
         "total": stats.get("total_accounts").cloned().unwrap_or(json!(0)),
         "available": stats.get("available").cloned().unwrap_or(json!(0)),
+        "filtered": stats.get("filtered").cloned().unwrap_or(json!(0)),
+        "page": stats.get("page").cloned().unwrap_or(json!(1)),
+        "pages": stats.get("pages").cloned().unwrap_or(json!(1)),
     }))
 }
 
@@ -138,6 +201,10 @@ pub struct AccountUpsertBody {
     pub refresh_token: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub proxy_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -157,6 +224,8 @@ pub async fn api_account_upsert(
         enabled: body.enabled,
         token_expires_at: None,
         refresh_url: None,
+        proxy_id: body.proxy_id.filter(|s| !s.trim().is_empty()),
+        tags: body.tags,
     };
     let existed = state.pool.has_account(&acc.id);
     match config::upsert_account(acc) {
@@ -209,7 +278,10 @@ pub async fn api_account_probe(
             .into_response();
     };
     let snap = state
-        .cursor
+        .cursor_factory
+        .resolve_for(&state.proxies, &acc)
+        .map(|(c, _)| c)
+        .unwrap_or_else(|_| state.cursor.clone())
         .probe_quota(&acc.access_token, &acc.machine_id)
         .await;
     state.pool.set_quota(&id, snap.clone());
@@ -218,22 +290,35 @@ pub async fn api_account_probe(
 
 /// POST /admin/api/accounts/probe-all
 pub async fn api_account_probe_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = state.pool.account_rows();
-    let mut out = Vec::new();
-    for row in rows {
-        let id = row["id"].as_str().unwrap_or("").to_string();
-        if id.is_empty() {
-            continue;
-        }
-        if let Some(acc) = state.pool.get_account(&id) {
-            let snap = state
-                .cursor
-                .probe_quota(&acc.access_token, &acc.machine_id)
-                .await;
-            state.pool.set_quota(&id, snap.clone());
-            out.push(json!({"id": id, "quota": snap}));
-        }
-    }
+    use futures_util::stream::{self, StreamExt};
+    let ids: Vec<String> = state
+        .pool
+        .account_rows()
+        .into_iter()
+        .filter_map(|row| row["id"].as_str().map(|s| s.to_string()))
+        .filter(|id| !id.is_empty())
+        .collect();
+    let out: Vec<serde_json::Value> = stream::iter(ids)
+        .map(|id| {
+            let state = state.clone();
+            async move {
+                let Some(acc) = state.pool.get_account(&id) else {
+                    return json!({"id": id, "error": "not found"});
+                };
+                let snap = state
+                    .cursor_factory
+                    .resolve_for(&state.proxies, &acc)
+                    .map(|(c, _)| c)
+                    .unwrap_or_else(|_| state.cursor.clone())
+                    .probe_quota(&acc.access_token, &acc.machine_id)
+                    .await;
+                state.pool.set_quota(&id, snap.clone());
+                json!({"id": id, "quota": snap})
+            }
+        })
+        .buffer_unordered(50)
+        .collect()
+        .await;
     Json(json!({"status": "ok", "probed": out.len(), "results": out}))
 }
 
@@ -322,6 +407,8 @@ pub async fn api_accounts_import(
                         enabled,
                         token_expires_at: None,
                         refresh_url: None,
+                        proxy_id: None,
+                        tags: Vec::new(),
                     });
                 }
             }

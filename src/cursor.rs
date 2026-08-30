@@ -11,6 +11,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use uuid::Uuid;
 
+type HttpsClient =
+    Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::Full<hyper::body::Bytes>>;
+
 pub const STREAM_PATH: &str = "/aiserver.v1.InferenceService/Stream";
 pub const CLIENT_TYPE: &str = "sand";
 pub const CLIENT_VERSION: &str = "0.18.0";
@@ -184,12 +187,23 @@ pub fn build_cursor_body_with_tools(
     body
 }
 
-/// Cursor 异步客户端
+/// Cursor 异步客户端 (直连或经 HTTP CONNECT 出口)
 #[derive(Clone)]
 pub struct CursorClient {
-    client: Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::Full<hyper::body::Bytes>>,
+    client: HttpsClient,
+    proxied: Option<ProxiedClient>,
     backend: String,
     timeout_s: u64,
+    pub proxy_id: Option<String>,
+}
+
+/// 经 HTTP 代理 CONNECT 的客户端, 连接器类型与直连不同, 所以分开存.
+#[derive(Clone)]
+struct ProxiedClient {
+    inner: Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::proxy::Tunnel<HttpConnector>>,
+        http_body_util::Full<hyper::body::Bytes>,
+    >,
 }
 
 impl CursorClient {
@@ -205,27 +219,54 @@ impl CursorClient {
     }
 
     pub fn new(backend: &str, timeout_s: u64) -> anyhow::Result<Self> {
-        // 连接层: 显式 connect 超时 (默认无限, SYN 卡死会占用槽位) + TCP keepalive/nodelay
+        Ok(Self {
+            client: build_direct_client()?,
+            proxied: None,
+            backend: backend.to_string(),
+            timeout_s,
+            proxy_id: None,
+        })
+    }
+
+    pub fn new_via_http_proxy(
+        backend: &str,
+        timeout_s: u64,
+        proxy_id: &str,
+        proxy_url: &str,
+    ) -> anyhow::Result<Self> {
+        let parsed = crate::proxypool::parse_proxy_url(proxy_url).map_err(|e| anyhow::anyhow!(e))?;
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_connect_timeout(Some(std::time::Duration::from_secs(10)));
         http.set_keepalive(Some(std::time::Duration::from_secs(30)));
         http.set_nodelay(true);
-        // ALPN 同时提供 h2 + http/1.1: 只启 h2 会让所有请求挤在一条连接上,
-        // 撞服务端 MAX_CONCURRENT_STREAMS 后在客户端内部排队
+        let proxy_uri: hyper::Uri = format!("http://{}:{}", parsed.host, parsed.port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("proxy uri: {e}"))?;
+        let mut tunnel =
+            hyper_util::client::legacy::connect::proxy::Tunnel::new(proxy_uri, http);
+        if let (Some(u), Some(p)) = (&parsed.user, &parsed.pass) {
+            use base64::Engine;
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
+            let hv = hyper::header::HeaderValue::from_str(&format!("Basic {token}"))
+                .map_err(|e| anyhow::anyhow!("proxy auth header: {e}"))?;
+            tunnel = tunnel.with_auth(hv);
+        }
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()
             .enable_all_versions()
-            .wrap_connector(http);
-        let client = Client::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(256)
+            .wrap_connector(tunnel);
+        let inner = Client::builder(TokioExecutor::new())
+            .pool_max_idle_per_host(32)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build(https);
         Ok(Self {
-            client,
+            client: build_direct_client()?,
+            proxied: Some(ProxiedClient { inner }),
             backend: backend.to_string(),
             timeout_s,
+            proxy_id: Some(proxy_id.to_string()),
         })
     }
 
@@ -257,9 +298,8 @@ impl CursorClient {
             .body(http_body_util::Full::new(hyper::body::Bytes::from(envelope)))
             .map_err(|e| CursorError::Network(e.to_string()))?;
 
-        // 客户端侧硬超时: 响应头必须在 timeout_s 内到达; 帧级空闲超时由调用方控制
         let timeout = std::time::Duration::from_secs(self.timeout_s.max(1));
-        let resp = tokio::time::timeout(timeout, self.client.request(req))
+        let resp = tokio::time::timeout(timeout, self.request(req))
             .await
             .map_err(|_| CursorError::Network(format!("upstream response headers timeout after {}s", self.timeout_s)))?
             .map_err(|e| CursorError::Network(e.to_string()))?;
@@ -275,7 +315,6 @@ impl CursorClient {
             .map_err(|e| CursorError::Network(e.to_string()))?
             .to_bytes();
             let text = String::from_utf8_lossy(&body_bytes);
-            // 按字符截断; 按字节切 &str 会在多字节边界 panic (panic=abort 直接掉进程)
             return Err(CursorError::Http(status, text.chars().take(200).collect()));
         }
 
@@ -284,6 +323,34 @@ impl CursorClient {
             buf: BytesMut::with_capacity(8192),
         }))
     }
+
+    pub async fn request(
+        &self,
+        req: hyper::Request<http_body_util::Full<hyper::body::Bytes>>,
+    ) -> Result<hyper::Response<Incoming>, hyper_util::client::legacy::Error> {
+        if let Some(p) = &self.proxied {
+            p.inner.request(req).await
+        } else {
+            self.client.request(req).await
+        }
+    }
+}
+
+fn build_direct_client() -> anyhow::Result<HttpsClient> {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    http.set_connect_timeout(Some(std::time::Duration::from_secs(10)));
+    http.set_keepalive(Some(std::time::Duration::from_secs(30)));
+    http.set_nodelay(true);
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_all_versions()
+        .wrap_connector(http);
+    Ok(Client::builder(TokioExecutor::new())
+        .pool_max_idle_per_host(256)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build(https))
 }
 
 /// Connect 帧流解码器

@@ -557,6 +557,57 @@ impl AccountPool {
             .collect()
     }
 
+    /// 轻量汇总（不含账号数组，给概览/metrics 用）
+    pub fn summary(&self) -> serde_json::Value {
+        let mut available = 0usize;
+        let mut disabled = 0usize;
+        let mut cooling = 0usize;
+        let mut quota_blocked = 0usize;
+        let mut erroring = 0usize;
+        let mut total_requests = 0u64;
+        let mut total_errors = 0u64;
+        let mut total_inflight = 0usize;
+        for entry in self.slots.iter() {
+            let id = entry.key();
+            let slot = entry.value();
+            let enabled = !self.disabled.get(id).map(|v| *v).unwrap_or(false);
+            let cooling_now = slot.is_cooling_down();
+            let quota_ok = !self.quota_blocks(id);
+            if enabled && !cooling_now && quota_ok {
+                available += 1;
+            }
+            if !enabled {
+                disabled += 1;
+            }
+            if cooling_now {
+                cooling += 1;
+            }
+            if !quota_ok {
+                quota_blocked += 1;
+            }
+            total_inflight += self.max_concurrency.saturating_sub(slot.sem.available_permits());
+            if let Some(s) = self.stats.get(id) {
+                total_requests += s.requests.load(Ordering::Relaxed);
+                let err = s.errors.load(Ordering::Relaxed);
+                total_errors += err;
+                if s.consecutive_errors() > 0 {
+                    erroring += 1;
+                }
+            }
+        }
+        serde_json::json!({
+            "total_accounts": self.slots.len(),
+            "available": available,
+            "disabled": disabled,
+            "cooling": cooling,
+            "quota_blocked": quota_blocked,
+            "erroring": erroring,
+            "inflight": total_inflight,
+            "total_requests": total_requests,
+            "total_errors": total_errors,
+        })
+    }
+
     /// 统计信息
     pub fn stats(&self) -> serde_json::Value {
         let mut accounts = Vec::new();
@@ -598,23 +649,19 @@ impl AccountPool {
 
             let cooldown_remaining = slot.cooldown_remaining().map(|d| d.as_secs());
 
-            accounts.push(serde_json::json!({
-                "id": id,
-                "enabled": enabled,
-                "cooldown": cooling,
-                "cooldown_remaining_secs": cooldown_remaining,
-                "cooldown_remaining_s": cooldown_remaining,
-                "quota_ok": quota_ok,
-                "quota": self.quotas.get(id.as_str()).map(|q| q.clone()),
-                "available": is_available,
-                // 扁平字段供面板直接读取
-                "requests": req,
-                "errors": err,
-                "inflight": inflight,
-                "max_concurrency": self.max_concurrency,
-                "stats": stats,
-                "health_score": self.health_score(id).map(|h| h.score),
-            }));
+            accounts.push(self.account_json(
+                id,
+                slot,
+                enabled,
+                cooling,
+                quota_ok,
+                is_available,
+                inflight,
+                req,
+                err,
+                stats,
+                cooldown_remaining,
+            ));
         }
 
         serde_json::json!({
@@ -625,6 +672,207 @@ impl AccountPool {
             "total_errors": total_errors,
             "accounts": accounts,
         })
+    }
+
+    fn account_json(
+        &self,
+        id: &str,
+        slot: &Slot,
+        enabled: bool,
+        cooling: bool,
+        quota_ok: bool,
+        is_available: bool,
+        inflight: usize,
+        req: u64,
+        err: u64,
+        stats: serde_json::Value,
+        cooldown_remaining: Option<u64>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "enabled": enabled,
+            "cooldown": cooling,
+            "cooldown_remaining_secs": cooldown_remaining,
+            "cooldown_remaining_s": cooldown_remaining,
+            "quota_ok": quota_ok,
+            "quota": self.quotas.get(id).map(|q| q.clone()),
+            "available": is_available,
+            "requests": req,
+            "errors": err,
+            "inflight": inflight,
+            "max_concurrency": self.max_concurrency,
+            "stats": stats,
+            "health_score": self.health_score(id).map(|h| h.score),
+            "proxy_id": slot.account.proxy_id,
+            "tags": slot.account.tags,
+        })
+    }
+
+    fn build_account_row(&self, id: &str, slot: &Slot) -> serde_json::Value {
+        let enabled = !self.disabled.get(id).map(|v| *v).unwrap_or(false);
+        let cooling = slot.is_cooling_down();
+        let quota_ok = !self.quota_blocks(id);
+        let is_available = enabled && !cooling && quota_ok;
+        let inflight = self.max_concurrency.saturating_sub(slot.sem.available_permits());
+        let (req, err, stats) = self
+            .stats
+            .get(id)
+            .map(|s| {
+                let req = s.requests.load(Ordering::Relaxed);
+                let err = s.errors.load(Ordering::Relaxed);
+                (
+                    req,
+                    err,
+                    serde_json::json!({
+                        "requests": req,
+                        "errors": err,
+                        "consecutive_errors": s.consecutive_errors(),
+                        "error_rate": s.error_rate(),
+                        "auto_disabled_count": s.auto_disabled_count.load(Ordering::Relaxed),
+                    }),
+                )
+            })
+            .unwrap_or((0, 0, serde_json::json!({})));
+        let cooldown_remaining = slot.cooldown_remaining().map(|d| d.as_secs());
+        self.account_json(
+            id,
+            slot,
+            enabled,
+            cooling,
+            quota_ok,
+            is_available,
+            inflight,
+            req,
+            err,
+            stats,
+            cooldown_remaining,
+        )
+    }
+
+    /// 服务端分页/过滤，避免超大号池把整表塞给浏览器。
+    pub fn query_accounts(
+        &self,
+        q: &str,
+        filter: &str,
+        sort: &str,
+        page: usize,
+        page_size: usize,
+        proxy_id: &str,
+    ) -> serde_json::Value {
+        let page = page.max(1);
+        let page_size = page_size.clamp(1, 200);
+        let q = q.trim().to_ascii_lowercase();
+        let mut rows: Vec<serde_json::Value> = self
+            .slots
+            .iter()
+            .map(|e| self.build_account_row(e.key(), e.value()))
+            .collect();
+
+        rows.retain(|acc| {
+            if !q.is_empty() {
+                let id = acc["id"].as_str().unwrap_or("").to_ascii_lowercase();
+                let tags = acc["tags"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                            .to_ascii_lowercase()
+                    })
+                    .unwrap_or_default();
+                let pid = acc["proxy_id"].as_str().unwrap_or("").to_ascii_lowercase();
+                if !id.contains(&q) && !tags.contains(&q) && !pid.contains(&q) {
+                    return false;
+                }
+            }
+            if !proxy_id.is_empty() {
+                let pid = acc["proxy_id"].as_str().unwrap_or("");
+                if proxy_id == "__none__" {
+                    if !pid.is_empty() {
+                        return false;
+                    }
+                } else if pid != proxy_id {
+                    return false;
+                }
+            }
+            match filter {
+                "enabled" | "available" => acc["available"].as_bool().unwrap_or(false),
+                "disabled" => !acc["enabled"].as_bool().unwrap_or(false),
+                "cooldown" => acc["cooldown"].as_bool().unwrap_or(false),
+                "error" => acc["errors"].as_u64().unwrap_or(0) > 0
+                    || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) > 0,
+                "quota" => !acc["quota_ok"].as_bool().unwrap_or(true),
+                "unhealthy" => acc["health_score"].as_u64().unwrap_or(100) < 50,
+                "attention" => {
+                    !acc["enabled"].as_bool().unwrap_or(false)
+                        || acc["cooldown"].as_bool().unwrap_or(false)
+                        || !acc["quota_ok"].as_bool().unwrap_or(true)
+                        || acc["health_score"].as_u64().unwrap_or(100) < 50
+                        || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) >= 3
+                }
+                _ => true,
+            }
+        });
+
+        let severity = |acc: &serde_json::Value| -> i64 {
+            let mut s = 0i64;
+            if acc["cooldown"].as_bool().unwrap_or(false) {
+                s += 40;
+            }
+            if !acc["quota_ok"].as_bool().unwrap_or(true) {
+                s += 30;
+            }
+            if !acc["enabled"].as_bool().unwrap_or(false) {
+                s += 20;
+            }
+            s += acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) as i64 * 5;
+            s += 100i64.saturating_sub(acc["health_score"].as_u64().unwrap_or(100) as i64);
+            s
+        };
+
+        rows.sort_by(|a, b| {
+            match sort {
+                "requests" => b["requests"].as_u64().cmp(&a["requests"].as_u64()),
+                "errors" => b["errors"].as_u64().cmp(&a["errors"].as_u64()),
+                "quota" => {
+                    let qa = a["quota"]["usage_percent"].as_f64().unwrap_or(999.0);
+                    let qb = b["quota"]["usage_percent"].as_f64().unwrap_or(999.0);
+                    qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                "health" => a["health_score"].as_u64().cmp(&b["health_score"].as_u64()),
+                "attention" => severity(b).cmp(&severity(a)),
+                _ => {
+                    let sev = severity(b).cmp(&severity(a));
+                    if sev != std::cmp::Ordering::Equal {
+                        return sev;
+                    }
+                    a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
+                }
+            }
+        });
+
+        let filtered = rows.len();
+        let pages = filtered.div_ceil(page_size).max(1);
+        let page = page.min(pages);
+        let start = (page - 1) * page_size;
+        let slice = if start >= filtered {
+            Vec::new()
+        } else {
+            rows[start..(start + page_size).min(filtered)].to_vec()
+        };
+        let mut out = self.summary();
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("accounts".into(), serde_json::json!(slice));
+            obj.insert("filtered".into(), serde_json::json!(filtered));
+            obj.insert("page".into(), serde_json::json!(page));
+            obj.insert("page_size".into(), serde_json::json!(page_size));
+            obj.insert("pages".into(), serde_json::json!(pages));
+            obj.insert("q".into(), serde_json::json!(q));
+            obj.insert("filter".into(), serde_json::json!(filter));
+            obj.insert("sort".into(), serde_json::json!(sort));
+        }
+        out
     }
 
     /// 账号列表（用于导出）
@@ -640,6 +888,8 @@ impl AccountPool {
                     "refresh_token": acc.refresh_token,
                     "enabled": !self.disabled.get(&acc.id).map(|v| *v).unwrap_or(false),
                     "token_expires_at": acc.token_expires_at,
+                    "proxy_id": acc.proxy_id,
+                    "tags": acc.tags,
                 })
             })
             .collect()
@@ -684,6 +934,8 @@ mod tests {
             enabled,
             token_expires_at: None,
             refresh_url: None,
+            proxy_id: None,
+            tags: Vec::new(),
         }
     }
 
@@ -792,5 +1044,30 @@ mod tests {
     fn empty_pool_is_empty() {
         let pool = AccountPool::new(vec![], 1);
         assert!(matches!(pool.try_acquire_by_session(None), AcquireTry::Empty));
+    }
+
+    #[test]
+    fn query_pages_and_attention() {
+        let pool = AccountPool::new(
+            vec![acc("ok", true), acc("bad", true), acc("off", false)],
+            1,
+        );
+        pool.release("bad", true, 30);
+        let page = pool.query_accounts("", "attention", "attention", 1, 50, "");
+        assert_eq!(page["total_accounts"], 3);
+        assert!(page["filtered"].as_u64().unwrap() >= 2);
+        let ids: Vec<&str> = page["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"bad"));
+        assert!(ids.contains(&"off"));
+        assert!(!ids.contains(&"ok"));
+        let p1 = pool.query_accounts("", "all", "id", 1, 2, "");
+        assert_eq!(p1["page_size"], 2);
+        assert_eq!(p1["pages"], 2);
+        assert_eq!(p1["accounts"].as_array().unwrap().len(), 2);
     }
 }

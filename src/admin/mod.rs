@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod keys;
 pub mod settings;
 pub mod billing;
+pub mod proxies;
 
 use axum::response::{Html, IntoResponse};
 
@@ -19,3 +20,4 @@ pub use accounts::*;
 pub use keys::*;
 pub use settings::*;
 pub use billing::*;
+pub use proxies::*;

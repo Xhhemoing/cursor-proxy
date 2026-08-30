@@ -51,9 +51,11 @@ impl UpstreamClient {
         tool_choice: Option<&Value>,
         parallel_tool_calls: Option<bool>,
         conversation_id: Option<&str>,
+        cursor_override: Option<&CursorClient>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError> {
         match self {
             Self::Cursor(client) => {
+                let client = cursor_override.unwrap_or(client);
                 let (token, mid) = cursor_auth.ok_or_else(|| UpstreamError::Config("cursor auth required".into()))?;
                 let body = build_cursor_body_with_tools(
                     messages,

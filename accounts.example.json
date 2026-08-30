@@ -6,6 +6,8 @@
     "refresh_token": "",
     "enabled": true,
     "token_expires_at": null,
-    "refresh_url": null
+    "refresh_url": null,
+    "proxy_id": null,
+    "tags": []
   }
 ]
