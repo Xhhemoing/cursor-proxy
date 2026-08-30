@@ -691,7 +691,7 @@ async fn chat_handler(
                 );
                 if attempt == MAX_RETRIES - 1 {
                     state.ledger.record(billing::BillingRecord::build(
-                        &bctx, &request_id, &model, &account_id, 0, 0, stream, 502,
+                        &bctx, &request_id, &model, &account_id, translate::Usage::default(), stream, 502,
                         start.elapsed().as_millis() as u64, &client_ip,
                     ));
                     return Err((
@@ -732,8 +732,7 @@ async fn chat_handler(
         tokio::spawn(async move {
             // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
             let _permit = current_permit.take().expect("permit must exist");
-            let mut input_tokens = 0u64;
-            let mut output_tokens = 0u64;
+            let mut usage = translate::Usage::default();
             let mut stream = Box::pin(upstream_to_openai_stream(frames, &model_clone));
             loop {
                 // 帧级空闲超时: 上游 hang 住不能让槽位永久泄漏
@@ -745,17 +744,16 @@ async fn chat_handler(
                         pool.release(&aid, true, 10);
                         metrics.observe_err();
                         ledger.record(billing::BillingRecord::build(
-                            &bctx_s, &rid, &model_clone, &aid, input_tokens, output_tokens, true, 504,
+                            &bctx_s, &rid, &model_clone, &aid, usage, true, 504,
                             start.elapsed().as_millis() as u64, &client_ip,
                         ));
                         return;
                     }
                 };
                 match item {
-                    Ok((sse, usage)) => {
-                        if let Some(u) = usage {
-                            input_tokens = u.0;
-                            output_tokens = u.1;
+                    Ok((sse, usage_frame)) => {
+                        if let Some(u) = usage_frame {
+                            usage = u;
                         }
                         // 客户端断开即停，不阻塞转发循环
                         if tx.send(Ok(Bytes::from(sse))).await.is_err() {
@@ -775,9 +773,11 @@ async fn chat_handler(
                 "req_id": rid,
                 "model": model_clone,
                 "account": aid,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
+                "input_tokens": usage.input,
+                "output_tokens": usage.output,
+                "cache_read_tokens": usage.cache_read,
+                "cache_write_tokens": usage.cache_write,
+                "total_tokens": usage.total(),
                 "latency_ms": latency,
                 "status": 200,
                 "stream": true,
@@ -787,11 +787,11 @@ async fn chat_handler(
             info!(event = "request", log = %line, "request completed");
             log_buf.push_with_line(log_entry, line);
             if !billed_key.is_empty() {
-                key_usage.add(&billed_key, input_tokens + output_tokens);
+                key_usage.add(&billed_key, usage.total());
             }
-            metrics.observe_ok(input_tokens + output_tokens);
+            metrics.observe_ok(usage.total());
             ledger.record(billing::BillingRecord::build(
-                &bctx_s, &rid, &model_clone, &aid, input_tokens, output_tokens, true, 200,
+                &bctx_s, &rid, &model_clone, &aid, usage, true, 200,
                 latency, &client_ip,
             ));
             pool.record_success(&aid);
@@ -824,7 +824,7 @@ async fn chat_handler(
                     "non-stream upstream timeout"
                 );
                 state.ledger.record(billing::BillingRecord::build(
-                    &bctx, &request_id, &model, &account_id, 0, 0, false, 504,
+                    &bctx, &request_id, &model, &account_id, translate::Usage::default(), false, 504,
                     start.elapsed().as_millis() as u64, &client_ip,
                 ));
                 return Err((
@@ -842,9 +842,11 @@ async fn chat_handler(
                     "req_id": request_id,
                     "model": model,
                     "account": account_id,
-                    "input_tokens": usage.0,
-                    "output_tokens": usage.1,
-                    "total_tokens": usage.0 + usage.1,
+                    "input_tokens": usage.input,
+                    "output_tokens": usage.output,
+                    "cache_read_tokens": usage.cache_read,
+                    "cache_write_tokens": usage.cache_write,
+                    "total_tokens": usage.total(),
                     "latency_ms": latency,
                     "status": 200,
                     "stream": false,
@@ -854,11 +856,11 @@ async fn chat_handler(
                 info!(event = "request", log = %line, "request completed");
                 state.log_buffer.push_with_line(log_entry, line);
                 if !used_key.is_empty() {
-                    state.key_usage.add(&used_key, usage.0 + usage.1);
+                    state.key_usage.add(&used_key, usage.total());
                 }
-                state.metrics.observe_ok(usage.0 + usage.1);
+                state.metrics.observe_ok(usage.total());
                 state.ledger.record(billing::BillingRecord::build(
-                    &bctx, &request_id, &model, &account_id, usage.0, usage.1, false, 200,
+                    &bctx, &request_id, &model, &account_id, usage, false, 200,
                     latency, &client_ip,
                 ));
                 state.pool.record_success(&account_id);
@@ -876,7 +878,7 @@ async fn chat_handler(
                     "translate failed"
                 );
                 state.ledger.record(billing::BillingRecord::build(
-                    &bctx, &request_id, &model, &account_id, 0, 0, false, 500,
+                    &bctx, &request_id, &model, &account_id, translate::Usage::default(), false, 500,
                     start.elapsed().as_millis() as u64, &client_ip,
                 ));
                 Err((

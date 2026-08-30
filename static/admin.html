@@ -223,6 +223,14 @@
     dialog h3 { margin: 0 0 8px; font: 400 22px var(--serif); }
     dialog p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
     .hint { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+    table.edit td { padding: 8px 8px; }
+    table.edit th { padding: 10px 8px; }
+    table.edit input { height: 38px; padding: 0 10px; font-size: 13px; }
+    table.edit td.num input { text-align: right; min-width: 110px; }
+    table.edit td:first-child input { min-width: 260px; }
+    table.edit .del { color: var(--bad); background: transparent; border-color: transparent; height: 32px; padding: 0 8px; }
+    table.edit .del:hover { border-color: var(--bad); }
+    .unit { color: var(--muted); font-size: 12px; margin-left: 6px; }
     .newkey { display: none; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; padding: 14px 16px; border: 1px solid var(--ok); background: var(--ok-bg); border-radius: 6px; }
     .newkey.show { display: flex; }
     .newkey .k { font: 500 14px var(--mono); word-break: break-all; flex: 1; min-width: 240px; user-select: all; }
@@ -469,7 +477,7 @@
               <div class="ph"><h3 id="bill-sum-title">按日汇总</h3><p>金额条按本页最大值归一</p></div>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>分组</th><th class="barcell"></th><th class="num">请求</th><th class="num">成功</th><th class="num">输入 tok</th><th class="num">输出 tok</th><th class="money">金额</th><th class="money">分成</th><th class="num">未定价</th></tr></thead>
+                  <thead><tr><th>分组</th><th class="barcell"></th><th class="num">请求</th><th class="num">成功</th><th class="num">输入 tok</th><th class="num">输出 tok</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="money">金额</th><th class="money">分成</th><th class="num">未定价</th></tr></thead>
                   <tbody id="bill-sum-body"></tbody>
                 </table>
               </div>
@@ -480,7 +488,7 @@
             <div class="panel">
               <div class="table-scroll">
                 <table class="nowrap">
-                  <thead><tr><th>时间</th><th>req_id</th><th>Key</th><th>销售</th><th>模型</th><th>账号</th><th class="num">in / out</th><th class="money">单价 /M</th><th class="money">金额</th><th class="money">分成</th><th>状态</th><th class="num">耗时</th><th>标签</th></tr></thead>
+                  <thead><tr><th>时间</th><th>req_id</th><th>Key</th><th>销售</th><th>模型</th><th>账号</th><th class="num">in / out</th><th class="num">缓存 读 / 写</th><th class="money">单价 /M</th><th class="money">金额</th><th class="money">分成</th><th>状态</th><th class="num">耗时</th><th>标签</th></tr></thead>
                   <tbody id="bill-rec-body"></tbody>
                 </table>
               </div>
@@ -494,18 +502,31 @@
               <div class="pb form-grid">
                 <label>币种 <input id="pr-currency"></label>
                 <label>时区偏移（分钟） <input id="pr-tz" type="number"></label>
-                <label>默认分成（万分比） <input id="pr-bps" type="number" min="0" max="10000"></label>
+                <label>默认分成 % <input id="pr-bps" type="number" min="0" max="100" step="0.01"></label>
                 <label class="inline"><input type="checkbox" id="pr-reject"> 未定价模型拒绝请求 (402)</label>
               </div>
             </div>
-            <div class="grid-2">
+            <div>
               <div class="panel">
-                <div class="ph"><h3>模型价格表</h3><p>每 1M tokens。<code>model</code> 支持精确名 / <code>prefix*</code> / <code>*</code> 兜底；优先级 精确 &gt; 最长前缀 &gt; <code>*</code></p></div>
-                <div class="pb"><textarea id="pr-prices" spellcheck="false"></textarea></div>
+                <div class="ph"><h3>模型价格表</h3><p>单价为每 1M tokens。模型名可填精确名（如 <code>claude-sonnet-4-6</code>）、前缀通配（<code>claude-opus-*</code>）或 <code>*</code> 兜底；匹配优先级 精确 &gt; 最长前缀 &gt; <code>*</code>。缓存读/写留 0 表示不单独计价。</p></div>
+                <div class="table-scroll" style="max-height:none">
+                  <table class="edit">
+                    <thead><tr><th style="min-width:220px">模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">缓存写</th><th>备注</th><th></th></tr></thead>
+                    <tbody id="pr-price-body"></tbody>
+                  </table>
+                </div>
+                <datalist id="model-list"></datalist>
+                <div class="pb" style="padding-top:12px"><button type="button" class="ghost sm" id="pr-add-price">+ 添加模型</button> <button type="button" class="ghost sm" id="pr-add-claude">+ 一键填入 Claude 全系标价</button></div>
               </div>
               <div class="panel">
-                <div class="ph"><h3>销售 / 渠道</h3><p><code>commission_bps</code> 为万分比，1500 = 15%。key 未绑定销售时用默认分成</p></div>
-                <div class="pb"><textarea id="pr-sales" spellcheck="false"></textarea></div>
+                <div class="ph"><h3>销售 / 渠道</h3><p>分成按百分比填写（15 = 15%）。API key 上选择归属销售后，该 key 的每笔账单按此比例算分成；未绑定的用上面的默认分成。</p></div>
+                <div class="table-scroll" style="max-height:none">
+                  <table class="edit">
+                    <thead><tr><th style="min-width:140px">销售 ID</th><th>姓名</th><th class="num">分成 %</th><th></th></tr></thead>
+                    <tbody id="pr-sales-body"></tbody>
+                  </table>
+                </div>
+                <div class="pb" style="padding-top:12px"><button type="button" class="ghost sm" id="pr-add-sales">+ 添加销售</button></div>
               </div>
             </div>
             <div class="toolbar">
@@ -1240,7 +1261,7 @@
         const t = d.total || {};
         document.getElementById('bk-req').textContent = fmtN(t.requests);
         document.getElementById('bk-in').textContent = fmtN(t.input_tokens);
-        document.getElementById('bk-out').textContent = fmtN(t.output_tokens);
+        document.getElementById('bk-out').textContent = fmtN(t.output_tokens) + ((t.cache_read_tokens || t.cache_write_tokens) ? ' · 缓存 ' + fmtN(t.cache_read_tokens) + '/' + fmtN(t.cache_write_tokens) : '');
         document.getElementById('bk-cost').textContent = t.cost || '0.00';
         document.getElementById('bk-comm').textContent = t.commission || '0.00';
         document.getElementById('bk-cur').textContent = d.currency ? '(' + d.currency + ')' : '';
@@ -1249,7 +1270,7 @@
         const titles = { day: '按日汇总', hour: '按小时汇总', key: '按 Key 汇总', sales: '按销售汇总', model: '按模型汇总', tag: '按标签汇总', account: '按账号汇总', none: '合计' };
         document.getElementById('bill-sum-title').textContent = titles[d.group] || '汇总';
         if (!(d.rows || []).length) {
-          const tr = el('tr'); const td = el('td', { colspan: '9' }, '无数据'); td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
+          const tr = el('tr'); const td = el('td', { colspan: '11' }, '无数据'); td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
         }
         const maxCost = Math.max(1, ...(d.rows || []).map((r) => Number(r.cost_nano || 0)));
         (d.rows || []).forEach((r) => {
@@ -1265,6 +1286,8 @@
           tr.appendChild(el('td', { class: 'num' }, fmtN(r.ok)));
           tr.appendChild(el('td', { class: 'num' }, fmtN(r.input_tokens)));
           tr.appendChild(el('td', { class: 'num' }, fmtN(r.output_tokens)));
+          tr.appendChild(el('td', { class: 'num' }, fmtN(r.cache_read_tokens)));
+          tr.appendChild(el('td', { class: 'num' }, fmtN(r.cache_write_tokens)));
           tr.appendChild(el('td', { class: 'money' }, r.cost));
           tr.appendChild(el('td', { class: 'money' }, r.commission));
           const up = el('td', { class: 'num' }, String(r.unpriced || 0)); if (r.unpriced) up.classList.add('bad');
@@ -1289,7 +1312,8 @@
           tr.appendChild(el('td', null, r.model));
           tr.appendChild(el('td', null, r.account));
           tr.appendChild(el('td', { class: 'num' }, fmtN(r.input_tokens) + ' / ' + fmtN(r.output_tokens)));
-          const pr = el('td', { class: 'money' }, r.priced ? (r.input_price_per_m + ' / ' + r.output_price_per_m) : '未定价');
+          tr.appendChild(el('td', { class: 'num' }, (r.cache_read_tokens || r.cache_write_tokens) ? fmtN(r.cache_read_tokens) + ' / ' + fmtN(r.cache_write_tokens) : '—'));
+          const pr = el('td', { class: 'money', title: '缓存读 ' + r.cache_read_price_per_m + ' / 缓存写 ' + r.cache_write_price_per_m }, r.priced ? (r.input_price_per_m + ' / ' + r.output_price_per_m) : '未定价');
           if (!r.priced) pr.className = 'money bad';
           tr.appendChild(pr);
           tr.appendChild(el('td', { class: 'money' }, r.cost));
@@ -1331,29 +1355,104 @@
       } catch (e) { /* 面板可能未鉴权 */ }
     }
 
+    const CLAUDE_LIST_PRICES = [
+      { model: 'claude-opus-4-6',   input_per_m: 15,   output_per_m: 75,  cache_read_per_m: 1.5,   cache_write_per_m: 18.75, note: '公开标价' },
+      { model: 'claude-opus-*',     input_per_m: 15,   output_per_m: 75,  cache_read_per_m: 1.5,   cache_write_per_m: 18.75, note: '公开标价' },
+      { model: 'claude-sonnet-4-6', input_per_m: 3,    output_per_m: 15,  cache_read_per_m: 0.3,   cache_write_per_m: 3.75,  note: '公开标价' },
+      { model: 'claude-sonnet-*',   input_per_m: 3,    output_per_m: 15,  cache_read_per_m: 0.3,   cache_write_per_m: 3.75,  note: '公开标价' },
+      { model: 'claude-haiku-*',    input_per_m: 0.8,  output_per_m: 4,   cache_read_per_m: 0.08,  cache_write_per_m: 1,     note: '公开标价' },
+    ];
+    function numInput(val, opts) {
+      const i = el('input', Object.assign({ type: 'number', min: '0', step: 'any', inputmode: 'decimal' }, opts || {}));
+      i.value = (val == null || val === '') ? '' : String(val);
+      return i;
+    }
+    function priceRow(r) {
+      r = r || {};
+      const tr = el('tr');
+      const m = el('input', { list: 'model-list', placeholder: '如 claude-sonnet-4-6 / claude-opus-* / *', spellcheck: 'false' }); m.value = r.model || '';
+      const tdm = el('td'); tdm.appendChild(m); tr.appendChild(tdm);
+      const cells = [
+        ['input_per_m', r.input_per_m], ['output_per_m', r.output_per_m],
+        ['cache_read_per_m', r.cache_read_per_m || 0], ['cache_write_per_m', r.cache_write_per_m || 0],
+      ];
+      cells.forEach(([k, v]) => { const td = el('td', { class: 'num' }); td.appendChild(numInput(v, { 'data-k': k, placeholder: '0' })); tr.appendChild(td); });
+      const note = el('input', { placeholder: '可选' }); note.value = r.note || '';
+      const tdn = el('td'); tdn.appendChild(note); tr.appendChild(tdn);
+      const del = el('button', { type: 'button', class: 'del', title: '删除此行' }, '✕'); del.addEventListener('click', () => tr.remove());
+      const tdd = el('td'); tdd.appendChild(del); tr.appendChild(tdd);
+      tr._get = () => ({
+        model: m.value.trim(),
+        input_per_m: Number(tr.querySelector('[data-k=input_per_m]').value || 0),
+        output_per_m: Number(tr.querySelector('[data-k=output_per_m]').value || 0),
+        cache_read_per_m: Number(tr.querySelector('[data-k=cache_read_per_m]').value || 0),
+        cache_write_per_m: Number(tr.querySelector('[data-k=cache_write_per_m]').value || 0),
+        note: note.value.trim(),
+      });
+      return tr;
+    }
+    function salesRow(r) {
+      r = r || {};
+      const tr = el('tr');
+      const id = el('input', { placeholder: '如 alice', spellcheck: 'false' }); id.value = r.id || '';
+      const name = el('input', { placeholder: '显示名' }); name.value = r.name || '';
+      const pct = numInput(r.commission_bps != null ? (r.commission_bps / 100) : '', { max: '100', placeholder: '15' });
+      [id, name].forEach((i) => { const td = el('td'); td.appendChild(i); tr.appendChild(td); });
+      const tdp = el('td', { class: 'num' }); tdp.appendChild(pct); tr.appendChild(tdp);
+      const del = el('button', { type: 'button', class: 'del', title: '删除此行' }, '✕'); del.addEventListener('click', () => tr.remove());
+      const tdd = el('td'); tdd.appendChild(del); tr.appendChild(tdd);
+      tr._get = () => ({ id: id.value.trim(), name: name.value.trim(), commission_bps: Math.round(Number(pct.value || 0) * 100) });
+      return tr;
+    }
+    function collectRows(tbodyId) {
+      return Array.from(document.getElementById(tbodyId).children).map((tr) => tr._get());
+    }
+    document.getElementById('pr-add-price').addEventListener('click', () => { const tr = priceRow(); document.getElementById('pr-price-body').appendChild(tr); tr.querySelector('input').focus(); });
+    document.getElementById('pr-add-sales').addEventListener('click', () => { const tr = salesRow(); document.getElementById('pr-sales-body').appendChild(tr); tr.querySelector('input').focus(); });
+    document.getElementById('pr-add-claude').addEventListener('click', () => {
+      const have = new Set(collectRows('pr-price-body').map((r) => r.model));
+      CLAUDE_LIST_PRICES.filter((r) => !have.has(r.model)).forEach((r) => document.getElementById('pr-price-body').appendChild(priceRow(r)));
+      toast('pr-msg', '已填入 Anthropic 公开标价，请按实际售价修改后保存');
+    });
+    async function fillModelList() {
+      try {
+        const d = await api('/admin/api/billing/summary?group=model');
+        const dl = document.getElementById('model-list'); dl.replaceChildren();
+        const seen = new Set((d.rows || []).map((r) => r.group));
+        ['*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*', 'gpt-*'].forEach((m) => seen.add(m));
+        Array.from(seen).sort().forEach((m) => dl.appendChild(el('option', { value: m })));
+      } catch (e) {}
+    }
     async function loadPricing() {
       const d = await api('/admin/api/billing/pricing');
       salesList = d.sales || [];
       document.getElementById('pr-currency').value = d.currency || 'USD';
       document.getElementById('pr-tz').value = d.tz_offset_minutes;
-      document.getElementById('pr-bps').value = d.default_commission_bps;
+      document.getElementById('pr-bps').value = (d.default_commission_bps || 0) / 100;
       document.getElementById('pr-reject').checked = !!d.reject_unpriced;
-      document.getElementById('pr-prices').value = JSON.stringify(d.prices || [], null, 2);
-      document.getElementById('pr-sales').value = JSON.stringify(d.sales || [], null, 2);
+      const pb = document.getElementById('pr-price-body'); pb.replaceChildren();
+      (d.prices || []).forEach((r) => pb.appendChild(priceRow(r)));
+      if (!(d.prices || []).length) pb.appendChild(priceRow());
+      const sb = document.getElementById('pr-sales-body'); sb.replaceChildren();
+      (d.sales || []).forEach((r) => sb.appendChild(salesRow(r)));
+      fillModelList();
       try {
         const st = await api('/admin/api/billing/stats');
         document.getElementById('bill-writer').textContent = '账本 ' + st.db_file + ' · ' + (st.db_bytes / 1024 / 1024).toFixed(1) + ' MB · 已写 ' + fmtN(st.written) + ' · 待写 ' + st.pending + ' · 重复忽略 ' + st.ignored_duplicates + ' · 失败 ' + st.failed;
       } catch (e) {}
     }
     document.getElementById('pr-save').addEventListener('click', async () => {
-      let prices, sales;
-      try { prices = JSON.parse(document.getElementById('pr-prices').value || '[]'); } catch (e) { toast('pr-msg', '价格表 JSON 无效: ' + e.message, true); return; }
-      try { sales = JSON.parse(document.getElementById('pr-sales').value || '[]'); } catch (e) { toast('pr-msg', '销售表 JSON 无效: ' + e.message, true); return; }
+      const prices = collectRows('pr-price-body').filter((r) => r.model);
+      const sales = collectRows('pr-sales-body').filter((r) => r.id);
+      const dupM = prices.map((r) => r.model).find((m, i, a) => a.indexOf(m) !== i);
+      if (dupM) { toast('pr-msg', '模型重复: ' + dupM, true); return; }
+      const dupS = sales.map((r) => r.id).find((m, i, a) => a.indexOf(m) !== i);
+      if (dupS) { toast('pr-msg', '销售 ID 重复: ' + dupS, true); return; }
       try {
         await api('/admin/api/billing/pricing', { method: 'POST', body: JSON.stringify({
           currency: document.getElementById('pr-currency').value,
           tz_offset_minutes: Number(document.getElementById('pr-tz').value),
-          default_commission_bps: Number(document.getElementById('pr-bps').value),
+          default_commission_bps: Math.round(Number(document.getElementById('pr-bps').value || 0) * 100),
           reject_unpriced: document.getElementById('pr-reject').checked,
           prices, sales,
         }) });
@@ -1373,7 +1472,7 @@
 
     showPage(location.hash.slice(1));
     loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });
-    setInterval(() => { loadAll().catch(() => setLive(false)); }, 4000);
+    setInterval(() => { if (!document.hidden) loadAll().catch(() => setLive(false)); }, 5000);
   </script>
 </body>
 </html>

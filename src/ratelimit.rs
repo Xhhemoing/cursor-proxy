@@ -1,4 +1,4 @@
-//! Admin 端点 IP 限频: 每 IP 每分钟固定窗口 60 次.
+//! Admin 端点 IP 限频: 每 IP 每分钟固定窗口 600 次 (面板自动刷新每轮 5~6 个请求, 60 会把自己限住; 600 仍足以挡暴力破解).
 
 use dashmap::DashMap;
 use std::net::IpAddr;
@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WINDOW_SECS: u64 = 60;
-const MAX_PER_WINDOW: u64 = 60;
+const MAX_PER_WINDOW: u64 = 600;
 
 struct Bucket {
     window_start: AtomicU64,
