@@ -116,6 +116,142 @@ pub async fn api_proxies_patch(
     Json(json!({"status": "ok", "proxy": state.proxies.overview()})).into_response()
 }
 
+#[derive(Deserialize, Default)]
+pub struct ProxyImportBody {
+    /// 每行一个代理, 见 proxypool::parse_proxy_line 支持的格式
+    #[serde(default)]
+    pub text: String,
+    /// 无 scheme 的行默认协议: http / https
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 自动编号前缀, 默认 "px"
+    #[serde(default)]
+    pub id_prefix: Option<String>,
+    #[serde(default)]
+    pub max_accounts: u32,
+    #[serde(default)]
+    pub note: String,
+    /// true = 只解析不落盘, 用于预览
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// POST /admin/api/proxies/import — 批量导入代理节点 (文本粘贴)
+pub async fn api_proxies_import(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ProxyImportBody>,
+) -> Response {
+    let scheme = body.kind.as_deref().unwrap_or("http");
+    let kind = if scheme.eq_ignore_ascii_case("https") {
+        proxypool::ProxyKind::Https
+    } else {
+        proxypool::ProxyKind::Http
+    };
+    let prefix = body
+        .id_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("px")
+        .to_string();
+
+    let existing = state.config.lock().proxy.nodes.clone();
+    let mut seen_urls: std::collections::HashSet<String> = existing
+        .iter()
+        .map(|n| n.url.trim().to_string())
+        .collect();
+    let existing_ids: std::collections::HashSet<String> =
+        existing.iter().map(|n| n.id.clone()).collect();
+    // 编号从已有 prefix-N 的最大值之后继续
+    let mut seq = existing
+        .iter()
+        .filter_map(|n| {
+            n.id
+                .strip_prefix(&prefix)
+                .and_then(|r| r.strip_prefix('-'))
+                .and_then(|r| r.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+
+    let mut added: Vec<ProxyNode> = Vec::new();
+    let mut duplicates = 0usize;
+    let mut errors: Vec<serde_json::Value> = Vec::new();
+    for (i, raw) in body.text.lines().enumerate() {
+        let url = match proxypool::parse_proxy_line(raw, scheme) {
+            Ok(Some(u)) => u,
+            Ok(None) => continue,
+            Err(e) => {
+                errors.push(json!({"line": i + 1, "text": raw.trim(), "error": e}));
+                continue;
+            }
+        };
+        if !seen_urls.insert(url.clone()) {
+            duplicates += 1;
+            continue;
+        }
+        let id = loop {
+            seq += 1;
+            let id = format!("{prefix}-{seq}");
+            if !existing_ids.contains(&id) {
+                break id;
+            }
+        };
+        added.push(ProxyNode {
+            id,
+            url,
+            kind,
+            region: body.region.trim().to_string(),
+            tags: body.tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            enabled: true,
+            max_accounts: body.max_accounts,
+            note: body.note.trim().to_string(),
+        });
+    }
+
+    let preview: Vec<serde_json::Value> = added.iter().map(|n| n.sanitized()).collect();
+    if body.dry_run {
+        return Json(json!({
+            "status": "ok", "dry_run": true,
+            "added": added.len(), "duplicates": duplicates, "errors": errors,
+            "nodes": preview,
+        }))
+        .into_response();
+    }
+    if added.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no new proxies parsed", "duplicates": duplicates, "errors": errors})),
+        )
+            .into_response();
+    }
+    let snapshot = {
+        let mut cfg = state.config.lock();
+        cfg.proxy.nodes.extend(added.iter().cloned());
+        cfg.clone()
+    };
+    if let Err(e) = config::save_config(&snapshot) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    state.proxies.replace(snapshot.proxy.clone());
+    state.cursor_factory.invalidate();
+    state.audit.settings_op(&["proxy_import"]);
+    Json(json!({
+        "status": "ok", "dry_run": false,
+        "added": added.len(), "duplicates": duplicates, "errors": errors,
+        "nodes": preview, "total": snapshot.proxy.nodes.len(),
+    }))
+    .into_response()
+}
+
 #[derive(Deserialize)]
 pub struct ProbeBody {
     pub ids: Option<Vec<String>>,

@@ -329,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/pool/health", get(admin::api_pool_health))
         .route("/admin/api/proxies", get(admin::api_proxies_get).post(admin::api_proxies_patch))
         .route("/admin/api/proxies/probe", post(admin::api_proxies_probe))
+        .route("/admin/api/proxies/import", post(admin::api_proxies_import))
         .route("/admin/api/proxies/rebalance", post(admin::api_proxies_rebalance))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))

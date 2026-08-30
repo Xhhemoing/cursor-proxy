@@ -856,6 +856,98 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
+/// 把批量导入里的一行宽松地解析成规范代理 URL. 支持:
+/// - `http://user:pass@host:port` / `https://...` (原样校验)
+/// - `user:pass@host:port`
+/// - `host:port`
+/// - `host:port:user:pass`
+/// - `host,port[,user,pass]` / 空格 / Tab / `;` / `|` 分隔
+/// 空行与 `#` `//` 开头的注释行返回 Ok(None).
+pub fn parse_proxy_line(line: &str, default_scheme: &str) -> Result<Option<String>, String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+        return Ok(None);
+    }
+    // 行尾注释
+    let line = line.split(" #").next().unwrap_or(line).trim();
+    let scheme = match default_scheme.trim().to_ascii_lowercase().as_str() {
+        "https" => "https",
+        _ => "http",
+    };
+    if line.contains("://") {
+        parse_proxy_url(line)?;
+        return Ok(Some(line.to_string()));
+    }
+    let build = |host: &str, port: &str, user: Option<&str>, pass: Option<&str>| -> Result<String, String> {
+        let url = match user {
+            Some(u) if !u.is_empty() => format!(
+                "{scheme}://{}:{}@{}:{}",
+                percent_encode_userinfo(u),
+                percent_encode_userinfo(pass.unwrap_or("")),
+                host.trim(),
+                port.trim()
+            ),
+            _ => format!("{scheme}://{}:{}", host.trim(), port.trim()),
+        };
+        parse_proxy_url(&url)?;
+        Ok(url)
+    };
+    // user:pass@host:port
+    if let Some((creds, hp)) = line.rsplit_once('@') {
+        let creds_ok = !creds.contains(|c: char| matches!(c, ',' | '\t' | ' ' | ';' | '|'))
+            && creds.matches(':').count() <= 1;
+        if let (true, Some((h, po))) = (creds_ok, hp.rsplit_once(':')) {
+            if po.parse::<u16>().is_ok() {
+                let (u, p) = creds.split_once(':').unwrap_or((creds, ""));
+                return build(h, po, Some(u), Some(p)).map(Some);
+            }
+        }
+    }
+    // 分隔符列
+    let cols: Vec<&str> = line
+        .split(|c: char| matches!(c, ',' | '\t' | ' ' | ';' | '|'))
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .collect();
+    match cols.len() {
+        1 => {
+            // host:port 或 host:port:user:pass
+            let parts: Vec<&str> = cols[0].split(':').collect();
+            match parts.len() {
+                2 => build(parts[0], parts[1], None, None).map(Some),
+                4 => build(parts[0], parts[1], Some(parts[2]), Some(parts[3])).map(Some),
+                3 => build(parts[0], parts[1], Some(parts[2]), Some("")).map(Some),
+                _ => Err("expect host:port or host:port:user:pass".into()),
+            }
+        }
+        2 => {
+            // host port  或  host:port user:pass
+            if cols[0].contains(':') {
+                let (h, po) = cols[0].split_once(':').unwrap();
+                let (u, p) = cols[1].split_once(':').unwrap_or((cols[1], ""));
+                build(h, po, Some(u), Some(p)).map(Some)
+            } else {
+                build(cols[0], cols[1], None, None).map(Some)
+            }
+        }
+        3 => build(cols[0], cols[1], Some(cols[2]), Some("")).map(Some),
+        4 => build(cols[0], cols[1], Some(cols[2]), Some(cols[3])).map(Some),
+        n => Err(format!("unexpected {n} columns")),
+    }
+}
+
+fn percent_encode_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'!' | b'$'
+            | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -969,5 +1061,26 @@ mod tests {
         let ov = pool.overview();
         assert_eq!(ov["judge"]["shared_egress_groups"], 1);
         assert_eq!(ov["judge"]["severity"], "warn");
+    }
+
+    #[test]
+    fn import_line_formats() {
+        let ok = |l: &str| parse_proxy_line(l, "http").unwrap().unwrap();
+        assert_eq!(ok("http://u:p@1.2.3.4:8080"), "http://u:p@1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4:8080"), "http://1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4:8080:u:p"), "http://u:p@1.2.3.4:8080");
+        assert_eq!(ok("u:p@1.2.3.4:8080"), "http://u:p@1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4,8080,u,p"), "http://u:p@1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4\t8080\tu\tp"), "http://u:p@1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4 8080"), "http://1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4:8080 u:p"), "http://u:p@1.2.3.4:8080");
+        assert_eq!(ok("1.2.3.4:8080:u:p@ss"), "http://u:p%40ss@1.2.3.4:8080");
+        assert_eq!(parse_proxy_line("1.2.3.4:8080", "https").unwrap().unwrap(), "https://1.2.3.4:8080");
+        assert!(parse_proxy_line("", "http").unwrap().is_none());
+        assert!(parse_proxy_line("# c", "http").unwrap().is_none());
+        assert!(parse_proxy_line("1.2.3.4:abc", "http").is_err());
+        assert!(parse_proxy_line("socks5://1.2.3.4:1080", "http").is_err());
+        let p = parse_proxy_url(&ok("1.2.3.4:8080:u:p@ss")).unwrap();
+        assert_eq!(p.pass.as_deref(), Some("p@ss"));
     }
 }
