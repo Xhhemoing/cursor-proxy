@@ -23,6 +23,100 @@ pub struct AppConfig {
     pub max_concurrency_per_account: usize,
     #[serde(default)]
     pub admin_token: String,
+    /// 号池全部繁忙时最长排队等待毫秒数 (0 = 不排队直接 503)
+    #[serde(default = "default_acquire_wait_ms")]
+    pub acquire_wait_ms: u64,
+    /// 计费: 模型价格表 / 销售分成 / 时区
+    #[serde(default)]
+    pub billing: BillingConfig,
+}
+
+/// 计费配置. 价格单位: 每 1M tokens 的货币金额 (最多 6 位小数, 内部转 micro 整数).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingConfig {
+    /// SQLite 账本文件
+    #[serde(default = "default_billing_db")]
+    pub db_file: String,
+    /// 日/小时分桶所用时区偏移 (分钟), 默认 +480 = Asia/Shanghai
+    #[serde(default = "default_tz_offset")]
+    pub tz_offset_minutes: i32,
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// key 未绑定销售 / 销售未配置分成比例时的默认分成 (万分比)
+    #[serde(default)]
+    pub default_commission_bps: u32,
+    /// 未匹配到价格的模型是否拒绝请求 (true = 402; false = 记 0 元并标 unpriced)
+    #[serde(default)]
+    pub reject_unpriced: bool,
+    #[serde(default)]
+    pub prices: Vec<ModelPrice>,
+    #[serde(default)]
+    pub sales: Vec<SalesRecord>,
+}
+
+impl Default for BillingConfig {
+    fn default() -> Self {
+        Self {
+            db_file: default_billing_db(),
+            tz_offset_minutes: default_tz_offset(),
+            currency: default_currency(),
+            default_commission_bps: 0,
+            reject_unpriced: false,
+            prices: Vec::new(),
+            sales: Vec::new(),
+        }
+    }
+}
+
+fn default_billing_db() -> String {
+    "billing.db".into()
+}
+fn default_tz_offset() -> i32 {
+    480
+}
+fn default_currency() -> String {
+    "USD".into()
+}
+
+/// 模型价格规则. `model` 支持精确名或 `prefix*` 通配, `*` 为兜底.
+/// 匹配优先级: 精确 > 最长前缀 > `*`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPrice {
+    pub model: String,
+    /// 每 1M 输入 tokens 价格
+    pub input_per_m: f64,
+    /// 每 1M 输出 tokens 价格
+    pub output_per_m: f64,
+    #[serde(default)]
+    pub note: String,
+}
+
+impl ModelPrice {
+    /// 价格转 micro (1e-6) 整数; 6 位小数内无损
+    pub fn input_micro(&self) -> u64 {
+        money_to_micro(self.input_per_m)
+    }
+    pub fn output_micro(&self) -> u64 {
+        money_to_micro(self.output_per_m)
+    }
+}
+
+pub fn money_to_micro(v: f64) -> u64 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0;
+    }
+    (v * 1_000_000.0).round() as u64
+}
+
+/// 销售人员 / 渠道
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SalesRecord {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// 分成比例 (万分比, 1500 = 15%)
+    #[serde(default)]
+    pub commission_bps: u32,
 }
 
 fn default_host() -> String {
@@ -46,6 +140,9 @@ fn default_model() -> String {
 fn default_max_concurrency() -> usize {
     8
 }
+fn default_acquire_wait_ms() -> u64 {
+    5000
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
@@ -63,6 +160,12 @@ pub struct ApiKeyRecord {
     /// Unix 秒; None = 永不过期
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// 标签 (客户/渠道/项目等), 用于账单筛选
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 归属销售 id (对应 billing.sales[].id)
+    #[serde(default)]
+    pub sales_id: Option<String>,
 }
 
 impl ApiKeyRecord {
@@ -75,6 +178,8 @@ impl ApiKeyRecord {
             token_limit: None,
             request_limit: None,
             expires_at: None,
+            tags: Vec::new(),
+            sales_id: None,
         }
     }
 
@@ -132,6 +237,8 @@ impl AppConfig {
                 default_model: default_model(),
                 max_concurrency_per_account: default_max_concurrency(),
                 admin_token: String::new(),
+                acquire_wait_ms: default_acquire_wait_ms(),
+                billing: BillingConfig::default(),
             });
         }
         let text = std::fs::read_to_string(&path)?;
@@ -157,9 +264,74 @@ impl AppConfig {
             "log_file": self.log_file,
             "default_model": self.default_model,
             "max_concurrency_per_account": self.max_concurrency_per_account,
+            "acquire_wait_ms": self.acquire_wait_ms,
+            "billing_currency": self.billing.currency,
+            "billing_tz_offset_minutes": self.billing.tz_offset_minutes,
+            "billing_price_rules": self.billing.prices.len(),
             "api_key_count": self.api_keys.len(),
             "admin_auth": !self.admin_token.is_empty() || !self.api_keys.is_empty(),
         })
+    }
+}
+
+/// 配置容器: 读路径无锁 (ArcSwap, 每请求只是一次 Arc clone),
+/// 写路径 copy-on-write 并用互斥锁串行化 (admin 低频操作).
+pub struct ConfigCell {
+    current: arc_swap::ArcSwap<AppConfig>,
+    write_lock: parking_lot::Mutex<()>,
+}
+
+/// 可写 guard: 持有配置副本, drop 时原子发布. 用法与 Mutex guard 一致.
+pub struct ConfigGuard<'a> {
+    cell: &'a ConfigCell,
+    data: Option<AppConfig>,
+    _lock: parking_lot::MutexGuard<'a, ()>,
+}
+
+impl ConfigCell {
+    pub fn new(cfg: AppConfig) -> Self {
+        Self {
+            current: arc_swap::ArcSwap::from_pointee(cfg),
+            write_lock: parking_lot::Mutex::new(()),
+        }
+    }
+
+    /// 热路径: 无锁读, 返回 Arc 快照.
+    #[inline]
+    pub fn load(&self) -> std::sync::Arc<AppConfig> {
+        self.current.load_full()
+    }
+
+    /// 管理路径: 取可写 guard, 修改后 drop 即发布.
+    pub fn lock(&self) -> ConfigGuard<'_> {
+        let lock = self.write_lock.lock();
+        let data = (**self.current.load()).clone();
+        ConfigGuard {
+            cell: self,
+            data: Some(data),
+            _lock: lock,
+        }
+    }
+}
+
+impl std::ops::Deref for ConfigGuard<'_> {
+    type Target = AppConfig;
+    fn deref(&self) -> &AppConfig {
+        self.data.as_ref().expect("config guard data")
+    }
+}
+
+impl std::ops::DerefMut for ConfigGuard<'_> {
+    fn deref_mut(&mut self) -> &mut AppConfig {
+        self.data.as_mut().expect("config guard data")
+    }
+}
+
+impl Drop for ConfigGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(data) = self.data.take() {
+            self.cell.current.store(std::sync::Arc::new(data));
+        }
     }
 }
 

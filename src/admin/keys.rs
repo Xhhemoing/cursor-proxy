@@ -16,7 +16,7 @@ use crate::AppState;
 
 /// GET /admin/api/keys — API key 列表 (脱敏 + 限额/用量)
 pub async fn api_keys_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let config = state.config.load();
+    let config = state.config.lock();
     Json(redacted_keys(&config, &state.key_usage))
 }
 
@@ -33,6 +33,26 @@ pub struct AddKeyBody {
     pub request_limit: Option<u64>,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub sales_id: Option<String>,
+}
+
+/// 标签规范化: 去空白/去空/去重, 最多 20 个, 每个 ≤ 32 字符
+pub fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t: String = t.trim().chars().take(32).collect();
+        if t.is_empty() || out.contains(&t) {
+            continue;
+        }
+        out.push(t);
+        if out.len() >= 20 {
+            break;
+        }
+    }
+    out
 }
 
 /// 校验自定义 key 强度: >=16 字符, 非纯数字, 建议 sk- 前缀 (警告不拒绝)
@@ -63,9 +83,11 @@ pub async fn api_keys_add(
         token_limit: body.token_limit,
         request_limit: body.request_limit,
         expires_at: body.expires_at,
+        tags: normalize_tags(body.tags),
+        sales_id: body.sales_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
     };
     let snapshot = {
-        let mut config = (**state.config.load()).clone();
+        let mut config = state.config.lock();
         if config.api_keys.iter().any(|k| k.key == key) {
             return (
                 StatusCode::CONFLICT,
@@ -74,17 +96,17 @@ pub async fn api_keys_add(
                 .into_response();
         }
         config.api_keys.push(rec);
-        config
+        config.clone()
     };
     if let Err(e) = config::save_config(&snapshot) {
+        let mut config = state.config.lock();
+        config.api_keys.pop();
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
             .into_response();
     }
-    // 热更新内存配置
-    state.config.store(std::sync::Arc::new(snapshot.clone()));
     let prefix: String = key.chars().take(8).collect();
     state.audit.key_op(
         "create",
@@ -102,6 +124,9 @@ pub struct PatchKeyBody {
     pub token_limit: Option<Option<u64>>,
     pub request_limit: Option<Option<u64>>,
     pub expires_at: Option<Option<i64>>,
+    pub tags: Option<Vec<String>>,
+    /// Some(None) = 清除归属
+    pub sales_id: Option<Option<String>>,
 }
 
 /// POST /admin/api/keys/:index — 改名/描述/限额/启用/过期
@@ -111,7 +136,7 @@ pub async fn api_keys_patch(
     Json(body): Json<PatchKeyBody>,
 ) -> Response {
     let (snapshot, prefix) = {
-        let mut config = (**state.config.load()).clone();
+        let mut config = state.config.lock();
         let Some(rec) = config.api_keys.get_mut(index) else {
             return (
                 StatusCode::NOT_FOUND,
@@ -138,8 +163,14 @@ pub async fn api_keys_patch(
             // 前端约定: 0 = 清除过期时间
             rec.expires_at = exp.filter(|&v| v > 0);
         }
+        if let Some(tags) = body.tags {
+            rec.tags = normalize_tags(tags);
+        }
+        if let Some(sid) = body.sales_id {
+            rec.sales_id = sid.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        }
         let prefix: String = rec.key.chars().take(8).collect();
-        (config, prefix)
+        (config.clone(), prefix)
     };
     if let Err(e) = config::save_config(&snapshot) {
         return (
@@ -148,7 +179,6 @@ pub async fn api_keys_patch(
         )
             .into_response();
     }
-    state.config.store(std::sync::Arc::new(snapshot.clone()));
     state.audit.key_op("patch", &prefix, json!({"index": index}));
     Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
 }
@@ -159,7 +189,7 @@ pub async fn api_keys_delete(
     Path(index): Path<usize>,
 ) -> Response {
     let removed = {
-        let config = state.config.load();
+        let config = state.config.lock();
         if index >= config.api_keys.len() {
             return (
                 StatusCode::NOT_FOUND,
@@ -170,7 +200,8 @@ pub async fn api_keys_delete(
         config.api_keys[index].key.clone()
     };
     let snapshot = {
-        let mut next = (**state.config.load()).clone();
+        let config = state.config.lock();
+        let mut next = config.clone();
         next.api_keys.remove(index);
         next
     };
@@ -181,7 +212,7 @@ pub async fn api_keys_delete(
         )
             .into_response();
     }
-    state.config.store(std::sync::Arc::new(snapshot.clone()));
+    *state.config.lock() = snapshot.clone();
     state.key_usage.remove(&removed);
     let prefix: String = removed.chars().take(8).collect();
     state.audit.key_op("delete", &prefix, json!({"index": index}));
@@ -227,6 +258,8 @@ mod tests {
             default_model: "grok-4.6".into(),
             max_concurrency_per_account: 8,
             admin_token: String::new(),
+            acquire_wait_ms: 0,
+            billing: crate::config::BillingConfig::default(),
         };
         let usage = quota::KeyUsageStore::new();
         usage.add("sk-secret-1234567", 42);

@@ -146,14 +146,14 @@ where
     E: std::fmt::Display + Send + 'static,
 {
     let chunk_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
-    let mut text_parts = Vec::new();
+    let mut text = String::with_capacity(4096);
     let mut usage = (0u64, 0u64);
 
     while let Some(item) = frames.next().await {
         let obj = item.map_err(|e| e.to_string())?;
         if let Some(tp) = obj.get("textPart").and_then(|v| v.as_object()) {
-            if let Some(text) = tp.get("text").and_then(|v| v.as_str()) {
-                text_parts.push(text.to_string());
+            if let Some(t) = tp.get("text").and_then(|v| v.as_str()) {
+                text.push_str(t);
             }
         }
         if let Some(u) = extract_usage(&obj) {
@@ -169,5 +169,5 @@ where
         "completion_tokens": usage.1,
         "total_tokens": usage.0 + usage.1,
     });
-    Ok((openai_full_response(&chunk_id, model, &text_parts.join(""), Some(usage_json)), usage))
+    Ok((openai_full_response(&chunk_id, model, &text, Some(usage_json)), usage))
 }

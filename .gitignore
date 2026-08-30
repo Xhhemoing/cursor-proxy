@@ -10,3 +10,6 @@
 *.log
 .env
 .env.*
+/billing.db
+/billing.db-wal
+/billing.db-shm

@@ -12,15 +12,6 @@ use tokio::sync::Semaphore;
 use crate::config::Account;
 use crate::quota::QuotaSnapshot;
 
-/// 全局会话索引: session_id -> (account_id, last_seen)
-/// last_seen 用于 TTL GC，防止内存无限增长
-type SessionIndex = Arc<DashMap<String, (String, Instant)>>;
-
-/// 会话索引 TTL: 2 小时不活跃即回收
-const SESSION_TTL: Duration = Duration::from_secs(2 * 3600);
-/// 每 1024 次插入触发一次 GC（摊销成本）
-const SESSION_GC_EVERY: u64 = 1024;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcquireError {
     Empty,
@@ -38,6 +29,9 @@ pub struct Slot {
     sem: Arc<Semaphore>,
     cooldown_until: parking_lot::Mutex<Option<Instant>>,
 }
+
+/// 会话粘性 TTL
+const STICKY_TTL: Duration = Duration::from_secs(3600);
 
 impl Slot {
     fn is_cooling_down(&self) -> bool {
@@ -78,11 +72,11 @@ pub struct AccountPool {
     stats: Arc<DashMap<String, AccountStats>>,
     /// 额度快照
     quotas: Arc<DashMap<String, QuotaSnapshot>>,
-    /// 全局会话索引: session_id -> (account_id, last_seen)（避免遍历 slot 查找）
-    session_index: SessionIndex,
-    /// 会话索引插入计数（用于摊销 GC）
-    session_insert_count: Arc<AtomicU64>,
+    /// 会话粘性反向索引: session_id -> (account_id, 过期时间). O(1) 查找, 后台定时 GC
+    sessions: Arc<DashMap<String, (String, Instant)>>,
     max_concurrency: usize,
+    /// 全部繁忙时最长排队等待; 0 = 不排队
+    acquire_wait: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -164,14 +158,37 @@ impl AccountPool {
             disabled: Arc::new(disabled),
             stats: Arc::new(stats),
             quotas: Arc::new(quotas),
-            session_index: Arc::new(DashMap::new()),
-            session_insert_count: Arc::new(AtomicU64::new(0)),
+            sessions: Arc::new(DashMap::new()),
             max_concurrency,
+            acquire_wait: Duration::ZERO,
         }
+    }
+
+    /// 设置繁忙时的排队等待上限
+    pub fn with_acquire_wait(mut self, wait: Duration) -> Self {
+        self.acquire_wait = wait;
+        self
     }
 
     pub fn max_concurrency(&self) -> usize {
         self.max_concurrency
+    }
+
+    /// 清理过期会话绑定 (后台定时调用)
+    pub fn gc_sessions(&self) -> usize {
+        let now = Instant::now();
+        let before = self.sessions.len();
+        self.sessions.retain(|_, (_, exp)| *exp > now);
+        before - self.sessions.len()
+    }
+
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    fn bind_session(&self, session_id: &str, account_id: &str) {
+        self.sessions
+            .insert(session_id.to_string(), (account_id.to_string(), Instant::now() + STICKY_TTL));
     }
 
     /// 重建有序 id 列表（账号变更时调用）
@@ -237,9 +254,8 @@ impl AccountPool {
             self.disabled.remove(&id);
             self.stats.remove(&id);
             self.quotas.remove(&id);
+            self.sessions.retain(|_, (aid, _)| aid != &id);
         }
-        // 清理指向已删除账号的会话索引
-        self.session_index.retain(|_, (aid, _)| seen.contains(aid));
         self.rebuild_ordered_ids();
     }
 
@@ -252,16 +268,22 @@ impl AccountPool {
         &self,
         session_id: Option<&str>,
     ) -> Result<(Account, tokio::sync::OwnedSemaphorePermit), AcquireError> {
-        match self.try_acquire_by_session(session_id) {
-            AcquireTry::Got(pair) => Ok(pair),
-            AcquireTry::Empty => Err(AcquireError::Empty),
-            AcquireTry::Busy => {
-                // 短暂退避后重试一次
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                match self.try_acquire_by_session(session_id) {
-                    AcquireTry::Got(pair) => Ok(pair),
-                    AcquireTry::Empty => Err(AcquireError::Empty),
-                    AcquireTry::Busy => Err(AcquireError::Busy),
+        // 全部繁忙时在 acquire_wait 内指数退避排队, 而不是立刻 503;
+        // 非流式请求持有槽位时间长, 没有排队会在到达并发上限时成功率断崖
+        let deadline = Instant::now() + self.acquire_wait;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            match self.try_acquire_by_session(session_id) {
+                AcquireTry::Got(pair) => return Ok(pair),
+                AcquireTry::Empty => return Err(AcquireError::Empty),
+                AcquireTry::Busy => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(AcquireError::Busy);
+                    }
+                    let sleep = backoff.min(deadline - now);
+                    tokio::time::sleep(sleep).await;
+                    backoff = (backoff * 2).min(Duration::from_millis(100));
                 }
             }
         }
@@ -272,20 +294,16 @@ impl AccountPool {
     }
 
     fn try_acquire_by_session(&self, session_id: Option<&str>) -> AcquireTry {
-        // 1. 会话粘性: 通过全局索引 O(1) 查找，命中即刷新 last_seen
+        // 1. 会话粘性: 检查是否有已绑定的账号
         if let Some(sid) = session_id {
-            if let Some(mut entry) = self.session_index.get_mut(sid) {
-                let (account_id, last_seen) = entry.value_mut();
-                *last_seen = Instant::now();
-                if let Some(slot) = self.slots.get(account_id) {
-                    if self.is_slot_available(&slot) {
-                        if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                            self.stats
-                                .entry(slot.account.id.clone())
-                                .or_default()
-                                .record_request();
-                            return AcquireTry::Got((slot.account.clone(), permit));
-                        }
+            if let Some(slot) = self.find_sticky_slot(sid) {
+                if self.is_slot_available(&slot) {
+                    if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
+                        self.stats
+                            .entry(slot.account.id.clone())
+                            .or_default()
+                            .record_request();
+                        return AcquireTry::Got((slot.account.clone(), permit));
                     }
                 }
             }
@@ -325,8 +343,7 @@ impl AccountPool {
                     sid.hash(&mut hasher);
                     if (hasher.finish() as usize) % len == idx {
                         if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                            // 绑定会话到账号（带 TTL 时间戳）
-                            self.bind_session(sid, id);
+                            self.bind_session(sid, &slot.account.id);
                             self.stats
                                 .entry(slot.account.id.clone())
                                 .or_default()
@@ -339,7 +356,7 @@ impl AccountPool {
                 // 普通轮询
                 if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
                     if let Some(sid) = session_id {
-                        self.bind_session(sid, id);
+                        self.bind_session(sid, &slot.account.id);
                     }
                     self.stats
                         .entry(slot.account.id.clone())
@@ -354,26 +371,23 @@ impl AccountPool {
         AcquireTry::Busy
     }
 
-    /// 绑定会话到账号，带摊销 GC（每 1024 次插入清理过期条目）
-    fn bind_session(&self, sid: &str, account_id: &str) {
-        self.session_index
-            .insert(sid.to_string(), (account_id.to_string(), Instant::now()));
-        let n = self.session_insert_count.fetch_add(1, Ordering::Relaxed);
-        if n % SESSION_GC_EVERY == 0 {
-            self.gc_session_index();
+    fn find_sticky_slot(&self, session_id: &str) -> Option<Arc<Slot>> {
+        let (account_id, expiry) = {
+            let entry = self.sessions.get(session_id)?;
+            entry.value().clone()
+        };
+        if expiry <= Instant::now() {
+            self.sessions.remove(session_id);
+            return None;
         }
-    }
-
-    /// 回收 TTL 过期的会话索引条目
-    fn gc_session_index(&self) {
-        let now = Instant::now();
-        self.session_index
-            .retain(|_, (_, last_seen)| now.duration_since(*last_seen) < SESSION_TTL);
-    }
-
-    /// 会话索引当前大小（监控用）
-    pub fn session_index_len(&self) -> usize {
-        self.session_index.len()
+        match self.slots.get(&account_id) {
+            Some(slot) => Some(slot.clone()),
+            None => {
+                // 账号已被删除
+                self.sessions.remove(session_id);
+                None
+            }
+        }
     }
 
     fn is_slot_available(&self, slot: &Arc<Slot>) -> bool {
@@ -549,6 +563,7 @@ impl AccountPool {
         let mut available = 0usize;
         let mut total_requests = 0u64;
         let mut total_errors = 0u64;
+        let mut total_inflight = 0usize;
 
         for entry in self.slots.iter() {
             let id = entry.key();
@@ -562,11 +577,16 @@ impl AccountPool {
                 available += 1;
             }
 
+            let inflight = self.max_concurrency.saturating_sub(slot.sem.available_permits());
+            total_inflight += inflight;
+            let (req, err) = self
+                .stats
+                .get(id)
+                .map(|s| (s.requests.load(Ordering::Relaxed), s.errors.load(Ordering::Relaxed)))
+                .unwrap_or((0, 0));
+            total_requests += req;
+            total_errors += err;
             let stats = self.stats.get(id).map(|s| {
-                let req = s.requests.load(Ordering::Relaxed);
-                let err = s.errors.load(Ordering::Relaxed);
-                total_requests += req;
-                total_errors += err;
                 serde_json::json!({
                     "requests": req,
                     "errors": err,
@@ -583,8 +603,15 @@ impl AccountPool {
                 "enabled": enabled,
                 "cooldown": cooling,
                 "cooldown_remaining_secs": cooldown_remaining,
+                "cooldown_remaining_s": cooldown_remaining,
                 "quota_ok": quota_ok,
+                "quota": self.quotas.get(id.as_str()).map(|q| q.clone()),
                 "available": is_available,
+                // 扁平字段供面板直接读取
+                "requests": req,
+                "errors": err,
+                "inflight": inflight,
+                "max_concurrency": self.max_concurrency,
                 "stats": stats,
                 "health_score": self.health_score(id).map(|h| h.score),
             }));
@@ -593,6 +620,7 @@ impl AccountPool {
         serde_json::json!({
             "total_accounts": self.slots.len(),
             "available": available,
+            "inflight": total_inflight,
             "total_requests": total_requests,
             "total_errors": total_errors,
             "accounts": accounts,
@@ -731,6 +759,33 @@ mod tests {
         assert_eq!(score.score, 100);
         assert!(score.enabled);
         assert!(!score.cooldown_active);
+    }
+
+    #[tokio::test]
+    async fn busy_waits_then_succeeds() {
+        let pool = AccountPool::new(vec![acc("a", true)], 1)
+            .with_acquire_wait(Duration::from_millis(500));
+        let (_, p1) = pool.acquire().await.unwrap();
+        let pool2 = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(p1);
+        });
+        let t = Instant::now();
+        let (a, _p2) = pool2.acquire().await.unwrap();
+        assert_eq!(a.id, "a");
+        assert!(t.elapsed() < Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn session_gc_clears_expired() {
+        let pool = AccountPool::new(vec![acc("a", true)], 2);
+        let (_a, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
+        assert_eq!(pool.session_count(), 1);
+        assert_eq!(pool.gc_sessions(), 0);
+        pool.sessions.insert("dead".into(), ("a".into(), Instant::now() - Duration::from_secs(1)));
+        assert_eq!(pool.gc_sessions(), 1);
+        assert_eq!(pool.session_count(), 1);
     }
 
     #[test]

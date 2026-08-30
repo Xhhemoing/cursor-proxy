@@ -5,6 +5,7 @@
 pub mod accounts;
 pub mod keys;
 pub mod settings;
+pub mod billing;
 
 use axum::response::{Html, IntoResponse};
 
@@ -17,3 +18,4 @@ pub async fn admin_page() -> impl IntoResponse {
 pub use accounts::*;
 pub use keys::*;
 pub use settings::*;
+pub use billing::*;

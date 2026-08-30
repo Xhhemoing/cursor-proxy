@@ -18,11 +18,12 @@ mod quota;
 mod metrics;
 mod upstream;
 mod audit;
+mod billing;
 mod ratelimit;
 pub mod error;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -40,13 +41,14 @@ use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::config::AppConfig;
+use crate::config::{ApiKeyRecord, AppConfig};
 use crate::cursor::CursorClient;
 use crate::pool::AccountPool;
 use crate::translate::{upstream_to_openai_stream, upstream_to_openai_full, openai_error};
 
 pub struct AppState {
-    config: arc_swap::ArcSwap<AppConfig>,
+    /// 热路径无锁读 (ArcSwap); admin 用 lock() 取可写 guard
+    config: config::ConfigCell,
     pool: AccountPool,
     cursor: CursorClient,
     log_buffer: std::sync::Arc<logbuf::LogBuffer>,
@@ -55,6 +57,8 @@ pub struct AppState {
     metrics: std::sync::Arc<metrics::Metrics>,
     audit: std::sync::Arc<audit::AuditLog>,
     rate_limiter: std::sync::Arc<ratelimit::RateLimiter>,
+    /// 计费账本 (SQLite 单写线程)
+    ledger: std::sync::Arc<billing::Ledger>,
 }
 
 #[tokio::main]
@@ -64,10 +68,12 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    // 初始化日志
+    // 初始化日志: 非阻塞 writer, 请求线程不再同步写 stdout (pipe 到 journald/docker 时会成为瓶颈)
+    let (nb_stdout, _log_guard) = tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::fmt()
         .json()
         .with_env_filter("info")
+        .with_writer(nb_stdout)
         .init();
 
     // 加载配置
@@ -86,7 +92,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 初始化号池
-    let pool = AccountPool::new(accounts, config.max_concurrency_per_account);
+    let pool = AccountPool::new(accounts, config.max_concurrency_per_account)
+        .with_acquire_wait(Duration::from_millis(config.acquire_wait_ms));
 
     // 初始化 Cursor 客户端
     let cursor = CursorClient::new(&config.backend, config.timeout_s)?;
@@ -109,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = Arc::new(AppState {
-        config: arc_swap::ArcSwap::from_pointee(config.clone()),
+        config: config::ConfigCell::new(config.clone()),
         pool,
         cursor,
         log_buffer: std::sync::Arc::new(logbuf::LogBuffer::with_persist(
@@ -128,7 +135,16 @@ async fn main() -> anyhow::Result<()> {
             }),
         ),
         rate_limiter: std::sync::Arc::new(ratelimit::RateLimiter::new()),
+        ledger: std::sync::Arc::new(billing::Ledger::open(&config.billing.db_file)?),
     });
+    info!(
+        event = "billing_init",
+        db = %config.billing.db_file,
+        price_rules = config.billing.prices.len(),
+        sales = config.billing.sales.len(),
+        tz_offset_minutes = config.billing.tz_offset_minutes,
+        "billing ledger ready"
+    );
 
     // 恢复历史用量
     state.key_usage.load_from_disk();
@@ -155,13 +171,18 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 定时探测冷却中账号 (每 60s)
+    // 定时探测冷却中账号 (每 60s); 顺带 GC 过期会话绑定与限频桶
     {
         let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tick.tick().await;
+                let removed = state.pool.gc_sessions();
+                state.rate_limiter.gc();
+                if removed > 0 {
+                    info!(event = "session_gc", removed, live = state.pool.session_count(), "expired sessions cleared");
+                }
                 let cooling = state.pool.cooling_accounts();
                 let quota_exhausted = state.pool.quota_exhausted_accounts();
                 
@@ -231,6 +252,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
         .route("/admin/api/logs", get(admin::api_logs_recent))
         .route("/admin/api/settings", get(admin::api_settings_get).post(admin::api_settings_patch))
+        .route("/admin/api/billing/records", get(admin::api_billing_records))
+        .route("/admin/api/billing/summary", get(admin::api_billing_summary))
+        .route("/admin/api/billing/export", get(admin::api_billing_export))
+        .route("/admin/api/billing/tags", get(admin::api_billing_tags))
+        .route("/admin/api/billing/stats", get(admin::api_billing_stats))
+        .route("/admin/api/billing/pricing", get(admin::api_pricing_get).post(admin::api_pricing_patch))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth_mw,
@@ -257,8 +284,10 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown_signal(state.clone()))
     .await?;
 
-    // 优雅关闭: 落盘用量
+    // 优雅关闭: 落盘用量 + 账本队列刷完
     state.key_usage.save_to_disk();
+    let flushed = state.ledger.flush(Duration::from_secs(10));
+    info!(event = "shutdown", billing_flushed = flushed, "billing ledger flushed");
     info!(event = "shutdown", "usage persisted, bye");
     Ok(())
 }
@@ -318,7 +347,9 @@ async fn watch_config(state: Arc<AppState>) -> notify::Result<()> {
                 }
                 match AppConfig::load() {
                     Ok(new_cfg) => {
-                        state.config.store(std::sync::Arc::new(new_cfg));
+                        let mut guard = state.config.lock();
+                        *guard = new_cfg;
+                        drop(guard);
                         info!(event = "config_reload", "config.json reloaded");
                     }
                     Err(e) => {
@@ -332,11 +363,11 @@ async fn watch_config(state: Arc<AppState>) -> notify::Result<()> {
     Ok(())
 }
 
-/// API key 鉴权; 成功时返回命中的 key 字符串 (可能为空, 表示未启用鉴权).
+/// API key 鉴权; 成功时返回命中的 key 记录 (None 表示未启用鉴权).
 /// 恒定时间比较防时序攻击; 过期 key 拒绝.
-fn check_auth(headers: &HeaderMap, config: &AppConfig) -> Result<String, Response> {
+fn check_auth<'a>(headers: &HeaderMap, config: &'a AppConfig) -> Result<Option<&'a ApiKeyRecord>, Response> {
     if config.api_keys.is_empty() {
-        return Ok(String::new());
+        return Ok(None);
     }
     let auth = headers
         .get("authorization")
@@ -365,7 +396,7 @@ fn check_auth(headers: &HeaderMap, config: &AppConfig) -> Result<String, Respons
                 )
                     .into_response());
             }
-            return Ok(rec.key.clone());
+            return Ok(Some(rec));
         }
     }
     Err((
@@ -477,10 +508,10 @@ async fn chat_handler(
 ) -> Result<Response, Response> {
     let client_ip = addr.ip().to_string();
     let config = state.config.load();
-    let used_key = check_auth(&headers, &config)?;
-    if !used_key.is_empty() {
-        if let Some(rec) = config.api_keys.iter().find(|k| k.key == used_key) {
-            let (tok, reqs) = state.key_usage.snapshot(&used_key);
+    let key_rec = check_auth(&headers, &config)?;
+    let used_key = match key_rec {
+        Some(rec) => {
+            let (tok, reqs) = state.key_usage.snapshot(&rec.key);
             if let Err(msg) = quota::check_key_limits(rec, tok, reqs) {
                 return Err((
                     StatusCode::PAYMENT_REQUIRED,
@@ -488,8 +519,11 @@ async fn chat_handler(
                 )
                     .into_response());
             }
+            rec.key.clone()
         }
-    }
+        None => String::new(),
+    };
+    let upstream_timeout = Duration::from_secs(config.timeout_s.max(1));
 
     let request_id = format!("req-{}", uuid::Uuid::new_v4().simple());
     let start = Instant::now();
@@ -514,6 +548,23 @@ async fn chat_handler(
     let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
 
+    // 计费上下文: 此刻快照单价与分成, 贯穿整个请求
+    let bctx = billing::BillingCtx::from_key(&config.billing, key_rec, &model);
+    if !bctx.quote.priced {
+        if config.billing.reject_unpriced {
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                Json(openai_error(
+                    &format!("model '{}' has no price configured", model),
+                    "model_unpriced",
+                    402,
+                )),
+            )
+                .into_response());
+        }
+        warn!(event = "billing_unpriced", req_id = %request_id, model = %model, "no price rule matched; billed 0");
+    }
+
     // 提取 session_id 用于会话一致性（OpenAI user 字段或自定义 header）
     let session_id = body
         .get("user")
@@ -521,7 +572,7 @@ async fn chat_handler(
         .or_else(|| headers.get("x-session-id").and_then(|v| v.to_str().ok()));
 
     // 选号（会话一致性）
-    let (mut account, _permit) = match state.pool.acquire_by_session(session_id).await {
+    let (mut account, permit) = match state.pool.acquire_by_session(session_id).await {
         Ok(v) => v,
         Err(pool::AcquireError::Empty) => {
             state.metrics.observe_err();
@@ -541,9 +592,6 @@ async fn chat_handler(
         }
     };
     let mut account_id = account.id.clone();
-
-    // 构造 Cursor 请求
-    let cursor_body = cursor::build_cursor_body(messages, &model, max_tokens, temperature);
 
     // 多上游路由：根据模型前缀选择上游
     let upstream_name = if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
@@ -575,17 +623,19 @@ async fn chat_handler(
     const MAX_RETRIES: usize = 3;
     let mut last_error = String::new();
     let mut frames_opt = None;
-    let mut current_permit = Some(_permit);
+    let mut current_permit = Some(permit);
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
-            // 释放旧 permit，获取新账号
-            drop(current_permit.take());
-            let (retry_account, new_permit) = match state.pool.acquire().await {
-                Ok((acc, permit)) => (acc, permit),
+            // 重新获取账号（失败账号已进入冷却, 轮询会自动跳过）;
+            // 新 permit 替换旧 permit: 旧账号槽位立即归还, 新账号并发受控
+            let retry_account = match state.pool.acquire().await {
+                Ok((acc, p)) => {
+                    current_permit = Some(p);
+                    acc
+                }
                 Err(_) => break, // 无可用账号，退出重试
             };
-            current_permit = Some(new_permit);
             // 更新账号信息用于重试
             account.access_token = retry_account.access_token;
             account.machine_id = retry_account.machine_id;
@@ -639,6 +689,10 @@ async fn chat_handler(
                     "upstream stream failed"
                 );
                 if attempt == MAX_RETRIES - 1 {
+                    state.ledger.record(billing::BillingRecord::build(
+                        &bctx, &request_id, &model, &account_id, 0, 0, stream, 502,
+                        start.elapsed().as_millis() as u64, &client_ip,
+                    ));
                     return Err((
                         StatusCode::BAD_GATEWAY,
                         Json(openai_error(&format!("upstream error after {} retries: {}", MAX_RETRIES, last_error), "upstream_error", 502)),
@@ -671,12 +725,31 @@ async fn chat_handler(
         let key_usage = state.key_usage.clone();
         let billed_key = used_key.clone();
         let metrics = state.metrics.clone();
+        let ledger = state.ledger.clone();
+        let bctx_s = bctx.clone();
 
         tokio::spawn(async move {
+            // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
+            let _permit = current_permit.take().expect("permit must exist");
             let mut input_tokens = 0u64;
             let mut output_tokens = 0u64;
             let mut stream = Box::pin(upstream_to_openai_stream(frames, &model_clone));
-            while let Some(item) = stream.next().await {
+            loop {
+                // 帧级空闲超时: 上游 hang 住不能让槽位永久泄漏
+                let item = match tokio::time::timeout(upstream_timeout, stream.next()).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(_) => {
+                        error!(event = "stream_error", req_id = %rid, "upstream idle timeout");
+                        pool.release(&aid, true, 10);
+                        metrics.observe_err();
+                        ledger.record(billing::BillingRecord::build(
+                            &bctx_s, &rid, &model_clone, &aid, input_tokens, output_tokens, true, 504,
+                            start.elapsed().as_millis() as u64, &client_ip,
+                        ));
+                        return;
+                    }
+                };
                 match item {
                     Ok((sse, usage)) => {
                         if let Some(u) = usage {
@@ -709,12 +782,17 @@ async fn chat_handler(
                 "stream": true,
                 "client_ip": client_ip,
             });
-            info!(event = "request", %log_entry, "request completed");
-            log_buf.push(log_entry);
+            let line = log_entry.to_string();
+            info!(event = "request", log = %line, "request completed");
+            log_buf.push_with_line(log_entry, line);
             if !billed_key.is_empty() {
                 key_usage.add(&billed_key, input_tokens + output_tokens);
             }
             metrics.observe_ok(input_tokens + output_tokens);
+            ledger.record(billing::BillingRecord::build(
+                &bctx_s, &rid, &model_clone, &aid, input_tokens, output_tokens, true, 200,
+                latency, &client_ip,
+            ));
             pool.record_success(&aid);
             // 成功时检查是否需要重新启用（连续错误已重置）
             pool.release(&aid, false, 0);
@@ -730,8 +808,32 @@ async fn chat_handler(
             .body(body)
             .unwrap())
     } else {
-        // 非流式
-        match upstream_to_openai_full(frames, &model).await {
+        // 非流式: 总超时, 上游 hang 住时释放槽位并返回 504
+        let _permit = current_permit.take().expect("permit must exist");
+        let full = match tokio::time::timeout(upstream_timeout, upstream_to_openai_full(frames, &model)).await {
+            Ok(r) => r,
+            Err(_) => {
+                state.pool.release(&account_id, true, 10);
+                state.metrics.observe_err();
+                error!(
+                    event = "upstream_timeout",
+                    req_id = %request_id,
+                    account = %account_id,
+                    timeout_s = upstream_timeout.as_secs(),
+                    "non-stream upstream timeout"
+                );
+                state.ledger.record(billing::BillingRecord::build(
+                    &bctx, &request_id, &model, &account_id, 0, 0, false, 504,
+                    start.elapsed().as_millis() as u64, &client_ip,
+                ));
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(openai_error("upstream timeout", "upstream_timeout", 504)),
+                )
+                    .into_response());
+            }
+        };
+        match full {
             Ok((result, usage)) => {
                 let latency = start.elapsed().as_millis() as u64;
                 let log_entry = serde_json::json!({
@@ -747,12 +849,17 @@ async fn chat_handler(
                     "stream": false,
                     "client_ip": client_ip,
                 });
-                info!(event = "request", %log_entry, "request completed");
-                state.log_buffer.push(log_entry);
+                let line = log_entry.to_string();
+                info!(event = "request", log = %line, "request completed");
+                state.log_buffer.push_with_line(log_entry, line);
                 if !used_key.is_empty() {
                     state.key_usage.add(&used_key, usage.0 + usage.1);
                 }
                 state.metrics.observe_ok(usage.0 + usage.1);
+                state.ledger.record(billing::BillingRecord::build(
+                    &bctx, &request_id, &model, &account_id, usage.0, usage.1, false, 200,
+                    latency, &client_ip,
+                ));
                 state.pool.record_success(&account_id);
                 state.pool.release(&account_id, false, 0);
                 Ok(Json(result).into_response())
@@ -767,6 +874,10 @@ async fn chat_handler(
                     error = %e,
                     "translate failed"
                 );
+                state.ledger.record(billing::BillingRecord::build(
+                    &bctx, &request_id, &model, &account_id, 0, 0, false, 500,
+                    start.elapsed().as_millis() as u64, &client_ip,
+                ));
                 Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(openai_error(&e.to_string(), "internal_error", 500)),

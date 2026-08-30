@@ -109,7 +109,7 @@ pub async fn api_settings_patch(
     }
 
     let (snapshot, restart_required, changed) = {
-        let mut config = (**state.config.load()).clone();
+        let mut config = state.config.lock();
         let mut changed: Vec<&str> = Vec::new();
         if let Some(model) = body.default_model {
             config.default_model = model.trim().to_string();
@@ -124,7 +124,7 @@ pub async fn api_settings_patch(
             config.max_concurrency_per_account = c;
             restart.push("max_concurrency_per_account");
         }
-        (config, restart, changed)
+        (config.clone(), restart, changed)
     };
 
     if let Err(e) = config::save_config(&snapshot) {
@@ -134,7 +134,6 @@ pub async fn api_settings_patch(
         )
             .into_response();
     }
-    state.config.store(std::sync::Arc::new(snapshot.clone()));
     state.audit.settings_op(&changed);
 
     Json(json!({
