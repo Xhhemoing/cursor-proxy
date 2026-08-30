@@ -14,6 +14,10 @@ use uuid::Uuid;
 pub const STREAM_PATH: &str = "/aiserver.v1.InferenceService/Stream";
 pub const CLIENT_TYPE: &str = "sand";
 pub const CLIENT_VERSION: &str = "0.18.0";
+/// 单条 Connect 帧最大 16MiB, 防止畸形长度字段把进程内存打爆.
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// 解码缓冲上限: 允许一帧 + 余量.
+const MAX_STREAM_BUF: usize = MAX_FRAME_BYTES + 64 * 1024;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CursorError {
@@ -239,6 +243,11 @@ impl Stream for FrameStream {
             if self.buf.len() >= 5 {
                 let flags = self.buf[0];
                 let n = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
+                if n > MAX_FRAME_BYTES {
+                    return Poll::Ready(Some(Err(CursorError::Decode(format!(
+                        "connect frame {n} bytes exceeds {MAX_FRAME_BYTES}"
+                    )))));
+                }
                 if self.buf.len() >= 5 + n {
                     let payload = self.buf.split_to(5 + n).split_off(5);
                     let payload = if flags & 1 != 0 {
@@ -270,6 +279,13 @@ impl Stream for FrameStream {
             match Pin::new(&mut self.body).poll_frame(cx) {
                 Poll::Ready(Some(Ok(frame))) => {
                     if let Ok(data) = frame.into_data() {
+                        if self.buf.len().saturating_add(data.len()) > MAX_STREAM_BUF {
+                            return Poll::Ready(Some(Err(CursorError::Decode(format!(
+                                "stream buffer {}+{} exceeds {MAX_STREAM_BUF}",
+                                self.buf.len(),
+                                data.len()
+                            )))));
+                        }
                         self.buf.extend_from_slice(&data);
                     }
                     if self.buf.is_empty() {

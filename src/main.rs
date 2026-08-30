@@ -61,7 +61,7 @@ pub struct AppState {
     ledger: std::sync::Arc<billing::Ledger>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> anyhow::Result<()> {
     // 安装 rustls CryptoProvider
     rustls::crypto::ring::default_provider()
@@ -183,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
                 if removed > 0 {
                     info!(event = "session_gc", removed, live = state.pool.session_count(), "expired sessions cleared");
                 }
+                state.ledger.request_checkpoint();
                 let cooling = state.pool.cooling_accounts();
                 let quota_exhausted = state.pool.quota_exhausted_accounts();
                 

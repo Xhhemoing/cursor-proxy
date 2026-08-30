@@ -76,8 +76,67 @@ impl LogBuffer {
     }
 }
 
+fn log_max_bytes() -> u64 {
+    std::env::var("CFP_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512 * 1024 * 1024)
+}
+
+fn log_keep() -> usize {
+    std::env::var("CFP_LOG_KEEP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+        .clamp(1, 20)
+}
+
+fn rotated_path(path: &std::path::Path, gen: usize) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(format!(".{gen}"));
+    std::path::PathBuf::from(s)
+}
+
+/// 按大小轮转: path -> path.1 -> path.2 ... 超出 keep 的丢掉.
+fn rotate_log_file(path: &std::path::Path, keep: usize) {
+    let oldest = rotated_path(path, keep);
+    let _ = std::fs::remove_file(&oldest);
+    for gen in (1..keep).rev() {
+        let from = rotated_path(path, gen);
+        let to = rotated_path(path, gen + 1);
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+    if path.exists() {
+        let _ = std::fs::rename(path, rotated_path(path, 1));
+    }
+}
+
+fn maybe_rotate(
+    path: &std::path::Path,
+    max_bytes: u64,
+    keep: usize,
+    writer: &mut Option<std::io::BufWriter<std::fs::File>>,
+) {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if size < max_bytes {
+        return;
+    }
+    if let Some(w) = writer.take() {
+        let _ = w.into_inner().map(|mut f| {
+            let _ = f.flush();
+            f
+        });
+    }
+    rotate_log_file(path, keep);
+}
+
 /// 后台写盘循环: 句柄常驻 + BufWriter, 攒批或 200ms 空闲即 flush.
+/// 文件超过 CFP_LOG_MAX_BYTES (默认 512MiB) 时轮转, 保留 CFP_LOG_KEEP 代 (默认 3).
 fn persist_loop(path: std::path::PathBuf, rx: mpsc::Receiver<String>) {
+    let max_bytes = log_max_bytes();
+    let keep = log_keep();
     let open = || {
         std::fs::OpenOptions::new()
             .create(true)
@@ -87,6 +146,7 @@ fn persist_loop(path: std::path::PathBuf, rx: mpsc::Receiver<String>) {
     };
     let mut writer = open().ok();
     let mut pending = 0usize;
+    let mut since_size_check = 0usize;
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => {
@@ -99,9 +159,14 @@ fn persist_loop(path: std::path::PathBuf, rx: mpsc::Receiver<String>) {
                         continue;
                     }
                     pending += 1;
+                    since_size_check += 1;
                     if pending >= 256 {
                         let _ = w.flush();
                         pending = 0;
+                    }
+                    if since_size_check >= 2048 {
+                        since_size_check = 0;
+                        maybe_rotate(&path, max_bytes, keep, &mut writer);
                     }
                 }
             }
@@ -111,6 +176,7 @@ fn persist_loop(path: std::path::PathBuf, rx: mpsc::Receiver<String>) {
                         let _ = w.flush();
                     }
                     pending = 0;
+                    maybe_rotate(&path, max_bytes, keep, &mut writer);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -216,6 +282,27 @@ mod tests {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_file_keeps_generations() {
+        let dir = std::env::temp_dir().join(format!("cfp-rot-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.log");
+        std::fs::write(&path, b"gen0\n").unwrap();
+        rotate_log_file(&path, 2);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(dir.join("p.log.1")).unwrap(), "gen0\n");
+        std::fs::write(&path, b"gen1\n").unwrap();
+        rotate_log_file(&path, 2);
+        assert_eq!(std::fs::read_to_string(dir.join("p.log.1")).unwrap(), "gen1\n");
+        assert_eq!(std::fs::read_to_string(dir.join("p.log.2")).unwrap(), "gen0\n");
+        std::fs::write(&path, b"gen2\n").unwrap();
+        rotate_log_file(&path, 2);
+        assert_eq!(std::fs::read_to_string(dir.join("p.log.1")).unwrap(), "gen2\n");
+        assert_eq!(std::fs::read_to_string(dir.join("p.log.2")).unwrap(), "gen1\n");
+        assert!(!dir.join("p.log.3").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

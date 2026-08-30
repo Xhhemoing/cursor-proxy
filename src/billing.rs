@@ -244,6 +244,7 @@ fn now_ms() -> i64 {
 enum Msg {
     Record(Box<BillingRecord>),
     Flush(mpsc::SyncSender<()>),
+    Checkpoint,
 }
 
 pub struct Ledger {
@@ -262,6 +263,8 @@ pub struct Ledger {
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
+PRAGMA wal_autocheckpoint = 1000;
+PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS billing_records (
     id INTEGER PRIMARY KEY,
     ts_ms INTEGER NOT NULL,
@@ -344,6 +347,13 @@ impl Ledger {
         ack_rx.recv_timeout(timeout).is_ok()
     }
 
+    /// 请求 WAL 截断检查点; 写线程处理, 不阻塞请求路径.
+    pub fn request_checkpoint(&self) {
+        if self.tx.send(Msg::Checkpoint).is_err() {
+            tracing::warn!(event = "billing_checkpoint", "writer gone, skip wal checkpoint");
+        }
+    }
+
     pub fn stats(&self) -> Value {
         let size = std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
         json!({
@@ -389,11 +399,12 @@ fn writer_loop(
             Err(_) => break,
         };
         let mut disconnected = false;
-        let mut push = |m: Msg, batch: &mut Vec<BillingRecord>, acks: &mut Vec<mpsc::SyncSender<()>>| match m {
+        let mut checkpoint = false;
+        match first {
             Msg::Record(r) => batch.push(*r),
-            Msg::Flush(a) => acks.push(a),
-        };
-        push(first, &mut batch, &mut flush_acks);
+            Msg::Flush(a) => flush_acks.push(a),
+            Msg::Checkpoint => checkpoint = true,
+        }
         // 再尽量多收一点, 最多等 20ms, 攒一批一个事务
         let deadline = std::time::Instant::now() + Duration::from_millis(20);
         while batch.len() < BATCH {
@@ -402,7 +413,9 @@ fn writer_loop(
                 break;
             }
             match rx.recv_timeout(left) {
-                Ok(m) => push(m, &mut batch, &mut flush_acks),
+                Ok(Msg::Record(r)) => batch.push(*r),
+                Ok(Msg::Flush(a)) => flush_acks.push(a),
+                Ok(Msg::Checkpoint) => checkpoint = true,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     disconnected = true;
@@ -424,6 +437,13 @@ fn writer_loop(
             }
             pending.fetch_sub(n, Ordering::Relaxed);
             batch.clear();
+        }
+        if checkpoint {
+            if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                tracing::warn!(event = "billing_wal_checkpoint", error = %e, "wal checkpoint failed");
+            } else {
+                tracing::info!(event = "billing_wal_checkpoint", "wal truncated");
+            }
         }
         for a in flush_acks.drain(..) {
             let _ = a.send(());
@@ -1080,6 +1100,11 @@ mod tests {
         assert_eq!(sum[0]["requests"], 16000);
         assert_eq!(sum[0]["cost_nano"], 16_000_000_i64); // 16000 tokens @ $1/M = $0.016
         assert_eq!(ledger.stats()["written"], 16000);
+        ledger.request_checkpoint();
+        assert!(ledger.flush(Duration::from_secs(5)));
+        let wal = db.with_file_name("billing.db-wal");
+        let wal_len = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+        assert!(wal_len < 8 * 1024 * 1024, "wal not truncated: {wal_len}");
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

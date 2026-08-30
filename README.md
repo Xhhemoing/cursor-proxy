@@ -14,6 +14,24 @@ cargo build --release
 
 默认监听 `0.0.0.0:8800`。管理面板：`/admin`（需要 `admin_token`）。
 
+## 128G 机器稳定运行
+
+网关本身常驻只有十几 MB，真正会拖垮 128G 主机的是无上限日志、SQLite WAL、畸形上游帧、以及 systemd 无内存/重启上限。默认已做：
+
+1. Tokio 固定 16 worker（不跟 32 核一对一膨胀）
+2. `proxy.log` 超过 512MiB 轮转，保留 3 代（`CFP_LOG_MAX_BYTES` / `CFP_LOG_KEEP`）
+3. 计费库每 60s `wal_checkpoint(TRUNCATE)`，打开时 `wal_autocheckpoint=1000`
+4. Connect 帧 / 解码缓冲上限 16MiB，畸形长度不再把进程打爆
+5. 部署单元 `deploy/cursor-proxy.service`：`MemoryMax=8G`、`Restart=always`、`StartLimitBurst=5`、`LimitNOFILE=65535`
+
+拷到 128G 机：
+
+```bash
+install -m 644 deploy/cursor-proxy.service ~/.config/systemd/user/cursor-proxy.service
+systemctl --user daemon-reload
+systemctl --user restart cursor-proxy
+```
+
 ## 不要提交的文件
 
 `config.json`、`accounts.json`、`usage.json`、`*.log` 含密钥或运行数据，已在 `.gitignore` 中。
