@@ -14,8 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ProxyKind {
     #[default]
     Http,
@@ -717,6 +716,7 @@ pub struct ParsedProxy {
     pub user: Option<String>,
     pub pass: Option<String>,
     pub https: bool,
+    pub kind: ProxyKind,
     /// socks5:// 或 socks5h://
     pub socks5: bool,
 }
@@ -725,14 +725,14 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
     let url = url.trim();
     let (scheme, rest) = url
         .split_once("://")
-        .ok_or_else(|| "proxy url must be http://host:port".to_string())?;
+        .ok_or_else(|| "proxy url must be scheme://host:port".to_string())?;
     let scheme = scheme.to_ascii_lowercase();
-    let socks5 = matches!(scheme.as_str(), "socks5" | "socks5h" | "socks");
-    if !socks5 && scheme != "http" && scheme != "https" {
-        return Err(format!(
-            "unsupported proxy scheme '{scheme}' (http / https / socks5)"
-        ));
-    }
+    let kind = match scheme.as_str() {
+        "http" => ProxyKind::Http,
+        "https" => ProxyKind::Https,
+        "socks5" | "socks5h" | "socks" => ProxyKind::Socks5,
+        _ => return Err(format!("unsupported proxy scheme '{scheme}' (http/https/socks5)")),
+    };
     let (creds, hostport) = if let Some((c, h)) = rest.split_once('@') {
         (Some(c), h)
     } else {
@@ -745,7 +745,7 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
             .map_err(|_| format!("invalid proxy port '{p}'"))?;
         (h.trim_start_matches('[').trim_end_matches(']').to_string(), port)
     } else {
-        let default_port = if socks5 { 1080 } else if scheme == "https" { 443 } else { 80 };
+        let default_port = if kind == ProxyKind::Socks5 { 1080 } else if scheme == "https" { 443 } else { 80 };
         (hostport.to_string(), default_port)
     };
     if host.is_empty() {
@@ -764,7 +764,8 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
         user,
         pass,
         https: scheme == "https",
-        socks5,
+        kind,
+        socks5: kind == ProxyKind::Socks5,
     })
 }
 

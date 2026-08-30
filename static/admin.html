@@ -423,7 +423,10 @@
         <div class="page-head">
           <div><h2>IP 代理池</h2><p>出口节点 · 手动/自动分配 · 连通性与出口 IP</p></div>
           <div class="actions">
+            <button type="button" class="ghost" id="btn-proxy-import">导入</button>
+            <button type="button" class="ghost" id="btn-proxy-export">导出</button>
             <button type="button" class="ghost" id="btn-proxy-probe">探测全部</button>
+            <input type="file" id="file-proxy-import" accept=".json,.txt" style="display:none">
             <button type="button" class="ghost" id="btn-proxy-rebalance">按规则重绑</button>
             <button type="button" id="btn-proxy-save">保存配置</button>
           </div>
@@ -439,6 +442,15 @@
           <div class="ph"><h3>智能判断</h3><p>重复出口 IP · 死节点仍绑定 · 过载 · 未探测</p></div>
           <div class="pb" id="px-findings"><div class="empty">暂无</div></div>
         </div>
+        <dialog id="proxy-paste-dialog">
+          <h3>粘贴批量导入代理</h3>
+          <p>每行一个代理 URL，支持 http:// https:// socks5://</p>
+          <textarea id="proxy-paste-text" rows="8" placeholder="socks5://user:pass@host:port"></textarea>
+          <div class="toolbar" style="margin-top:14px;justify-content:flex-end">
+            <button type="button" id="proxy-paste-cancel" class="ghost">取消</button>
+            <button type="button" id="proxy-paste-submit">导入</button>
+          </div>
+        </dialog>
         <form id="px-form" class="filter">
           <div class="fields">
             <label class="inline"><input type="checkbox" id="px-enabled"> 启用代理池</label>
@@ -1906,6 +1918,53 @@
         await loadAll();
       } catch (e) { toast('px-msg', e.message, true); }
     });
+    // 代理导入
+    document.getElementById('btn-proxy-import').addEventListener('click', () => {
+      document.getElementById('file-proxy-import').click();
+    });
+    document.getElementById('file-proxy-import').addEventListener('change', async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const text = await f.text();
+      try {
+        const r = await api('/admin/api/proxies/import', { method: 'POST', body: text });
+        toast('px-msg', '导入完成: ' + r.imported + ' 成功, ' + r.skipped + ' 跳过');
+        await loadAll();
+      } catch (err) { toast('px-msg', '导入失败: ' + err.message, true); }
+      e.target.value = '';
+    });
+    document.getElementById('btn-proxy-import').addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      document.getElementById('proxy-paste-dialog').showModal();
+    });
+    document.getElementById('proxy-paste-cancel').addEventListener('click', () => {
+      document.getElementById('proxy-paste-dialog').close();
+    });
+    document.getElementById('proxy-paste-submit').addEventListener('click', async () => {
+      const text = document.getElementById('proxy-paste-text').value;
+      if (!text.trim()) return;
+      try {
+        const r = await api('/admin/api/proxies/import', { method: 'POST', body: text });
+        toast('px-msg', '粘贴导入完成: ' + r.imported + ' 成功, ' + r.skipped + ' 跳过');
+        document.getElementById('proxy-paste-dialog').close();
+        document.getElementById('proxy-paste-text').value = '';
+        await loadAll();
+      } catch (err) { toast('px-msg', '导入失败: ' + err.message, true); }
+    });
+    // 代理导出
+    document.getElementById('btn-proxy-export').addEventListener('click', async () => {
+      try {
+        const r = await api('/admin/api/proxies/export');
+        const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'proxies-export-' + new Date().toISOString().slice(0, 10) + '.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast('px-msg', '已导出 ' + r.count + ' 个节点');
+      } catch (err) { toast('px-msg', '导出失败: ' + err.message, true); }
+    });
+
     document.getElementById('btn-proxy-probe').addEventListener('click', async () => {
       try {
         const r = await api('/admin/api/proxies/probe', { method: 'POST', body: '{}' });

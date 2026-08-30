@@ -310,6 +310,17 @@ pub async fn api_proxies_rebalance(State(state): State<Arc<AppState>>) -> impl I
     Json(json!({"status": "ok", "reassigned": n, "proxy": state.proxies.overview()}))
 }
 
+/// GET /admin/api/proxies/export — 导出全部代理节点
+pub async fn api_proxies_export(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.config.load();
+    state.audit.settings_op(&["proxy_export"]);
+    Json(json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "count": cfg.proxy.nodes.len(),
+        "nodes": cfg.proxy.nodes,
+    }))
+}
+
 pub async fn probe_nodes(state: &Arc<AppState>, ids: Option<&[String]>) -> Vec<serde_json::Value> {
     use futures_util::stream::{self, StreamExt};
     let cfg = state.proxies.load();
@@ -350,7 +361,49 @@ pub async fn probe_nodes(state: &Arc<AppState>, ids: Option<&[String]>) -> Vec<s
 
 async fn probe_one(url: &str, timeout: std::time::Duration) -> Result<String, String> {
     let parsed = proxypool::parse_proxy_url(url)?;
-    let stream = proxypool::connect_via_proxy(&parsed, "api.ipify.org", 443, timeout).await?;
+    match parsed.kind {
+        proxypool::ProxyKind::Socks5 => probe_via_socks5(&parsed, timeout).await,
+        _ => {
+            let stream = proxypool::connect_via_http_proxy(&parsed, "api.ipify.org", 443, timeout).await?;
+            probe_tls_read_ip(stream, timeout).await
+        }
+    }
+}
+
+/// SOCKS5 探测: tokio-socks 建连 → TLS → ipify
+async fn probe_via_socks5(
+    proxy: &proxypool::ParsedProxy,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use tokio_socks::tcp::Socks5Stream;
+    let auth = match (&proxy.user, &proxy.pass) {
+        (Some(u), Some(p)) => Some((u.as_str(), p.as_str())),
+        _ => None,
+    };
+    let connect_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Socks5Stream<tokio::net::TcpStream>, tokio_socks::Error>> + Send>> = match auth {
+        Some((u, p)) => Box::pin(Socks5Stream::connect_with_password(
+            (proxy.host.as_str(), proxy.port),
+            ("api.ipify.org", 443u16),
+            u,
+            p,
+        )),
+        None => Box::pin(Socks5Stream::connect(
+            (proxy.host.as_str(), proxy.port),
+            ("api.ipify.org", 443u16),
+        )),
+    };
+    let stream = tokio::time::timeout(timeout, connect_fut)
+        .await
+        .map_err(|_| format!("socks5 {}:{} connect timeout", proxy.host, proxy.port))?
+        .map_err(|e| format!("socks5 {}:{} connect: {e}", proxy.host, proxy.port))?;
+    probe_tls_read_ip(stream.into_inner(), timeout).await
+}
+
+/// TLS + ipify 读取出口 IP (公共逻辑)
+async fn probe_tls_read_ip(
+    stream: tokio::net::TcpStream,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     let connector = tokio_rustls::TlsConnector::from(Arc::new(
         rustls::ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore {

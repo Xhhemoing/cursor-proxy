@@ -1,6 +1,6 @@
 //! Cursor Connect 协议异步客户端: 帧编解码 + TLS + 流式读取.
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures_util::stream::Stream;
 use hyper::body::{Body as HttpBody, Incoming};
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -187,7 +187,7 @@ pub fn build_cursor_body_with_tools(
     body
 }
 
-/// Cursor 异步客户端 (直连或经 HTTP CONNECT 出口)
+/// Cursor 异步客户端 (直连 / HTTP CONNECT / SOCKS5)
 #[derive(Clone)]
 pub struct CursorClient {
     client: HttpsClient,
@@ -367,8 +367,12 @@ impl CursorClient {
             return Err(CursorError::Http(status, text.chars().take(200).collect()));
         }
 
+        // hyper Incoming → Bytes stream 适配
+        use futures_util::StreamExt;
+        use http_body_util::BodyExt;
+        let byte_stream = BodyExt::into_data_stream(resp.into_body()).map(|r| r.map_err(|e| e.to_string()));
         Ok(Box::pin(FrameStream {
-            body: resp.into_body(),
+            body: Box::pin(byte_stream),
             buf: BytesMut::with_capacity(8192),
         }))
     }
@@ -402,13 +406,17 @@ fn build_direct_client() -> anyhow::Result<HttpsClient> {
         .build(https))
 }
 
-/// Connect 帧流解码器
-struct FrameStream {
-    body: Incoming,
+/// Connect 帧流解码器 (泛型 body stream)
+struct FrameStream<S> {
+    body: S,
     buf: BytesMut,
 }
 
-impl Stream for FrameStream {
+impl<S, E> Stream for FrameStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
     type Item = Result<Value, CursorError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -437,41 +445,44 @@ impl Stream for FrameStream {
                     } else {
                         match serde_json::from_slice(&payload) {
                             Ok(v) => Some(v),
-                            Err(e) => return Poll::Ready(Some(Err(CursorError::Decode(e.to_string())))),
+                            Err(e) => {
+                                return Poll::Ready(Some(Err(CursorError::Decode(format!(
+                                    "connect frame json: {e}"
+                                )))))
+                            }
                         }
                     };
+                    if let Some(v) = obj {
+                        return Poll::Ready(Some(Ok(v)));
+                    }
                     if flags & 2 != 0 {
                         return Poll::Ready(None);
-                    }
-                    if let Some(obj) = obj {
-                        return Poll::Ready(Some(Ok(obj)));
                     }
                     continue;
                 }
             }
-            // buf 不够, 从 body 读更多
-            match Pin::new(&mut self.body).poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => {
-                    if let Ok(data) = frame.into_data() {
-                        if self.buf.len().saturating_add(data.len()) > MAX_STREAM_BUF {
-                            return Poll::Ready(Some(Err(CursorError::Decode(format!(
-                                "stream buffer {}+{} exceeds {MAX_STREAM_BUF}",
-                                self.buf.len(),
-                                data.len()
-                            )))));
-                        }
-                        self.buf.extend_from_slice(&data);
+            // 从 body 读更多数据
+            match Pin::new(&mut self.body).poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    if self.buf.len().saturating_add(chunk.len()) > MAX_STREAM_BUF {
+                        return Poll::Ready(Some(Err(CursorError::Decode(format!(
+                            "stream buffer {}+{} exceeds {MAX_STREAM_BUF}",
+                            self.buf.len(),
+                            chunk.len()
+                        )))));
                     }
-                    if self.buf.is_empty() {
-                        return Poll::Ready(None);
-                    }
-                    continue;
+                    self.buf.extend_from_slice(&chunk);
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(CursorError::Network(e.to_string()))));
                 }
                 Poll::Ready(None) => {
-                    return Poll::Ready(None);
+                    if self.buf.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    return Poll::Ready(Some(Err(CursorError::Decode(
+                        "stream ended with partial frame".into(),
+                    ))));
                 }
                 Poll::Pending => return Poll::Pending,
             }

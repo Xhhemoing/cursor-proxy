@@ -331,6 +331,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/accounts/batch", post(admin::api_accounts_batch))
         .route("/admin/api/pool/health", get(admin::api_pool_health))
         .route("/admin/api/proxies", get(admin::api_proxies_get).post(admin::api_proxies_patch))
+        .route("/admin/api/proxies/import", post(admin::api_proxies_import))
+        .route("/admin/api/proxies/export", get(admin::api_proxies_export))
         .route("/admin/api/proxies/probe", post(admin::api_proxies_probe))
         .route("/admin/api/proxies/import", post(admin::api_proxies_import))
         .route("/admin/api/proxies/rebalance", post(admin::api_proxies_rebalance))

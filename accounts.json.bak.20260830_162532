@@ -1,0 +1,11 @@
+[
+  {
+    "id": "acc1",
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHx1c2VyXzAxTTBIQkpHRUhOQlowNzhaMEtFV1ZLN0VDIiwidGltZSI6IjE3ODcyODkwMTciLCJyYW5kb21uZXNzIjoiMWM0M2RhM2QtNjk4Ny00MWVjIiwiZXhwIjoxNzkyNDczMDE3LCJpc3MiOiJodHRwczovL2F1dGhlbnRpY2F0aW9uLmN1cnNvci5zaCIsInNjb3BlIjoib3BlbmlkIHByb2ZpbGUgZW1haWwgb2ZmbGluZV9hY2Nlc3MiLCJhdWQiOiJodHRwczovL2N1cnNvci5jb20iLCJ0eXBlIjoic2Vzc2lvbiJ9.V6J4PcvwSFehCjr521-EUcEj6KhkX6bHdufqxTRpkLQ",
+    "machine_id": "d07361b7-bb5f-4f4f-9bfd-175983001e66",
+    "refresh_token": "",
+    "enabled": true,
+    "token_expires_at": null,
+    "refresh_url": null
+  }
+]

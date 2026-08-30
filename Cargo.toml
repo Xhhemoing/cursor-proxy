@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
+tokio-socks = "0.5"
 # HTTP 服务器
 axum = { version = "0.7", features = ["http2", "json", "tokio", "tracing"] }
 # HTTP 客户端 (上游 Cursor/OpenAI)
@@ -13,7 +14,7 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 hyper-rustls = { version = "0.27", features = ["http2", "webpki-roots"] }
 http-body-util = "0.1"
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "socks"], default-features = false }
 # TLS
 tokio-rustls = { version = "0.26", features = ["ring"] }
 rustls = { version = "0.23", features = ["ring"] }
