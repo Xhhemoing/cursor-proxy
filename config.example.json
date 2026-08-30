@@ -10,19 +10,21 @@
     }
   ],
   "backend": "https://api2.cursor.sh",
-  "timeout_s": 600,
+  "timeout_s": 1800,
   "log_file": "proxy.log",
-  "default_model": "claude-sonnet-4-6",
+  "default_model": "kimi-k3",
   "max_concurrency_per_account": 8,
   "acquire_wait_ms": 5000,
   "admin_token": "CHANGE_ME_ADMIN_TOKEN",
   "billing": {
     "db_file": "billing.db",
     "tz_offset_minutes": 480,
-    "currency": "USD",
+    "currency": "RMB",
     "default_commission_bps": 0,
     "reject_unpriced": false,
     "prices": [
+      { "model": "kimi-k3", "input_per_m": 1.0, "output_per_m": 4.0, "cache_read_per_m": 0.1, "note": "1M 窗口 RMB/1M tokens" },
+      { "model": "kimi-k3-*", "input_per_m": 1.0, "output_per_m": 4.0, "cache_read_per_m": 0.1 },
       { "model": "claude-sonnet-4-6", "input_per_m": 3.0, "output_per_m": 15.0 },
       { "model": "claude-opus-*", "input_per_m": 15.0, "output_per_m": 75.0 },
       { "model": "*", "input_per_m": 1.0, "output_per_m": 2.0, "note": "兜底价" }

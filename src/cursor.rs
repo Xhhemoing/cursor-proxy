@@ -14,7 +14,31 @@ use uuid::Uuid;
 pub const STREAM_PATH: &str = "/aiserver.v1.InferenceService/Stream";
 pub const CLIENT_TYPE: &str = "sand";
 pub const CLIENT_VERSION: &str = "0.18.0";
-/// 单条 Connect 帧最大 16MiB, 防止畸形长度字段把进程内存打爆.
+pub const KIMI_K3_CONTEXT_WINDOW: u32 = 1_048_576;
+/// 客户端未传 max_tokens 时, kimi 家族给长输出预算, 避免上游默认 8k 截断.
+pub const KIMI_DEFAULT_MAX_TOKENS: u32 = 32_768;
+
+pub fn is_kimi_family(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m == "kimi-k3" || m.starts_with("kimi-k3-") || m.starts_with("kimi-k2")
+}
+
+/// 客户端省略 max_tokens 时的默认输出预算; 非 kimi 不注入, 避免 Gemini 类模型踩 8k 坑.
+pub fn default_max_tokens_for(model: &str) -> Option<u32> {
+    if is_kimi_family(model) {
+        Some(KIMI_DEFAULT_MAX_TOKENS)
+    } else {
+        None
+    }
+}
+
+pub fn context_window_for(model: &str) -> u32 {
+    if is_kimi_family(model) {
+        KIMI_K3_CONTEXT_WINDOW
+    } else {
+        200_000
+    }
+}
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// 解码缓冲上限: 允许一帧 + 余量.
 const MAX_STREAM_BUF: usize = MAX_FRAME_BYTES + 64 * 1024;
@@ -366,4 +390,20 @@ pub async fn refresh_access_token(
         });
 
     Ok((access_token, expires_in))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_family_gets_1m_and_long_output() {
+        assert!(is_kimi_family("kimi-k3"));
+        assert!(is_kimi_family("kimi-k3-max"));
+        assert!(is_kimi_family("Kimi-K3-high"));
+        assert!(!is_kimi_family("claude-sonnet-4-6"));
+        assert_eq!(context_window_for("kimi-k3"), 1_048_576);
+        assert_eq!(default_max_tokens_for("kimi-k3"), Some(32_768));
+        assert_eq!(default_max_tokens_for("claude-sonnet-4-6"), None);
+    }
 }

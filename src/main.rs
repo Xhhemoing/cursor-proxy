@@ -490,14 +490,29 @@ async fn models_handler(
 ) -> Result<impl IntoResponse, Response> {
     let config = state.config.load();
     let _used_key = check_auth(&headers, &config)?;
+    let created = chrono::Utc::now().timestamp();
+    let mut ids: Vec<String> = vec![config.default_model.clone()];
+    for id in ["kimi-k3", "kimi-k3-low", "kimi-k3-high", "kimi-k3-max"] {
+        if !ids.iter().any(|x| x == id) {
+            ids.push(id.to_string());
+        }
+    }
+    let data: Vec<Value> = ids
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id.clone(),
+                "object": "model",
+                "created": created,
+                "owned_by": "cursor-fast-proxy-rs",
+                "context_window": crate::cursor::context_window_for(&id),
+                "max_output_tokens": crate::cursor::default_max_tokens_for(&id).unwrap_or(8192),
+            })
+        })
+        .collect();
     Ok(Json(json!({
         "object": "list",
-        "data": [{
-            "id": config.default_model,
-            "object": "model",
-            "created": chrono::Utc::now().timestamp(),
-            "owned_by": "cursor-fast-proxy-rs",
-        }],
+        "data": data,
     })))
 }
 
@@ -547,7 +562,11 @@ async fn chat_handler(
         .unwrap_or(&config.default_model)
         .to_string();
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let max_tokens = body
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .or_else(|| crate::cursor::default_max_tokens_for(&model));
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
 
     // 计费上下文: 此刻快照单价与分成, 贯穿整个请求

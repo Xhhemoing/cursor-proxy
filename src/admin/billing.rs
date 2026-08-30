@@ -16,6 +16,10 @@ use crate::billing::{self, Filter, GroupBy};
 use crate::config::{self, ModelPrice, SalesRecord};
 use crate::AppState;
 
+fn normalize_currency(raw: &str) -> String {
+    crate::config::normalize_currency(raw)
+}
+
 const MAX_PAGE: usize = 1000;
 const MAX_EXPORT_ROWS: usize = 200_000;
 
@@ -309,7 +313,8 @@ pub async fn api_pricing_patch(
         }
     }
     if let Some(c) = &body.currency {
-        if c.trim().is_empty() || c.len() > 8 {
+        let n = normalize_currency(c);
+        if n.is_empty() || n.len() > 8 {
             return bad("invalid currency");
         }
     }
@@ -319,7 +324,7 @@ pub async fn api_pricing_patch(
         let mut cfg = state.config.lock();
         let b = &mut cfg.billing;
         if let Some(c) = body.currency {
-            b.currency = c.trim().to_string();
+            b.currency = normalize_currency(&c);
             changed.push("currency");
         }
         if let Some(tz) = body.tz_offset_minutes {

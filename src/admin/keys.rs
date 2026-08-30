@@ -299,7 +299,7 @@ mod tests {
             backend: "https://api2.cursor.sh".into(),
             timeout_s: 600,
             log_file: "proxy.log".into(),
-            default_model: "grok-4.6".into(),
+            default_model: "kimi-k3".into(),
             max_concurrency_per_account: 8,
             admin_token: String::new(),
             acquire_wait_ms: 0,

@@ -75,7 +75,23 @@ fn default_tz_offset() -> i32 {
     480
 }
 fn default_currency() -> String {
-    "USD".into()
+    "RMB".into()
+}
+
+/// CNY / 人民币 / usd 别名统一成 RMB / USD.
+pub fn normalize_currency(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t == "人民币" || t == "¥" {
+        return "RMB".into();
+    }
+    match t.to_ascii_uppercase().as_str() {
+        "CNY" | "CNH" | "RMB" => "RMB".into(),
+        "USD" | "US$" | "$" => "USD".into(),
+        _ => t.to_string(),
+    }
 }
 
 /// 模型价格规则. `model` 支持精确名或 `prefix*` 通配, `*` 为兜底.
@@ -141,13 +157,13 @@ fn default_backend() -> String {
     "https://api2.cursor.sh".into()
 }
 fn default_timeout() -> u64 {
-    600
+    1800
 }
 fn default_log_file() -> String {
     "proxy.log".into()
 }
 fn default_model() -> String {
-    "grok-4.6".into()
+    "kimi-k3".into()
 }
 fn default_max_concurrency() -> usize {
     8
@@ -263,6 +279,10 @@ impl AppConfig {
         }
         if let Ok(backend) = std::env::var("CFP_BACKEND") {
             config.backend = backend;
+        }
+        config.billing.currency = normalize_currency(&config.billing.currency);
+        if config.billing.currency.is_empty() {
+            config.billing.currency = default_currency();
         }
         Ok(config)
     }
@@ -523,15 +543,25 @@ mod tests {
     fn save_config_roundtrip_default_model() {
         with_temp_paths(|| {
             let mut cfg = AppConfig::load().unwrap();
-            cfg.default_model = "grok-4.6".into();
+            cfg.default_model = "kimi-k3".into();
             cfg.api_keys = vec![ApiKeyRecord::from_raw("sk-test-aaaa".into())];
             save_config(&cfg).unwrap();
             let loaded = AppConfig::load().unwrap();
-            assert_eq!(loaded.default_model, "grok-4.6");
+            assert_eq!(loaded.default_model, "kimi-k3");
             assert_eq!(loaded.api_keys.len(), 1);
             let view = loaded.public_view();
             assert_eq!(view["api_key_count"], 1);
             assert!(view.get("api_keys").is_none());
         });
+    }
+
+    #[test]
+    fn currency_aliases_unify_to_rmb() {
+        assert_eq!(normalize_currency("cny"), "RMB");
+        assert_eq!(normalize_currency("CNY"), "RMB");
+        assert_eq!(normalize_currency("人民币"), "RMB");
+        assert_eq!(normalize_currency("RMB"), "RMB");
+        assert_eq!(normalize_currency("usd"), "USD");
+        assert_eq!(normalize_currency(""), "");
     }
 }

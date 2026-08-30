@@ -1356,6 +1356,8 @@
     }
 
     const CLAUDE_LIST_PRICES = [
+      { model: 'kimi-k3',        input_per_m: 1,    output_per_m: 4,   cache_read_per_m: 0.1,   cache_write_per_m: 0,     note: '1M 窗口' },
+      { model: 'kimi-k3-*',      input_per_m: 1,    output_per_m: 4,   cache_read_per_m: 0.1,   cache_write_per_m: 0,     note: '1M 窗口' },
       { model: 'claude-opus-4-6',   input_per_m: 15,   output_per_m: 75,  cache_read_per_m: 1.5,   cache_write_per_m: 18.75, note: '公开标价' },
       { model: 'claude-opus-*',     input_per_m: 15,   output_per_m: 75,  cache_read_per_m: 1.5,   cache_write_per_m: 18.75, note: '公开标价' },
       { model: 'claude-sonnet-4-6', input_per_m: 3,    output_per_m: 15,  cache_read_per_m: 0.3,   cache_write_per_m: 3.75,  note: '公开标价' },
@@ -1419,14 +1421,14 @@
         const d = await api('/admin/api/billing/summary?group=model');
         const dl = document.getElementById('model-list'); dl.replaceChildren();
         const seen = new Set((d.rows || []).map((r) => r.group));
-        ['*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*', 'gpt-*'].forEach((m) => seen.add(m));
+        ['*', 'kimi-k3', 'kimi-k3-*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*', 'gpt-*'].forEach((m) => seen.add(m));
         Array.from(seen).sort().forEach((m) => dl.appendChild(el('option', { value: m })));
       } catch (e) {}
     }
     async function loadPricing() {
       const d = await api('/admin/api/billing/pricing');
       salesList = d.sales || [];
-      document.getElementById('pr-currency').value = d.currency || 'USD';
+      document.getElementById('pr-currency').value = d.currency || 'RMB';
       document.getElementById('pr-tz').value = d.tz_offset_minutes;
       document.getElementById('pr-bps').value = (d.default_commission_bps || 0) / 100;
       document.getElementById('pr-reject').checked = !!d.reject_unpriced;
