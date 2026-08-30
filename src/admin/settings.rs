@@ -143,3 +143,52 @@ pub async fn api_settings_patch(
     }))
     .into_response()
 }
+
+/// GET /admin/api/rpm — RPM 仪表盘 (全局 + 每 key + 每账号)
+pub async fn api_rpm_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let config = state.config.load();
+    let global_rpm = state.metrics.global_rpm();
+
+    // 每 key RPM
+    let keys: Vec<serde_json::Value> = config
+        .api_keys
+        .iter()
+        .enumerate()
+        .map(|(i, rec)| {
+            let rpm = state.metrics.key_rpm(&rec.key);
+            json!({
+                "index": i,
+                "prefix": rec.key.chars().take(8).collect::<String>(),
+                "name": rec.name,
+                "rpm": rpm,
+                "rpm_limit": rec.rpm_limit,
+                "max_concurrency": rec.max_concurrency,
+                "enabled": rec.enabled,
+            })
+        })
+        .collect();
+
+    // 每账号 RPM
+    let accounts: Vec<serde_json::Value> = state
+        .pool
+        .account_rows()
+        .into_iter()
+        .map(|row| {
+            let id = row["id"].as_str().unwrap_or("").to_string();
+            let rpm = state.metrics.account_rpm(&id);
+            json!({
+                "id": id,
+                "rpm": rpm,
+                "inflight": row["inflight"],
+                "max_concurrency": row["max_concurrency"],
+                "enabled": row["enabled"],
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "global_rpm": global_rpm,
+        "keys": keys,
+        "accounts": accounts,
+    }))
+}

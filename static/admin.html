@@ -307,6 +307,7 @@
           <div class="stat"><div class="l">今日请求</div><div class="v" id="ov-req">–</div><div class="s">已入账</div></div>
           <div class="stat"><div class="l">今日 TOKENS</div><div class="v" id="ov-tok">–</div><div class="s">输入 + 输出</div></div>
           <div class="stat"><div class="l">默认模型</div><div class="v sm" id="k-model">–</div><div class="s">未指定 model 时</div></div>
+          <div class="stat"><div class="l">全局 RPM</div><div class="v" id="k-rpm">–</div><div class="s">每分钟请求</div></div>
         </div>
         <div class="panel" id="overview-log">
           <div class="ph"><h3>最近请求</h3><p>最新 12 条</p></div>
@@ -362,6 +363,7 @@
             <button type="button" id="btn-batch-enable" class="ghost sm">批量启用</button>
             <button type="button" id="btn-batch-disable" class="ghost sm">批量禁用</button>
             <button type="button" id="btn-batch-delete" class="danger sm">批量删除</button>
+            <button type="button" id="btn-batch-edit-acc" class="ghost sm">批量编辑</button>
           </div>
         </div>
         <details class="add" id="acc-add">
@@ -393,6 +395,19 @@
           </div>
         </div>
         <div class="foot-row" style="border-top:0;padding-left:0;padding-right:0"><div class="pagination" id="acc-pagination"></div><p class="toast" id="acc-msg" style="margin:0"></p></div>
+        <dialog id="acc-batch-dialog">
+          <h3>批量编辑账号</h3>
+          <p id="acc-batch-count"></p>
+          <div class="form-grid" style="grid-template-columns:1fr 1fr">
+            <label>启用/禁用 <select id="ab-enabled"><option value="">不改</option><option value="true">启用</option><option value="false">禁用</option></select></label>
+            <label>出口代理 ID <input id="ab-proxy" placeholder="空=不改, 输入 clear 清除"></label>
+            <label>标签 <input id="ab-tags" placeholder="逗号分隔, 空=不改"></label>
+          </div>
+          <div class="toolbar" style="margin-top:14px;justify-content:flex-end">
+            <button type="button" id="acc-batch-cancel" class="ghost">取消</button>
+            <button type="button" id="acc-batch-submit">应用</button>
+          </div>
+        </dialog>
         <dialog id="paste-dialog">
           <h3>粘贴批量导入</h3>
           <p>每行一个账号，格式 <code>id,access_token,machine_id[,refresh_token]</code></p>
@@ -490,7 +505,13 @@
       <section class="page" id="page-keys">
         <div class="page-head">
           <div><h2>API Keys</h2><p>脱敏显示 · 限额与过期 · 标签与销售归属</p></div>
-          <div class="actions"><button type="button" id="btn-new-key">追加 Key</button></div>
+          <div class="actions">
+            <button type="button" id="btn-keys-import" class="ghost">导入</button>
+            <button type="button" id="btn-keys-export" class="ghost">导出</button>
+            <button type="button" id="btn-keys-batch-edit" class="ghost">批量编辑</button>
+            <button type="button" id="btn-new-key">追加 Key</button>
+            <input type="file" id="file-keys-import" accept=".json,.csv" style="display:none">
+          </div>
         </div>
         <details class="add" id="key-add">
           <summary>追加 API Key</summary>
@@ -504,6 +525,8 @@
               <label>描述 <input id="f-key-desc" placeholder="可选"></label>
               <label>token 限额 <input id="f-key-tlim" type="number" min="0" placeholder="空=不限"></label>
               <label>请求限额 <input id="f-key-rlim" type="number" min="0" placeholder="空=不限"></label>
+              <label>RPM 限制 <input id="f-key-rpm" type="number" min="0" placeholder="空=不限"></label>
+              <label>并发限制 <input id="f-key-conc" type="number" min="0" placeholder="空=不限"></label>
               <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
               <label>标签 <input id="f-key-tags" placeholder="逗号分隔, 如 vip,项目A"></label>
               <label>归属销售 <select id="f-key-sales"><option value="">（无）</option></select></label>
@@ -520,12 +543,37 @@
         <div class="panel">
           <div class="table-scroll">
             <table>
-              <thead><tr><th>#</th><th>前缀</th><th>名称 / 描述</th><th>标签 / 销售</th><th class="num">用量</th><th>限额</th><th>过期</th><th></th></tr></thead>
+              <thead><tr><th><input type="checkbox" id="key-check-all"></th><th>#</th><th>前缀</th><th>名称 / 描述</th><th>标签 / 销售</th><th class="num">用量</th><th class="num">RPM</th><th>限额</th><th>过期</th><th></th></tr></thead>
               <tbody id="key-body"></tbody>
             </table>
           </div>
           <div class="foot-row"><p class="toast" id="key-msg" style="margin:0"></p></div>
         </div>
+      <dialog id="keys-paste-dialog">
+          <h3>粘贴批量导入 Keys</h3>
+          <p>每行一个 key，CSV 格式 <code>key,name,description,token_limit,request_limit,rpm_limit,max_concurrency</code></p>
+          <textarea id="keys-paste-text" rows="8" placeholder="sk-xxx,名称,描述,,,60,5"></textarea>
+          <div class="toolbar" style="margin-top:14px;justify-content:flex-end">
+            <button type="button" id="keys-paste-cancel" class="ghost">取消</button>
+            <button type="button" id="keys-paste-submit">导入</button>
+          </div>
+        </dialog>
+        <dialog id="keys-batch-dialog">
+          <h3>批量编辑 Keys</h3>
+          <p id="keys-batch-count"></p>
+          <div class="form-grid" style="grid-template-columns:1fr 1fr">
+            <label>启用/禁用 <select id="kb-enabled"><option value="">不改</option><option value="true">启用</option><option value="false">禁用</option></select></label>
+            <label>RPM 限制 <input id="kb-rpm" type="number" min="0" placeholder="空=不改, 0=清除"></label>
+            <label>并发限制 <input id="kb-conc" type="number" min="0" placeholder="空=不改, 0=清除"></label>
+            <label>token 限额 <input id="kb-tlim" type="number" min="0" placeholder="空=不改, 0=清除"></label>
+            <label>请求限额 <input id="kb-rlim" type="number" min="0" placeholder="空=不改, 0=清除"></label>
+            <label>标签 <input id="kb-tags" placeholder="逗号分隔, 空=不改"></label>
+          </div>
+          <div class="toolbar" style="margin-top:14px;justify-content:flex-end">
+            <button type="button" id="keys-batch-cancel" class="ghost">取消</button>
+            <button type="button" id="keys-batch-submit">应用</button>
+          </div>
+        </dialog>
       </section>
 
       <!-- ================= 计费 ================= -->
@@ -923,11 +971,99 @@
       e.target.textContent = ok ? '已复制' : '复制'; setTimeout(() => { e.target.textContent = '复制'; }, 1500);
     });
     document.getElementById('newkey-close').addEventListener('click', () => { document.getElementById('newkey').classList.remove('show'); });
+
+    // Keys 批量导入
+    document.getElementById('btn-keys-import').addEventListener('click', () => {
+      document.getElementById('file-keys-import').click();
+    });
+    document.getElementById('file-keys-import').addEventListener('change', async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const text = await f.text();
+      try {
+        const r = await api('/admin/api/keys/import', { method: 'POST', body: text });
+        toast('key-msg', '导入完成: ' + r.imported + ' 成功, ' + r.skipped + ' 跳过, ' + (r.errors || []).length + ' 失败');
+        await loadAll();
+      } catch (err) { toast('key-msg', '导入失败: ' + err.message, true); }
+      e.target.value = '';
+    });
+    // Keys 粘贴导入
+    document.getElementById('btn-keys-import').addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      document.getElementById('keys-paste-dialog').showModal();
+    });
+    document.getElementById('keys-paste-cancel').addEventListener('click', () => {
+      document.getElementById('keys-paste-dialog').close();
+    });
+    document.getElementById('keys-paste-submit').addEventListener('click', async () => {
+      const text = document.getElementById('keys-paste-text').value;
+      if (!text.trim()) return;
+      try {
+        const r = await api('/admin/api/keys/import', { method: 'POST', body: text });
+        toast('key-msg', '粘贴导入完成: ' + r.imported + ' 成功, ' + r.skipped + ' 跳过');
+        document.getElementById('keys-paste-dialog').close();
+        document.getElementById('keys-paste-text').value = '';
+        await loadAll();
+      } catch (err) { toast('key-msg', '导入失败: ' + err.message, true); }
+    });
+    // Keys 导出
+    document.getElementById('btn-keys-export').addEventListener('click', async () => {
+      try {
+        const r = await api('/admin/api/keys/export');
+        const blob = new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'keys-export-' + new Date().toISOString().slice(0, 10) + '.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast('key-msg', '已导出 ' + r.count + ' 个 key');
+      } catch (err) { toast('key-msg', '导出失败: ' + err.message, true); }
+    });
+    // Keys 全选
+    document.getElementById('key-check-all').addEventListener('change', (e) => {
+      document.querySelectorAll('.key-check').forEach((c) => { c.checked = e.target.checked; });
+    });
+    // Keys 批量编辑
+    document.getElementById('btn-keys-batch-edit').addEventListener('click', () => {
+      const checked = [...document.querySelectorAll('.key-check:checked')];
+      if (!checked.length) { toast('key-msg', '请先勾选要编辑的 key', true); return; }
+      const indices = checked.map((c) => Number(c.dataset.index));
+      document.getElementById('keys-batch-count').textContent = '已选 ' + indices.length + ' 个 key';
+      document.getElementById('keys-batch-dialog').dataset.indices = JSON.stringify(indices);
+      document.getElementById('keys-batch-dialog').showModal();
+    });
+    document.getElementById('keys-batch-cancel').addEventListener('click', () => {
+      document.getElementById('keys-batch-dialog').close();
+    });
+    document.getElementById('keys-batch-submit').addEventListener('click', async () => {
+      const indices = JSON.parse(document.getElementById('keys-batch-dialog').dataset.indices || '[]');
+      const body = { indices };
+      const en = document.getElementById('kb-enabled').value;
+      if (en !== '') body.enabled = en === 'true';
+      const rpm = document.getElementById('kb-rpm').value.trim();
+      if (rpm !== '') body.rpm_limit = Number(rpm) === 0 ? null : Number(rpm);
+      const conc = document.getElementById('kb-conc').value.trim();
+      if (conc !== '') body.max_concurrency = Number(conc) === 0 ? null : Number(conc);
+      const tlim = document.getElementById('kb-tlim').value.trim();
+      if (tlim !== '') body.token_limit = Number(tlim) === 0 ? null : Number(tlim);
+      const rlim = document.getElementById('kb-rlim').value.trim();
+      if (rlim !== '') body.request_limit = Number(rlim) === 0 ? null : Number(rlim);
+      const tags = document.getElementById('kb-tags').value.trim();
+      if (tags !== '') body.tags = splitTags(tags);
+      try {
+        const r = await api('/admin/api/keys/batch-edit', { method: 'POST', body: JSON.stringify(body) });
+        toast('key-msg', '批量编辑完成: ' + r.updated + ' 个 key 已更新');
+        document.getElementById('keys-batch-dialog').close();
+        await loadAll();
+      } catch (err) { toast('key-msg', '批量编辑失败: ' + err.message, true); }
+    });
     function renderKeys(data) {
       const body = document.getElementById('key-body');
       body.replaceChildren();
       (data.keys || []).forEach((k) => {
         const tr = el('tr');
+        const chk = el('input', { type: 'checkbox', class: 'key-check', 'data-index': k.index });
+        tr.appendChild(el('td', null)).appendChild(chk);
         tr.appendChild(el('td', null, String(k.index)));
         tr.appendChild(el('td', null, k.prefix + '…'));
         const nd = (k.name || '') + (k.description ? ' — ' + k.description : '');
@@ -938,7 +1074,11 @@
         if (!(k.tags || []).length && !k.sales_id) tsTd.textContent = '—';
         tr.appendChild(tsTd);
         tr.appendChild(el('td', { class: 'num' }, fmtN(k.used_tokens) + ' tok / ' + fmtN(k.used_requests) + ' req'));
-        const lim = (k.token_limit == null ? 'token∞' : ('token ' + k.token_limit)) + '  ' + (k.request_limit == null ? 'req∞' : ('req ' + k.request_limit));
+        const rpmTd = el('td', { class: 'num' });
+        rpmTd.textContent = (k.rpm != null ? String(k.rpm) : '—') + (k.rpm_limit ? ' / ' + k.rpm_limit : '');
+        if (k.rpm_limit && k.rpm >= k.rpm_limit) rpmTd.className = 'num bad';
+        tr.appendChild(rpmTd);
+        const lim = (k.token_limit == null ? 'token∞' : ('token ' + k.token_limit)) + '  ' + (k.request_limit == null ? 'req∞' : ('req ' + k.request_limit)) + (k.max_concurrency ? '  并发' + k.max_concurrency : '');
         tr.appendChild(el('td', null, (k.enabled === false ? '停用 · ' : '') + lim));
         const expTd = el('td', null, fmtExp(k));
         if (k.expired) expTd.className = 'bad';
@@ -967,6 +1107,10 @@
           if (r === null) return;
           const exp = prompt('过期 Unix 秒（空=永不过期, 0=清除）', k.expires_at == null ? '' : String(k.expires_at));
           if (exp === null) return;
+          const rpm = prompt('RPM 限制（空=不限, 0=清除）', k.rpm_limit == null ? '' : String(k.rpm_limit));
+          if (rpm === null) return;
+          const conc = prompt('并发限制（空=不限, 0=清除）', k.max_concurrency == null ? '' : String(k.max_concurrency));
+          if (conc === null) return;
           const tags = prompt('标签（逗号分隔，空=无）', (k.tags || []).join(','));
           if (tags === null) return;
           const sid = prompt('归属销售 id（空=无）可选: ' + salesList.map((s) => s.id).join(', '), k.sales_id || '');
@@ -982,6 +1126,8 @@
                 expires_at: exp.trim() === '' ? null : (Number(exp) === 0 ? null : Number(exp)),
                 tags: splitTags(tags),
                 sales_id: sid.trim() === '' ? null : sid.trim(),
+                rpm_limit: rpm.trim() === '' ? null : (Number(rpm) === 0 ? null : Number(rpm)),
+                max_concurrency: conc.trim() === '' ? null : (Number(conc) === 0 ? null : Number(conc)),
               }),
             });
             toast('key-msg', '已保存');
@@ -1051,6 +1197,7 @@
       return q.toString();
     }
     async function loadAll() {
+      loadRpm();
       const [pool, settings, keys, logs, proxies] = await Promise.all([
         api('/admin/api/pool?' + poolQuery()),
         api('/admin/api/settings'),
@@ -1089,6 +1236,13 @@
       const n = document.getElementById('live');
       n.className = ok ? 'live' : 'live off';
       n.replaceChildren(el('i'), document.createTextNode(ok ? 'LIVE' : 'OFFLINE'));
+    }
+    async function loadRpm() {
+      try {
+        const r = await api('/admin/api/rpm');
+        const el = document.getElementById('k-rpm');
+        if (el) el.textContent = r.global_rpm;
+      } catch (_) {}
     }
     async function loadOverviewBilling() {
       const d = localDate(new Date());
@@ -1171,6 +1325,8 @@
             expires_at: exp,
             tags: splitTags(document.getElementById('f-key-tags').value),
             sales_id: document.getElementById('f-key-sales').value || null,
+            rpm_limit: document.getElementById('f-key-rpm').value.trim() === '' ? null : Number(document.getElementById('f-key-rpm').value),
+            max_concurrency: document.getElementById('f-key-conc').value.trim() === '' ? null : Number(document.getElementById('f-key-conc').value),
           }),
         });
         document.getElementById('f-key').value = '';
@@ -1300,6 +1456,35 @@
       toast('acc-msg', '批量禁用完成: ' + ids.length + ' 个');
       await loadAll();
     });
+    // 账号批量编辑
+    document.getElementById('btn-batch-edit-acc').addEventListener('click', () => {
+      const checked = [...document.querySelectorAll('.acc-check:checked')];
+      if (!checked.length) { toast('acc-msg', '请先勾选要编辑的账号', true); return; }
+      const ids = checked.map((c) => c.dataset.id);
+      document.getElementById('acc-batch-count').textContent = '已选 ' + ids.length + ' 个账号';
+      document.getElementById('acc-batch-dialog').dataset.ids = JSON.stringify(ids);
+      document.getElementById('acc-batch-dialog').showModal();
+    });
+    document.getElementById('acc-batch-cancel').addEventListener('click', () => {
+      document.getElementById('acc-batch-dialog').close();
+    });
+    document.getElementById('acc-batch-submit').addEventListener('click', async () => {
+      const ids = JSON.parse(document.getElementById('acc-batch-dialog').dataset.ids || '[]');
+      const body = { ids };
+      const en = document.getElementById('ab-enabled').value;
+      if (en !== '') body.enabled = en === 'true';
+      const proxy = document.getElementById('ab-proxy').value.trim();
+      if (proxy !== '') body.proxy_id = proxy === 'clear' ? null : proxy;
+      const tags = document.getElementById('ab-tags').value.trim();
+      if (tags !== '') body.tags = splitTags(tags);
+      try {
+        const r = await api('/admin/api/accounts/batch-edit', { method: 'POST', body: JSON.stringify(body) });
+        toast('acc-msg', '批量编辑完成: ' + r.updated + ' 个账号已更新');
+        document.getElementById('acc-batch-dialog').close();
+        await loadAll();
+      } catch (err) { toast('acc-msg', '批量编辑失败: ' + err.message, true); }
+    });
+
     // 批量删除
     document.getElementById('btn-batch-delete').addEventListener('click', async () => {
       const ids = getSelectedIds();

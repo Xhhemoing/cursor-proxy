@@ -65,6 +65,8 @@ pub struct AppState {
     ledger: std::sync::Arc<billing::Ledger>,
     proxies: std::sync::Arc<proxypool::ProxyPool>,
     cursor_factory: CursorFactory,
+    /// 每 API Key 并发信号量 (key 字符串 → Semaphore)
+    key_semaphores: dashmap::DashMap<String, std::sync::Arc<tokio::sync::Semaphore>>,
 }
 
 /// 按出口代理缓存 CursorClient. 直连共用一个, 每个 proxy_id 一个.
@@ -203,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         ledger: std::sync::Arc::new(billing::Ledger::open(&config.billing.db_file)?),
         proxies,
         cursor_factory,
+        key_semaphores: dashmap::DashMap::new(),
     });
     info!(
         event = "billing_init",
@@ -332,8 +335,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/proxies/import", post(admin::api_proxies_import))
         .route("/admin/api/proxies/rebalance", post(admin::api_proxies_rebalance))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
+        .route("/admin/api/keys/import", post(admin::api_keys_import))
+        .route("/admin/api/keys/batch-edit", post(admin::api_keys_batch_edit))
+        .route("/admin/api/keys/export", get(admin::api_keys_export))
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
         .route("/admin/api/keys/:index/reveal", get(admin::api_keys_reveal))
+        .route("/admin/api/accounts/batch-edit", post(admin::api_accounts_batch_edit))
+        .route("/admin/api/rpm", get(admin::api_rpm_dashboard))
         .route("/admin/api/logs", get(admin::api_logs_recent))
         .route("/admin/api/settings", get(admin::api_settings_get).post(admin::api_settings_patch))
         .route("/admin/api/billing/records", get(admin::api_billing_records))
@@ -670,9 +678,52 @@ async fn inference_handler(
                 )
                     .into_response());
             }
+            // RPM 闸门: 每分钟请求数限制
+            if let Some(rpm_lim) = rec.rpm_limit {
+                let current_rpm = state.metrics.key_rpm(&rec.key);
+                if current_rpm >= rpm_lim as u64 {
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(openai_error(
+                            &format!("RPM limit exceeded ({}/{})", current_rpm, rpm_lim),
+                            "rate_limit_exceeded",
+                            429,
+                        )),
+                    )
+                        .into_response());
+                }
+            }
             rec.key.clone()
         }
         None => String::new(),
+    };
+
+    // Key 并发信号量: 限制同一 key 的并发请求数
+    let _key_permit = match key_rec {
+        Some(rec) if rec.max_concurrency.is_some() => {
+            let max_conc = rec.max_concurrency.unwrap() as usize;
+            let sem = state
+                .key_semaphores
+                .entry(rec.key.clone())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(max_conc)))
+                .clone();
+            // 如果配置变了 (max_concurrency 调小), 信号量容量不变 — 用 try_acquire 防死锁
+            match sem.try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(openai_error(
+                            &format!("concurrency limit exceeded (max {})", max_conc),
+                            "rate_limit_exceeded",
+                            429,
+                        )),
+                    )
+                        .into_response());
+                }
+            }
+        }
+        _ => None,
     };
     let upstream_timeout = Duration::from_secs(config.timeout_s.max(1));
 
@@ -769,6 +820,9 @@ async fn inference_handler(
     };
     let mut account_id = account.id.clone();
     let mut conv_id = crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
+
+    // 记录 RPM (key + account 维度)
+    state.metrics.observe_rpm(&used_key, &account_id);
 
     // 多上游路由：根据模型前缀选择上游
     let upstream_name = if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {

@@ -197,6 +197,12 @@ pub struct ApiKeyRecord {
     /// 归属销售 id (对应 billing.sales[].id)
     #[serde(default)]
     pub sales_id: Option<String>,
+    /// 每分钟请求数限制 (RPM); None = 不限
+    #[serde(default)]
+    pub rpm_limit: Option<u32>,
+    /// 并发请求数限制; None = 不限
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
 }
 
 impl ApiKeyRecord {
@@ -211,6 +217,8 @@ impl ApiKeyRecord {
             expires_at: None,
             tags: Vec::new(),
             sales_id: None,
+            rpm_limit: None,
+            max_concurrency: None,
         }
     }
 

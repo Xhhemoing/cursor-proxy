@@ -63,6 +63,8 @@ fn enrich_proxy_bindings(state: &AppState, stats: &mut serde_json::Value) {
             } else {
                 "direct"
             });
+            // RPM
+            acc["rpm"] = json!(state.metrics.account_rpm(&id));
         }
     }
 }
@@ -525,4 +527,52 @@ pub async fn api_accounts_batch(
     
     state.audit.account_op("batch", "batch", json!({"op": body.op, "count": body.ids.len()}));
     Json(json!({"status": "ok", "results": results})).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AccountsBatchEditBody {
+    pub ids: Vec<String>,
+    /// 要修改的字段 (None = 不改)
+    pub enabled: Option<bool>,
+    pub proxy_id: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// POST /admin/api/accounts/batch-edit — 批量修改账号字段 (代理/标签/开关)
+pub async fn api_accounts_batch_edit(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AccountsBatchEditBody>,
+) -> Response {
+    let mut updated = 0usize;
+    let mut errors = Vec::new();
+    for id in &body.ids {
+        // 先改内存
+        if let Some(en) = body.enabled {
+            if state.pool.set_enabled(id, en).is_none() {
+                errors.push(json!({"id": id, "error": "not found"}));
+                continue;
+            }
+        }
+        // 持久化到 accounts.json
+        let mut accounts = config::load_accounts().unwrap_or_default();
+        let Some(acc) = accounts.iter_mut().find(|a| a.id == *id) else {
+            errors.push(json!({"id": id, "error": "not found in config"}));
+            continue;
+        };
+        if let Some(en) = body.enabled { acc.enabled = en; }
+        if let Some(ref pid) = body.proxy_id { acc.proxy_id = pid.clone().filter(|s| !s.is_empty()); }
+        if let Some(ref t) = body.tags { acc.tags = t.clone(); }
+        match config::save_accounts(&accounts) {
+            Ok(_) => {
+                state.pool.replace_accounts(accounts);
+                updated += 1;
+            }
+            Err(e) => {
+                errors.push(json!({"id": id, "error": e.to_string()}));
+            }
+        }
+    }
+    state.pool.rebuild_available_ids();
+    state.audit.account_op("batch_edit", "batch", json!({"updated": updated, "ids": body.ids}));
+    Json(json!({"status": "ok", "updated": updated, "errors": errors})).into_response()
 }

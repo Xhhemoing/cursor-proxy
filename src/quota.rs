@@ -403,6 +403,8 @@ pub fn key_public(index: usize, rec: &ApiKeyRecord, used_tokens: u64, used_reque
         "expires_at": rec.expires_at,
         "token_limit": rec.token_limit,
         "request_limit": rec.request_limit,
+        "rpm_limit": rec.rpm_limit,
+        "max_concurrency": rec.max_concurrency,
         "tags": rec.tags,
         "sales_id": rec.sales_id,
         "used_tokens": used_tokens,
@@ -482,6 +484,8 @@ mod tests {
             expires_at: None,
             tags: vec![],
             sales_id: None,
+            rpm_limit: None,
+            max_concurrency: None,
         };
         assert!(check_key_limits(&rec, 10, 1).is_ok());
         assert!(check_key_limits(&rec, 100, 1).unwrap_err().contains("token"));
@@ -503,6 +507,8 @@ mod tests {
             expires_at: Some(1_000_000_000), // 2001 年, 已过期
             tags: vec![],
             sales_id: None,
+            rpm_limit: None,
+            max_concurrency: None,
         };
         assert!(rec.is_expired());
         assert!(check_key_limits(&rec, 0, 0).unwrap_err().contains("expired"));

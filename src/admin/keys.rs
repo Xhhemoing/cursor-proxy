@@ -14,10 +14,18 @@ use crate::config::{self, ApiKeyRecord, AppConfig};
 use crate::quota;
 use crate::AppState;
 
-/// GET /admin/api/keys — API key 列表 (脱敏 + 限额/用量)
+/// GET /admin/api/keys — API key 列表 (脱敏 + 限额/用量 + RPM)
 pub async fn api_keys_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.config.lock();
-    Json(redacted_keys(&config, &state.key_usage))
+    let mut v = redacted_keys(&config, &state.key_usage);
+    if let Some(arr) = v.get_mut("keys").and_then(|k| k.as_array_mut()) {
+        for (i, item) in arr.iter_mut().enumerate() {
+            if let Some(rec) = config.api_keys.get(i) {
+                item["rpm"] = json!(state.metrics.key_rpm(&rec.key));
+            }
+        }
+    }
+    Json(v)
 }
 
 #[derive(Deserialize)]
@@ -39,6 +47,10 @@ pub struct AddKeyBody {
     pub tags: Vec<String>,
     #[serde(default)]
     pub sales_id: Option<String>,
+    #[serde(default)]
+    pub rpm_limit: Option<u32>,
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
 }
 
 /// 标签规范化: 去空白/去空/去重, 最多 20 个, 每个 ≤ 32 字符
@@ -98,6 +110,8 @@ pub async fn api_keys_add(
         expires_at: body.expires_at,
         tags: normalize_tags(body.tags),
         sales_id: body.sales_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        rpm_limit: body.rpm_limit,
+        max_concurrency: body.max_concurrency,
     };
     let snapshot = {
         let mut config = state.config.lock();
@@ -161,6 +175,8 @@ pub struct PatchKeyBody {
     pub tags: Option<Vec<String>>,
     /// Some(None) = 清除归属
     pub sales_id: Option<Option<String>>,
+    pub rpm_limit: Option<Option<u32>>,
+    pub max_concurrency: Option<Option<u32>>,
 }
 
 /// POST /admin/api/keys/:index — 改名/描述/限额/启用/过期
@@ -202,6 +218,12 @@ pub async fn api_keys_patch(
         }
         if let Some(sid) = body.sales_id {
             rec.sales_id = sid.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        }
+        if let Some(rpm) = body.rpm_limit {
+            rec.rpm_limit = rpm.filter(|&v| v > 0);
+        }
+        if let Some(mc) = body.max_concurrency {
+            rec.max_concurrency = mc.filter(|&v| v > 0);
         }
         let prefix: String = rec.key.chars().take(8).collect();
         (config.clone(), prefix)
@@ -267,6 +289,155 @@ pub fn redacted_keys(config: &AppConfig, usage: &quota::KeyUsageStore) -> Value 
         "keys": keys,
         "count": keys.len(),
     })
+}
+
+// ─── 批量导入 / 批量编辑 / 导出 ───
+
+/// POST /admin/api/keys/import — 批量导入 API Key (JSON 数组或 CSV)
+/// CSV 列: key,name,description,token_limit,request_limit,rpm_limit,max_concurrency,expires_at,tags,sales_id
+pub async fn api_keys_import(
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> Response {
+    let records: Vec<ApiKeyRecord> = match serde_json::from_str::<Vec<ApiKeyRecord>>(&body) {
+        Ok(recs) => recs,
+        Err(_) => {
+            // CSV 解析
+            let mut lines = body.lines();
+            let header = match lines.next() {
+                Some(h) => h.to_lowercase(),
+                None => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "empty CSV"}))).into_response();
+                }
+            };
+            let cols: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
+            let find = |names: &[&str]| names.iter().find_map(|n| cols.iter().position(|c| c == n));
+
+            let key_idx = match find(&["key", "api_key", "token"]) {
+                Some(i) => i,
+                None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "CSV must have a 'key' column"}))).into_response(),
+            };
+            let name_idx = find(&["name"]);
+            let desc_idx = find(&["description", "desc"]);
+            let tok_idx = find(&["token_limit", "tokens"]);
+            let req_idx = find(&["request_limit", "requests"]);
+            let rpm_idx = find(&["rpm_limit", "rpm"]);
+            let conc_idx = find(&["max_concurrency", "concurrency"]);
+            let exp_idx = find(&["expires_at", "expires"]);
+            let tags_idx = find(&["tags"]);
+            let sales_idx = find(&["sales_id", "sales"]);
+
+            let mut recs = Vec::new();
+            for line in lines {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                let parts: Vec<&str> = line.split(',').collect();
+                let get = |idx: Option<usize>| idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string());
+                let key = match get(Some(key_idx)) {
+                    Some(k) if !k.is_empty() => k,
+                    _ => continue,
+                };
+                let parse_u64 = |idx: Option<usize>| get(idx).and_then(|s| s.parse::<u64>().ok()).filter(|&v| v > 0);
+                let parse_u32 = |idx: Option<usize>| get(idx).and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
+                let parse_i64 = |idx: Option<usize>| get(idx).and_then(|s| s.parse::<i64>().ok()).filter(|&v| v > 0);
+                let tags = get(tags_idx).map(|s| s.split(';').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()).unwrap_or_default();
+                recs.push(ApiKeyRecord {
+                    key,
+                    name: get(name_idx).unwrap_or_default(),
+                    description: get(desc_idx).unwrap_or_default(),
+                    enabled: true,
+                    token_limit: parse_u64(tok_idx),
+                    request_limit: parse_u64(req_idx),
+                    expires_at: parse_i64(exp_idx),
+                    tags,
+                    sales_id: get(sales_idx).filter(|s| !s.is_empty()),
+                    rpm_limit: parse_u32(rpm_idx),
+                    max_concurrency: parse_u32(conc_idx),
+                });
+            }
+            if recs.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": "no valid rows parsed"}))).into_response();
+            }
+            recs
+        }
+    };
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = Vec::new();
+    {
+        let mut config = state.config.lock();
+        for rec in records {
+            if rec.key.len() < 16 {
+                errors.push(json!({"key_prefix": &rec.key[..rec.key.len().min(8)], "error": "key too short"}));
+                continue;
+            }
+            if config.api_keys.iter().any(|k| k.key == rec.key) {
+                skipped += 1;
+                continue;
+            }
+            config.api_keys.push(rec);
+            imported += 1;
+        }
+        if let Err(e) = config::save_config(&config) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+        }
+    }
+    state.audit.key_op("import", "batch", json!({"imported": imported, "skipped": skipped}));
+    Json(json!({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors})).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct KeysBatchEditBody {
+    /// 按 index 批量
+    pub indices: Vec<usize>,
+    /// 要修改的字段 (None = 不改)
+    pub enabled: Option<bool>,
+    pub rpm_limit: Option<Option<u32>>,
+    pub max_concurrency: Option<Option<u32>>,
+    pub token_limit: Option<Option<u64>>,
+    pub request_limit: Option<Option<u64>>,
+    pub tags: Option<Vec<String>>,
+    pub sales_id: Option<Option<String>>,
+}
+
+/// POST /admin/api/keys/batch-edit — 批量修改 key 字段
+pub async fn api_keys_batch_edit(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<KeysBatchEditBody>,
+) -> Response {
+    let mut updated = 0usize;
+    let snapshot = {
+        let mut config = state.config.lock();
+        for &idx in &body.indices {
+            let Some(rec) = config.api_keys.get_mut(idx) else { continue };
+            if let Some(en) = body.enabled { rec.enabled = en; }
+            if let Some(rpm) = body.rpm_limit { rec.rpm_limit = rpm.filter(|&v| v > 0); }
+            if let Some(mc) = body.max_concurrency { rec.max_concurrency = mc.filter(|&v| v > 0); }
+            if let Some(tl) = body.token_limit { rec.token_limit = tl.filter(|&v| v > 0); }
+            if let Some(rl) = body.request_limit { rec.request_limit = rl.filter(|&v| v > 0); }
+            if let Some(ref tags) = body.tags { rec.tags = normalize_tags(tags.clone()); }
+            if let Some(ref sid) = body.sales_id { rec.sales_id = sid.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()); }
+            updated += 1;
+        }
+        config.clone()
+    };
+    if let Err(e) = config::save_config(&snapshot) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+    }
+    state.audit.key_op("batch_edit", "batch", json!({"updated": updated, "indices": body.indices}));
+    Json(json!({"status": "ok", "updated": updated, "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
+}
+
+/// GET /admin/api/keys/export — 导出全部 key (含完整 key, 用于备份/迁移)
+pub async fn api_keys_export(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let config = state.config.load();
+    state.audit.key_op("export", "all", json!({"count": config.api_keys.len()}));
+    Json(json!({
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "count": config.api_keys.len(),
+        "keys": config.api_keys,
+    }))
 }
 
 #[cfg(test)]
