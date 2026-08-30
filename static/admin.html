@@ -223,6 +223,13 @@
     dialog h3 { margin: 0 0 8px; font: 400 22px var(--serif); }
     dialog p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
     .hint { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+    .newkey { display: none; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; padding: 14px 16px; border: 1px solid var(--ok); background: var(--ok-bg); border-radius: 6px; }
+    .newkey.show { display: flex; }
+    .newkey .k { font: 500 14px var(--mono); word-break: break-all; flex: 1; min-width: 240px; user-select: all; }
+    .newkey .t { color: var(--ok); font-size: 13px; width: 100%; }
+    .keyfield { display: flex; gap: 8px; align-items: end; }
+    .keyfield label { flex: 1; }
+    .keyfield button { height: 44px; }
     .kv { display: grid; grid-template-columns: auto 1fr; gap: 10px 20px; font-size: 14px; margin: 0; }
     .kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--mono); }
 
@@ -380,7 +387,10 @@
           <summary>追加 API Key</summary>
           <div class="body">
             <form id="key-form" class="form-grid">
-              <label class="span-2">新 key <input id="f-key" type="password" minlength="16" autocomplete="off" placeholder="sk-… (≥16 字符)"></label>
+              <div class="keyfield span-2">
+                <label>Key <input id="f-key" autocomplete="off" spellcheck="false" placeholder="留空自动生成；或粘贴自定义 (≥16 字符)"></label>
+                <button type="button" class="ghost" id="btn-gen-key">生成</button>
+              </div>
               <label>名称 <input id="f-key-name"></label>
               <label>描述 <input id="f-key-desc" placeholder="可选"></label>
               <label>token 限额 <input id="f-key-tlim" type="number" min="0" placeholder="空=不限"></label>
@@ -392,6 +402,12 @@
             </form>
           </div>
         </details>
+        <div class="newkey" id="newkey">
+          <div class="t">新 key 已创建并写盘。完整 key 只在此处显示一次，请立即复制保存：</div>
+          <div class="k" id="newkey-val"></div>
+          <button type="button" id="newkey-copy">复制</button>
+          <button type="button" class="ghost" id="newkey-close">关闭</button>
+        </div>
         <div class="panel">
           <div class="table-scroll">
             <table>
@@ -782,6 +798,30 @@
       const s = d.toISOString().slice(0, 16).replace('T', ' ');
       return k.expired ? s + ' (已过期)' : s;
     }
+    function genKey() {
+      const a = new Uint8Array(24); crypto.getRandomValues(a);
+      return 'sk-cfp-' + Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+    async function copyText(text) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+      // 非 https / 无权限时回退
+      const ta = el('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+      if (!ok) prompt('请手动复制：', text);
+      return ok;
+    }
+    function showNewKey(key) {
+      document.getElementById('newkey-val').textContent = key;
+      document.getElementById('newkey').classList.add('show');
+    }
+    document.getElementById('btn-gen-key').addEventListener('click', () => { document.getElementById('f-key').value = genKey(); });
+    document.getElementById('newkey-copy').addEventListener('click', async (e) => {
+      const ok = await copyText(document.getElementById('newkey-val').textContent);
+      e.target.textContent = ok ? '已复制' : '复制'; setTimeout(() => { e.target.textContent = '复制'; }, 1500);
+    });
+    document.getElementById('newkey-close').addEventListener('click', () => { document.getElementById('newkey').classList.remove('show'); });
     function renderKeys(data) {
       const body = document.getElementById('key-body');
       body.replaceChildren();
@@ -803,6 +843,17 @@
         if (k.expired) expTd.className = 'bad';
         tr.appendChild(expTd);
         const op = el('td');
+        const cp = el('button', { type: 'button', title: '复制完整 key' }, '复制');
+        cp.addEventListener('click', async () => {
+          cp.disabled = true;
+          try {
+            const r = await api('/admin/api/keys/' + k.index + '/reveal');
+            const ok = await copyText(r.key);
+            cp.textContent = ok ? '已复制' : '复制'; setTimeout(() => { cp.textContent = '复制'; }, 1500);
+          } catch (e) { toast('key-msg', e.message, true); }
+          cp.disabled = false;
+        });
+        op.appendChild(cp);
         const limBtn = el('button', { type: 'button', class: 'ghost' }, '编辑');
         limBtn.addEventListener('click', async () => {
           const name = prompt('名称', k.name || '');
@@ -997,7 +1048,7 @@
       const expLocal = document.getElementById('f-key-exp').value;
       const exp = expLocal ? Math.floor(new Date(expLocal).getTime() / 1000) : null;
       try {
-        await api('/admin/api/keys', {
+        const created = await api('/admin/api/keys', {
           method: 'POST',
           body: JSON.stringify({
             key,
@@ -1014,7 +1065,9 @@
         document.getElementById('f-key-tags').value = '';
         document.getElementById('f-key-desc').value = '';
         document.getElementById('f-key-exp').value = '';
-        toast('key-msg', '已追加并写盘');
+        document.getElementById('f-key-name').value = '';
+        if (created.key) { showNewKey(created.key); await copyText(created.key); }
+        toast('key-msg', created.generated ? '已自动生成并写盘，key 已复制到剪贴板' : '已追加并写盘');
         await loadAll();
       } catch (err) { toast('key-msg', err.message, true); }
     });

@@ -250,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/pool/health", get(admin::api_pool_health))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
         .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
+        .route("/admin/api/keys/:index/reveal", get(admin::api_keys_reveal))
         .route("/admin/api/logs", get(admin::api_logs_recent))
         .route("/admin/api/settings", get(admin::api_settings_get).post(admin::api_settings_patch))
         .route("/admin/api/billing/records", get(admin::api_billing_records))

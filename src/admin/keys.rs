@@ -22,6 +22,8 @@ pub async fn api_keys_list(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
 #[derive(Deserialize)]
 pub struct AddKeyBody {
+    /// 留空 = 服务端自动生成
+    #[serde(default)]
     pub key: String,
     #[serde(default)]
     pub name: String,
@@ -67,11 +69,22 @@ fn validate_key_strength(key: &str) -> Result<(), String> {
 }
 
 /// POST /admin/api/keys — 追加 API key (支持自定义值/描述/过期)
+/// 生成随机 key: `sk-cfp-` + 48 位 hex (192 bit 随机量, 来自两个 UUIDv4)
+pub fn generate_key() -> String {
+    let a = uuid::Uuid::new_v4().simple().to_string();
+    let b = uuid::Uuid::new_v4().simple().to_string();
+    format!("sk-cfp-{}{}", &a, &b[..16])
+}
+
 pub async fn api_keys_add(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AddKeyBody>,
 ) -> Response {
-    let key = body.key.trim().to_string();
+    // key 留空 → 服务端自动生成; 响应里回传完整 key (仅此一次明文返回)
+    let (key, generated) = {
+        let k = body.key.trim().to_string();
+        if k.is_empty() { (generate_key(), true) } else { (k, false) }
+    };
     if let Err(msg) = validate_key_strength(&key) {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
     }
@@ -113,7 +126,28 @@ pub async fn api_keys_add(
         &prefix,
         json!({"name": snapshot.api_keys.last().map(|k| k.name.clone())}),
     );
-    Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
+    Json(json!({
+        "status": "ok",
+        "key": key,
+        "generated": generated,
+        "index": snapshot.api_keys.len() - 1,
+        "keys": redacted_keys(&snapshot, &state.key_usage),
+    }))
+    .into_response()
+}
+
+/// GET /admin/api/keys/:index/reveal — 返回完整 key (用于复制); 记审计
+pub async fn api_keys_reveal(
+    State(state): State<Arc<AppState>>,
+    Path(index): Path<usize>,
+) -> Response {
+    let config = state.config.load();
+    let Some(rec) = config.api_keys.get(index) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "key index not found"}))).into_response();
+    };
+    let prefix: String = rec.key.chars().take(8).collect();
+    state.audit.key_op("reveal", &prefix, json!({"index": index}));
+    Json(json!({"index": index, "key": rec.key, "name": rec.name})).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -244,6 +278,16 @@ mod tests {
         assert!(validate_key_strength("short").is_err());
         assert!(validate_key_strength("1234567890123456").is_err());
         assert!(validate_key_strength("sk-abcdefgh12345678").is_ok());
+    }
+
+    #[test]
+    fn generated_key_is_strong_and_unique() {
+        let a = generate_key();
+        let b = generate_key();
+        assert!(a.starts_with("sk-cfp-"));
+        assert_eq!(a.len(), "sk-cfp-".len() + 48);
+        assert_ne!(a, b);
+        assert!(validate_key_strength(&a).is_ok());
     }
 
     #[test]
