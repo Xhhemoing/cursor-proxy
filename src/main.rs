@@ -745,6 +745,44 @@ async fn responses_handler(
     inference_handler(state, headers, addr, chat, Dialect::Responses).await
 }
 
+/// 按方言构造一组"正常收尾"SSE 帧, 用于流被上游中断/无收尾时兜底,
+/// 使客户端干净结束而不是卡在半截 (显示"继续")。
+fn dialect_terminal(dialect: Dialect, model: &str) -> String {
+    match dialect {
+        Dialect::Chat => {
+            let id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+            let mut s = translate::openai_chunk(&id, model, serde_json::json!({}), Some("stop"));
+            s.push_str("data: [DONE]\n\n");
+            s
+        }
+        Dialect::Anthropic => {
+            let mut s = crate::protocol::sse_event(
+                "message_delta",
+                &serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": serde_json::Value::Null},
+                    "usage": {"output_tokens": 0}
+                }),
+            );
+            s.push_str(&crate::protocol::sse_event(
+                "message_stop",
+                &serde_json::json!({"type": "message_stop"}),
+            ));
+            s
+        }
+        Dialect::Responses => {
+            let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+            crate::protocol::sse_event(
+                "response.completed",
+                &serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": id, "object": "response", "status": "completed", "output": []}
+                }),
+            )
+        }
+    }
+}
+
 async fn inference_handler(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -1082,26 +1120,59 @@ async fn inference_handler(
             let _permit = current_permit.take().expect("permit must exist");
             let mut usage = translate::Usage::default();
             let mut stream = Box::pin(upstream_to_dialect_stream(frames, &model_clone, dialect));
+            // 断流兜底: 记录是否已发出该方言的正常收尾标记, 未发则在结束时补发,
+            // 否则客户端收到没收尾的半截流会卡住并显示"继续"。
+            let terminal_marker = match dialect {
+                Dialect::Chat => "[DONE]",
+                Dialect::Anthropic => "message_stop",
+                Dialect::Responses => "response.completed",
+            };
+            let mut sent_terminal = false;
+            // 心跳保活: 思考间隔较长时定期发注释帧, 防中间层 (nginx/CF/客户端) 掐空闲连接。
+            let heartbeat = Duration::from_secs(15);
+            let mut last_frame = std::time::Instant::now();
             loop {
-                // 帧级空闲超时: 上游 hang 住不能让槽位永久泄漏
-                let item = match tokio::time::timeout(upstream_timeout, stream.next()).await {
-                    Ok(Some(item)) => item,
+                let item = match tokio::time::timeout(heartbeat, stream.next()).await {
+                    Ok(Some(item)) => {
+                        last_frame = std::time::Instant::now();
+                        item
+                    }
                     Ok(None) => break,
                     Err(_) => {
-                        error!(event = "stream_error", req_id = %rid, "upstream idle timeout");
-                        pool.release(&aid, true, 10);
-                        metrics.observe_err();
-                        ledger.record(billing::BillingRecord::build(
-                            &bctx_s, &rid, &model_clone, &aid, usage, true, 504,
-                            start.elapsed().as_millis() as u64, &client_ip,
-                        ));
-                        return;
+                        // 心跳 tick: 距上一帧的空闲若已超硬上限则判定上游 hang, 否则发保活
+                        if last_frame.elapsed() >= upstream_timeout {
+                            error!(event = "stream_error", req_id = %rid, "upstream idle timeout");
+                            if !sent_terminal {
+                                let _ = tx
+                                    .send(Ok(Bytes::from(dialect_terminal(dialect, &model_clone))))
+                                    .await;
+                            }
+                            pool.release(&aid, true, 10);
+                            metrics.observe_err();
+                            ledger.record(billing::BillingRecord::build(
+                                &bctx_s, &rid, &model_clone, &aid, usage, true, 504,
+                                start.elapsed().as_millis() as u64, &client_ip,
+                            ));
+                            return;
+                        }
+                        // SSE 注释帧: 规范要求所有客户端忽略, 各方言通用且不打乱协议时序
+                        if tx
+                            .send(Ok(Bytes::from(": keep-alive\n\n")))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
                     }
                 };
                 match item {
                     Ok((sse, usage_frame)) => {
                         if let Some(u) = usage_frame {
                             usage = u;
+                        }
+                        if sse.contains(terminal_marker) {
+                            sent_terminal = true;
                         }
                         // 客户端断开即停，不阻塞转发循环
                         if tx.send(Ok(Bytes::from(sse))).await.is_err() {
@@ -1113,6 +1184,12 @@ async fn inference_handler(
                         break;
                     }
                 }
+            }
+            // 上游中断/无 responseInfo 结束时补发标准收尾帧, 让客户端干净收尾而非卡住
+            if !sent_terminal {
+                let _ = tx
+                    .send(Ok(Bytes::from(dialect_terminal(dialect, &model_clone))))
+                    .await;
             }
             drop(tx);
             let latency = start.elapsed().as_millis() as u64;
