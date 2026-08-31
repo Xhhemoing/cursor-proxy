@@ -129,6 +129,20 @@ fn now_unix() -> f64 {
         .as_secs_f64()
 }
 
+/// 去掉上游套餐标签里的 Grok / SuperGrok 品牌字样, 只保留档位 (对客户端和面板都不暴露渠道).
+pub fn sanitize_plan_label(raw: &str) -> String {
+    let mut s = raw.to_string();
+    for pat in ["SuperGrok", "Super Grok", "super grok", "supergrok", "Grok", "grok", "GROK", "xAI", "x.ai"] {
+        s = s.replace(pat, " ");
+    }
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.is_empty() {
+        "Pro".to_string()
+    } else {
+        s
+    }
+}
+
 pub fn parse_quota(sand: &Value, period: &Value) -> QuotaSnapshot {
     let mut out = QuotaSnapshot {
         checked_at: Some(now_unix()),
@@ -142,7 +156,7 @@ pub fn parse_quota(sand: &Value, period: &Value) -> QuotaSnapshot {
             .or_else(|| obj.get("grokPlanLabel"))
             .or_else(|| obj.get("planName"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(sanitize_plan_label);
         out.next_reset_at = obj
             .get("nextResetTimestampUtc")
             .or_else(|| obj.get("nextResetAt"))
@@ -436,6 +450,15 @@ pub fn check_key_limits(rec: &ApiKeyRecord, used_tokens: u64, used_requests: u64
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plan_label_hides_grok() {
+        assert_eq!(super::sanitize_plan_label("SuperGrok Heavy"), "Heavy");
+        assert_eq!(super::sanitize_plan_label("SuperGrok"), "Pro");
+        assert_eq!(super::sanitize_plan_label("Grok Pro"), "Pro");
+        assert_eq!(super::sanitize_plan_label("Ultra Plan"), "Ultra Plan");
+        assert!(!super::sanitize_plan_label("SuperGrok Heavy").to_lowercase().contains("grok"));
+    }
+
     use super::*;
 
     #[test]
