@@ -324,107 +324,157 @@ pub async fn api_account_probe_all(State(state): State<Arc<AppState>>) -> impl I
     Json(json!({"status": "ok", "probed": out.len(), "results": out}))
 }
 
-/// POST /admin/api/accounts/import — 批量导入账号（JSON 数组或 CSV）
+/// POST /admin/api/accounts/import — 批量导入账号（JSON 数组 / CSV / 纯文本粘贴）
+/// 支持格式:
+///   JSON: [{"id":"...","access_token":"...","machine_id":"...",...}]
+///   CSV:  自动检测列名 (id/name/email/access_token/refresh_token/machine_id/account_id/max_concurrency/disabled/enabled)
+///   纯文本: 每行 id,access_token,machine_id[,refresh_token]
 pub async fn api_accounts_import(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> Response {
-    // 尝试解析为 JSON 数组
-    let accounts: Vec<Account> = match serde_json::from_str::<Vec<Account>>(&body) {
-        Ok(accs) => accs,
-        Err(_) => {
-            // 尝试 CSV 格式，自动检测列名
-            let mut lines = body.lines();
-            let header = match lines.next() {
-                Some(h) => h.to_lowercase(),
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": "empty CSV"})),
-                    )
-                        .into_response();
-                }
-            };
-            let cols: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
+    let body = body.trim();
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "empty body"})),
+        )
+            .into_response();
+    }
 
-            // 检测列位置
-            let id_idx = cols.iter().position(|c| *c == "id" || *c == "account_id");
-            let token_idx = cols.iter().position(|c| *c == "access_token" || *c == "token");
-            let mid_idx = cols.iter().position(|c| *c == "machine_id" || *c == "machine");
-            let ref_idx = cols.iter().position(|c| *c == "refresh_token" || *c == "refresh");
-            let enabled_idx = cols.iter().position(|c| *c == "enabled" || *c == "disabled");
+    // 1. 尝试 JSON 数组
+    if let Ok(accs) = serde_json::from_str::<Vec<Account>>(body) {
+        return do_import_accounts(state, accs).await;
+    }
 
-            // 如果没有检测到列名，回退到默认顺序: id,access_token,machine_id,refresh_token,enabled
-            let (id_idx, token_idx, mid_idx, ref_idx, enabled_idx) = match (id_idx, token_idx, mid_idx) {
-                (Some(i), Some(t), Some(m)) => (i, t, m, ref_idx, enabled_idx),
-                _ => (0, 1, 2, Some(3), Some(4)),
-            };
+    // 2. 尝试 CSV (带表头自动检测)
+    let mut lines = body.lines();
+    let first_line = lines.next().unwrap_or("");
+    let header_lower = first_line.to_lowercase();
+    let cols: Vec<&str> = header_lower.split(',').map(|s| s.trim()).collect();
 
-            let mut accs = Vec::new();
-            for line in lines {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() <= id_idx.max(token_idx).max(mid_idx) {
-                    continue;
-                }
+    // 检测是否为 CSV 表头 (包含至少一个已知列名)
+    let known_cols = ["id", "name", "email", "access_token", "token", "refresh_token", "refresh",
+        "machine_id", "machine", "account_id", "max_concurrency", "disabled", "enabled"];
+    let is_csv_header = cols.iter().any(|c| known_cols.contains(c));
 
-                let id = parts.get(id_idx).map(|s| s.trim().to_string()).unwrap_or_default();
-                let access_token = parts.get(token_idx).map(|s| s.trim().to_string()).unwrap_or_default();
-                let machine_id = parts.get(mid_idx).map(|s| s.trim().to_string()).unwrap_or_default();
-                let refresh_token = ref_idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string()).unwrap_or_default();
+    if is_csv_header {
+        // 列名 -> 索引映射
+        let col_idx = |names: &[&str]| -> Option<usize> {
+            cols.iter().position(|c| names.contains(c))
+        };
 
-                // enabled 列处理: 支持 "true"/"false" 或 "disabled" 列（true 表示禁用）
-                let enabled = match enabled_idx.and_then(|i| parts.get(i)) {
-                    Some(s) => {
-                        let s = s.trim().to_lowercase();
-                        if s == "true" || s == "1" || s == "yes" {
-                            // 如果列名是 disabled，则 true 表示禁用
-                            if cols.get(enabled_idx.unwrap()) == Some(&"disabled") {
-                                false
-                            } else {
-                                true
-                            }
-                        } else if s == "false" || s == "0" || s == "no" {
-                            if cols.get(enabled_idx.unwrap()) == Some(&"disabled") {
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            true // 默认启用
-                        }
-                    }
-                    None => true,
-                };
+        let id_idx = col_idx(&["id", "account_id"]);
+        let name_idx = col_idx(&["name"]);
+        let token_idx = col_idx(&["access_token", "token"]);
+        let mid_idx = col_idx(&["machine_id", "machine"]);
+        let ref_idx = col_idx(&["refresh_token", "refresh"]);
+        let enabled_idx = col_idx(&["enabled"]);
+        let disabled_idx = col_idx(&["disabled"]);
 
-                if !id.is_empty() && !access_token.is_empty() {
-                    accs.push(Account {
-                        id,
-                        access_token,
-                        machine_id,
-                        refresh_token,
-                        enabled,
-                        token_expires_at: None,
-                        refresh_url: None,
-                        proxy_id: None,
-                        tags: Vec::new(),
-                    });
-                }
+        // id 和 access_token 必须存在
+        let (Some(id_i), Some(token_i)) = (id_idx, token_idx) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "CSV header must contain 'id' and 'access_token' columns"})),
+            )
+                .into_response();
+        };
+
+        let mut accs = Vec::new();
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
             }
-            if accs.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "invalid format, expected JSON array or CSV with header"})),
-                )
-                    .into_response();
+            let parts: Vec<&str> = line.split(',').collect();
+            let get = |idx: Option<usize>| -> String {
+                idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string()).unwrap_or_default()
+            };
+
+            let id = get(Some(id_i));
+            let access_token = get(Some(token_i));
+            let machine_id = get(mid_idx);
+            let refresh_token = get(ref_idx);
+
+            // enabled/disabled 逻辑: disabled=true → enabled=false; enabled=false → enabled=false
+            let enabled = if let Some(di) = disabled_idx {
+                let d = get(Some(di)).to_lowercase();
+                !(d == "true" || d == "1" || d == "yes")
+            } else if let Some(ei) = enabled_idx {
+                let e = get(Some(ei)).to_lowercase();
+                e != "false" && e != "0" && e != "no"
+            } else {
+                true
+            };
+
+            // 如果 id 为空但有 name，用 name 作为 id
+            let id = if id.is_empty() { get(name_idx) } else { id };
+
+            if !id.is_empty() && !access_token.is_empty() {
+                accs.push(Account {
+                    id,
+                    access_token,
+                    machine_id,
+                    refresh_token,
+                    enabled,
+                    token_expires_at: None,
+                    refresh_url: None,
+                    proxy_id: None,
+                    tags: Vec::new(),
+                });
             }
-            accs
         }
-    };
+        if accs.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "no valid accounts found in CSV"})),
+            )
+                .into_response();
+        }
+        return do_import_accounts(state, accs).await;
+    }
 
+    // 3. 纯文本粘贴: 每行 id,access_token,machine_id[,refresh_token]
+    let mut accs = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let id = parts[0].trim().to_string();
+        let access_token = parts[1].trim().to_string();
+        let machine_id = parts[2].trim().to_string();
+        let refresh_token = parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default();
+        if !id.is_empty() && !access_token.is_empty() {
+            accs.push(Account {
+                id,
+                access_token,
+                machine_id,
+                refresh_token,
+                enabled: true,
+                token_expires_at: None,
+                refresh_url: None,
+                proxy_id: None,
+                tags: Vec::new(),
+            });
+        }
+    }
+    if accs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid format, expected JSON array, CSV with header, or lines of id,access_token,machine_id"})),
+        )
+            .into_response();
+    }
+    do_import_accounts(state, accs).await
+}
+
+async fn do_import_accounts(state: Arc<AppState>, accounts: Vec<Account>) -> Response {
     let mut imported = 0;
     let mut errors = Vec::new();
     for acc in accounts {

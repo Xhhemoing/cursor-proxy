@@ -418,8 +418,9 @@
         </dialog>
         <dialog id="paste-dialog">
           <h3>粘贴批量导入</h3>
-          <p>每行一个账号，格式 <code>id,access_token,machine_id[,refresh_token]</code></p>
-          <textarea id="paste-text" rows="8"></textarea>
+          <p>支持格式: JSON 数组 / CSV (带表头) / 纯文本每行 <code>id,access_token,machine_id[,refresh_token]</code></p>
+          <p style="font-size:12px;color:var(--dim);margin-top:4px">CSV 表头示例: <code>id,name,email,access_token,refresh_token,machine_id,account_id,max_concurrency,disabled</code></p>
+          <textarea id="paste-text" rows="8" placeholder='[{"id":"acc1","access_token":"eyJ...","machine_id":"abc"}]&#10;或&#10;id,access_token,machine_id&#10;acc1,eyJ...,abc123&#10;或 CSV 带表头格式'></textarea>
           <div class="toolbar" style="margin-top:14px;justify-content:flex-end">
             <button type="button" id="paste-cancel" class="ghost">取消</button>
             <button type="button" id="paste-submit">导入</button>
