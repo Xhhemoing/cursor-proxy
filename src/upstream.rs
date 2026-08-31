@@ -56,7 +56,7 @@ impl UpstreamClient {
         match self {
             Self::Cursor(client) => {
                 let client = cursor_override.unwrap_or(client);
-                let (token, mid) = cursor_auth.ok_or_else(|| UpstreamError::Config("cursor auth required".into()))?;
+                let (token, mid) = cursor_auth.ok_or_else(|| UpstreamError::Config("upstream auth required".into()))?;
                 let body = build_cursor_body_with_tools(
                     messages,
                     model,
@@ -220,7 +220,7 @@ where
 /// 统一上游错误
 #[derive(thiserror::Error, Debug)]
 pub enum UpstreamError {
-    #[error("cursor: {0}")]
+    #[error("{0}")]
     Cursor(#[from] CursorError),
     #[error("openai: {0}")]
     OpenAi(#[from] OpenAiError),

@@ -619,7 +619,7 @@ async fn models_handler(
                 "id": id.clone(),
                 "object": "model",
                 "created": created,
-                "owned_by": "cursor-fast-proxy-rs",
+                "owned_by": "system",
                 "context_window": crate::cursor::context_window_for(&id),
                 "max_output_tokens": crate::cursor::default_max_tokens_for(&id).unwrap_or(8192),
             })
@@ -771,16 +771,13 @@ async fn inference_handler(
     let tools = body.get("tools").cloned();
     let tool_choice = body.get("tool_choice").cloned();
     let parallel_tool_calls = body.get("parallel_tool_calls").and_then(|v| v.as_bool());
+    // 上游不提供托管 web_search: 静默剥离该工具, 请求照常处理 (翻译层已跳过 web_search 条目).
     if crate::protocol::hosted_web_search(tools.as_ref()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(openai_error(
-                "hosted web_search is not supported; pass a client-side function tool instead",
-                "unsupported_feature",
-                400,
-            )),
-        )
-            .into_response());
+        info!(
+            event = "web_search_stripped",
+            req_id = %request_id,
+            "hosted web_search tool dropped; request proceeds without it"
+        );
     }
 
     // 计费上下文: 此刻快照单价与分成, 贯穿整个请求
@@ -859,7 +856,7 @@ async fn inference_handler(
             );
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(openai_error(&format!("upstream '{}' not configured", upstream_name), "upstream_error", 503)),
+                Json(openai_error("upstream not available", "upstream_error", 503)),
             )
                 .into_response());
         }
@@ -971,7 +968,11 @@ async fn inference_handler(
                     ));
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(openai_error(&format!("upstream error after {} retries: {}", MAX_RETRIES, last_error), "upstream_error", 502)),
+                        Json(openai_error(
+                            &format!("upstream error after {} retries", MAX_RETRIES),
+                            "upstream_error",
+                            502,
+                        )),
                     )
                         .into_response());
                 }

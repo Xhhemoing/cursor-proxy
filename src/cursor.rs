@@ -48,11 +48,11 @@ const MAX_STREAM_BUF: usize = MAX_FRAME_BYTES + 64 * 1024;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CursorError {
-    #[error("Cursor Stream HTTP {0}: {1}")]
+    #[error("upstream HTTP {0}: {1}")]
     Http(u16, String),
-    #[error("Cursor Stream network: {0}")]
+    #[error("upstream network: {0}")]
     Network(String),
-    #[error("Cursor Stream decode: {0}")]
+    #[error("upstream decode: {0}")]
     Decode(String),
 }
 
