@@ -1230,6 +1230,9 @@ async fn inference_handler(
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .header("connection", "keep-alive")
+            // 关键: 告诉前置 nginx/openresty 对本响应关闭缓冲, 否则 SSE 被整段缓冲 →
+            // 客户端长时间收不到数据 (超高延时) 且长流易被反代超时掐断 (断流)。
+            .header("x-accel-buffering", "no")
             .header("x-request-id", &request_id)
             .body(body)
             .unwrap())
