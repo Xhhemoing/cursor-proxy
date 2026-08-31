@@ -51,10 +51,12 @@ install -d bin
 [ -f $UNIT_DST ] && cp -a $UNIT_DST $UNIT_DST.bak.$STAMP
 [ -d static ] && cp -a static static.bak.$STAMP
 systemctl --user stop cursor-proxy || true
-# 兜底: 干掉 systemd 管不到的孤儿进程 (KillMode=mixed 或手动运行可能残留), 否则新进程会 Address already in use
-pkill -f '[b]in/cursor-fast-proxy-rs' 2>/dev/null || true
-for _ in 1 2 3 4 5; do ss -ltn 2>/dev/null | grep -q ':8800 ' || break; sleep 1; done
-pkill -9 -f '[b]in/cursor-fast-proxy-rs' 2>/dev/null || true
+# 兜底: 干掉 systemd 管不到、仍占用 8800 的孤儿进程 (KillMode=mixed 或手动运行残留).
+# 注意: 绝不能用 pkill -f 'bin/cursor-fast-proxy-rs' — 本脚本 shell 的命令行也含该串, 会自杀。
+# 只按端口锁定 PID 精确 kill。
+port_pid() { ss -ltnpH 2>/dev/null | grep ':8800 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
+for _ in 1 2 3 4 5; do P=\$(port_pid); [ -n \"\$P\" ] || break; kill \"\$P\" 2>/dev/null || true; sleep 1; done
+P=\$(port_pid); [ -n \"\$P\" ] && kill -9 \"\$P\" 2>/dev/null || true
 systemctl --user reset-failed cursor-proxy 2>/dev/null || true
 install -m 755 $BUILD_DIR/target/release/cursor-fast-proxy-rs bin/cursor-fast-proxy-rs
 rsync -a --delete $BUILD_DIR/static/ static/
@@ -64,9 +66,10 @@ install -Dm 644 $BUILD_DIR/deploy/cursor-proxy.service $UNIT_DST
 systemctl --user daemon-reload
 systemctl --user start cursor-proxy
 sleep 3
-systemctl --user is-active cursor-proxy
+# 验证信息化, 不因 set -e 中断 (否则失败会跳过后续输出)
+systemctl --user is-active cursor-proxy || true
 systemctl --user show cursor-proxy -p MainPID -p MemoryMax
-curl -sS -m 5 http://127.0.0.1:8800/health; echo
+curl -sS -m 5 http://127.0.0.1:8800/health || true; echo
 "
 
 echo "4/4 done."
