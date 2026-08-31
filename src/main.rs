@@ -161,9 +161,10 @@ async fn main() -> anyhow::Result<()> {
         "cursor-fast-proxy-rs starting"
     );
 
-    // 初始化号池
+    // 初始化号池 (恢复冷却/错误计数, 重启后管理面立刻有状态)
     let pool = AccountPool::new(accounts, config.max_concurrency_per_account)
-        .with_acquire_wait(Duration::from_millis(config.acquire_wait_ms));
+        .with_acquire_wait(Duration::from_millis(config.acquire_wait_ms))
+        .with_state_file(std::path::PathBuf::from("account-state.json"));
 
     // 初始化 Cursor 客户端工厂 (直连 + 按出口缓存)
     let cursor_factory = CursorFactory::new(&config.backend, config.timeout_s)?;
@@ -228,7 +229,12 @@ async fn main() -> anyhow::Result<()> {
     // 恢复历史用量
     state.key_usage.load_from_disk();
 
-    // 恢复额度缓存 (重启后立即可见)
+    // 必须先占端口再跑后台探测。旧版本在 bind 前 spawn quota refresh,
+    // 热更新时旧进程还占着 8800 → Address already in use → systemd 连崩。
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
+    info!(event = "listening", addr = %listener.local_addr()?, "server ready");
+
+    // 恢复额度缓存 (重启后立即可见, 等 bind 成功再灌, 避免 crash-loop 打上游)
     {
         let state = state.clone();
         let store = state.quota_store.clone();
@@ -237,8 +243,9 @@ async fn main() -> anyhow::Result<()> {
                 Ok(latest) => {
                     let n = latest.len();
                     for (id, snap) in latest {
-                        state.pool.set_quota(&id, snap);
+                        state.pool.restore_quota(&id, snap);
                     }
+                    state.pool.bump_version();
                     info!(event = "quota_cache_restore", count = n, "quota cache restored from disk");
                 }
                 Err(e) => {
@@ -248,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 额度自动刷新 (每 5 分钟, 可配置)
+    // 额度自动刷新 (每 5 分钟, 可配置)。启动后先等缓存灌完 + 10s, 避免和 restore 抢写。
     {
         let state = state.clone();
         let store = state.quota_store.clone();
@@ -263,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(true),
         };
         tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             quota::auto_refresh_loop(state, store, refresh_config).await;
         });
     }
@@ -315,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
                 if removed > 0 {
                     info!(event = "session_gc", removed, live = state.pool.session_count(), "expired sessions cleared");
                 }
+                state.pool.persist_runtime_state();
                 state.ledger.request_checkpoint();
                 if state.proxies.is_enabled() {
                     let n = admin::probe_nodes(&state, None).await.len();
@@ -362,9 +371,10 @@ async fn main() -> anyhow::Result<()> {
                     let error = snap.error.is_some();
                     
                     state.pool.set_quota(&id, snap.clone());
-                    // 持久化到历史
-                    if let Err(e) = state.quota_store.save(&id, &snap).await {
-                        warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                    if !error {
+                        if let Err(e) = state.quota_store.save(&id, &snap).await {
+                            warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                        }
                     }
 
                     if has_quota && !error {
@@ -447,9 +457,6 @@ async fn main() -> anyhow::Result<()> {
         .merge(admin_routes)
         .with_state(state.clone());
 
-    // 启动服务器 (注入 ConnectInfo 供限频取真实 IP)
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
-    info!(event = "listening", addr = %listener.local_addr()?, "server ready");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -457,8 +464,9 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown_signal(state.clone()))
     .await?;
 
-    // 优雅关闭: 落盘用量 + 账本队列刷完
+    // 优雅关闭: 落盘用量 + 账号运行时状态 + 账本队列刷完
     state.key_usage.save_to_disk();
+    state.pool.persist_runtime_state();
     let flushed = state.ledger.flush(Duration::from_secs(10));
     info!(event = "shutdown", billing_flushed = flushed, "billing ledger flushed");
     info!(event = "shutdown", "usage persisted, bye");

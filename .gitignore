@@ -13,5 +13,10 @@
 /billing.db
 /billing.db-wal
 /billing.db-shm
+/quota.db
+/quota.db-wal
+/quota.db-shm
+/account-state.json
+/account-state.json.tmp
 accounts.json.bak*
 static/admin.html.bak*

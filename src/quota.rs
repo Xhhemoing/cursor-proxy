@@ -844,13 +844,14 @@ async fn run_refresh_once(
                     .unwrap_or_else(|_| state.cursor.clone())
                     .probe_quota(&acc.access_token, &acc.machine_id)
                     .await;
-                // 更新内存缓存
+                let ok = snap.error.is_none();
+                // 失败时 set_quota 会保留上次成功数据，磁盘也只写成功快照
                 state.pool.set_quota(&id, snap.clone());
-                // 持久化
-                if let Err(e) = store.save(&id, &snap).await {
-                    tracing::warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                if ok {
+                    if let Err(e) = store.save(&id, &snap).await {
+                        tracing::warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                    }
                 }
-                // SSE 推送
                 state.event_bus.publish(crate::admin::events::AdminEvent::new(
                     "quota_update",
                     serde_json::json!({
@@ -858,7 +859,7 @@ async fn run_refresh_once(
                         "quota": snap,
                     }),
                 ));
-                (id, snap.error.is_none())
+                (id, ok)
             }
         })
         .buffer_unordered(concurrency)

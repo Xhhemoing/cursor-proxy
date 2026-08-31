@@ -299,6 +299,11 @@ pub async fn api_account_probe(
         .probe_quota(&acc.access_token, &acc.machine_id)
         .await;
     state.pool.set_quota(&id, snap.clone());
+    if snap.error.is_none() {
+        if let Err(e) = state.quota_store.save(&id, &snap).await {
+            tracing::warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+        }
+    }
     Json(json!({"status": "ok", "id": id, "quota": snap})).into_response()
 }
 
@@ -327,9 +332,10 @@ pub async fn api_account_probe_all(State(state): State<Arc<AppState>>) -> impl I
                     .probe_quota(&acc.access_token, &acc.machine_id)
                     .await;
                 state.pool.set_quota(&id, snap.clone());
-                // 持久化
-                if let Err(e) = state.quota_store.save(&id, &snap).await {
-                    tracing::warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                if snap.error.is_none() {
+                    if let Err(e) = state.quota_store.save(&id, &snap).await {
+                        tracing::warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                    }
                 }
                 json!({"id": id, "quota": snap})
             }

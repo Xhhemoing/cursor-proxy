@@ -67,10 +67,9 @@ impl EventBus {
         let _ = self.tx.send(event);
     }
 
-    /// 推送池状态更新 (轻量摘要, 非全量)
+    /// 推送池状态更新 (轻量摘要, 非全量账号表)
     pub fn pool_update(&self, pool: &crate::pool::AccountPool) {
-        let stats = pool.stats();
-        self.publish(AdminEvent::new("pool_update", stats));
+        self.publish(AdminEvent::new("pool_update", pool.summary()));
     }
 
     /// 推送新日志

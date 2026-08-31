@@ -2204,11 +2204,7 @@
       document.getElementById('k-inflight').textContent = data.inflight ?? '—';
       document.getElementById('k-cooling').textContent = String(data.cooling || 0);
       document.getElementById('nav-pool-badge').textContent = (data.available ?? 0) + '/' + (data.total_accounts ?? 0);
-      // 如果当前在 pool 页面, 触发一次完整刷新以更新表格
-      const poolPage = document.getElementById('page-pool');
-      if (poolPage && poolPage.classList.contains('active')) {
-        loadAll().catch(() => {});
-      }
+      // 号池页只更新顶部数字。完整表格靠 SSE quota_update + 操作后 refreshSoon, 禁止每 2s loadAll。
     }
 
     function updateConfigFromEvent(data) {

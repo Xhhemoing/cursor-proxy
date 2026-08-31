@@ -2,11 +2,13 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::config::Account;
@@ -81,6 +83,8 @@ pub struct AccountPool {
     version: Arc<AtomicU64>,
     /// 缓存的查询结果 (version, json)
     query_cache: Arc<parking_lot::RwLock<Option<(u64, serde_json::Value)>>>,
+    /// 运行时状态落盘路径 (冷却/错误计数). None = 不持久化
+    state_path: Arc<parking_lot::RwLock<Option<PathBuf>>>,
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +171,7 @@ impl AccountPool {
             acquire_wait: Duration::ZERO,
             version: Arc::new(AtomicU64::new(0)),
             query_cache: Arc::new(parking_lot::RwLock::new(None)),
+            state_path: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -511,10 +516,103 @@ impl AccountPool {
         }
     }
 
-    /// 设置额度快照
+    /// 设置额度快照。探测失败时保留上一次成功数据，只更新 error/cached_at。
     pub fn set_quota(&self, account_id: &str, snap: QuotaSnapshot) {
+        let snap = if snap.error.is_some() {
+            if let Some(prev) = self.quotas.get(account_id) {
+                let mut merged = prev.clone();
+                merged.error = snap.error.clone();
+                merged.cached_at = snap.cached_at.or(prev.cached_at);
+                merged.from_cache = true;
+                merged.checked_at = snap.checked_at.or(prev.checked_at);
+                merged
+            } else {
+                snap
+            }
+        } else {
+            snap
+        };
         self.quotas.insert(account_id.to_string(), snap);
         self.bump_version();
+    }
+
+    /// 启动时从磁盘灌入额度缓存（不 bump 太多次，调用方一次灌完再 bump）
+    pub fn restore_quota(&self, account_id: &str, mut snap: QuotaSnapshot) {
+        snap.from_cache = true;
+        self.quotas.insert(account_id.to_string(), snap);
+    }
+
+    /// 绑定运行时状态文件并尝试恢复冷却/错误计数
+    pub fn with_state_file(self, path: PathBuf) -> Self {
+        *self.state_path.write() = Some(path.clone());
+        self.restore_runtime_state(&path);
+        self
+    }
+
+    pub fn persist_runtime_state(&self) {
+        let path = match self.state_path.read().clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let now = unix_now();
+        let mut accounts = Vec::new();
+        for entry in self.slots.iter() {
+            let id = entry.key().clone();
+            let remaining = entry.value().cooldown_remaining().map(|d| d.as_secs()).unwrap_or(0);
+            let stats = self.stats.get(&id);
+            accounts.push(PersistedAccountState {
+                id,
+                cooldown_remaining_secs: remaining,
+                requests: stats.as_ref().map(|s| s.requests.load(Ordering::Relaxed)).unwrap_or(0),
+                errors: stats.as_ref().map(|s| s.errors.load(Ordering::Relaxed)).unwrap_or(0),
+                consecutive_errors: stats.as_ref().map(|s| s.consecutive_errors()).unwrap_or(0),
+                auto_disabled_count: stats
+                    .as_ref()
+                    .map(|s| s.auto_disabled_count.load(Ordering::Relaxed))
+                    .unwrap_or(0),
+                saved_at: now,
+            });
+        }
+        let blob = PersistedPoolState { saved_at: now, accounts };
+        if let Ok(json) = serde_json::to_string_pretty(&blob) {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+
+    fn restore_runtime_state(&self, path: &Path) {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(blob) = serde_json::from_str::<PersistedPoolState>(&raw) else {
+            tracing::warn!(event = "pool_state_restore", "account-state.json malformed, ignoring");
+            return;
+        };
+        let mut restored = 0usize;
+        for rec in blob.accounts {
+            if !self.slots.contains_key(&rec.id) {
+                continue;
+            }
+            if rec.cooldown_remaining_secs > 0 {
+                if let Some(slot) = self.slots.get(&rec.id) {
+                    slot.set_cooldown(rec.cooldown_remaining_secs.min(300));
+                }
+            }
+            if let Some(stats) = self.stats.get(&rec.id) {
+                stats.requests.store(rec.requests, Ordering::Relaxed);
+                stats.errors.store(rec.errors, Ordering::Relaxed);
+                stats.consecutive_errors.store(rec.consecutive_errors, Ordering::Relaxed);
+                stats.auto_disabled_count.store(rec.auto_disabled_count, Ordering::Relaxed);
+            }
+            restored += 1;
+        }
+        if restored > 0 {
+            self.rebuild_available_ids();
+            self.bump_version();
+            tracing::info!(event = "pool_state_restore", restored, "account runtime state restored");
+        }
     }
 
     /// 获取额度快照
@@ -981,6 +1079,30 @@ impl AccountPool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPoolState {
+    saved_at: f64,
+    accounts: Vec<PersistedAccountState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedAccountState {
+    id: String,
+    cooldown_remaining_secs: u64,
+    requests: u64,
+    errors: u64,
+    consecutive_errors: u64,
+    auto_disabled_count: u64,
+    saved_at: f64,
+}
+
+fn unix_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,6 +1135,48 @@ mod tests {
         let (a1, _p1) = pool.acquire_by_session(Some("sess1")).await.unwrap();
         let (a2, _p2) = pool.acquire_by_session(Some("sess1")).await.unwrap();
         assert_eq!(a1.id, a2.id);
+    }
+
+    #[test]
+    fn persist_runtime_state_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("cfp-state-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("account-state.json");
+        let pool = AccountPool::new(vec![acc("a", true)], 1);
+        pool.release("a", true, 40);
+        *pool.state_path.write() = Some(path.clone());
+        pool.persist_runtime_state();
+        let pool2 = AccountPool::new(vec![acc("a", true)], 1).with_state_file(path);
+        assert!(pool2.health_score("a").unwrap().cooldown_active);
+        assert!(pool2.health_score("a").unwrap().consecutive_errors >= 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_quota_keeps_last_good() {
+        let pool = AccountPool::new(vec![acc("a", true)], 1);
+        pool.set_quota(
+            "a",
+            QuotaSnapshot {
+                plan: Some("pro".into()),
+                usage_percent: Some(12.0),
+                has_available_usage: Some(true),
+                error: None,
+                ..Default::default()
+            },
+        );
+        pool.set_quota(
+            "a",
+            QuotaSnapshot {
+                error: Some("timeout".into()),
+                ..Default::default()
+            },
+        );
+        let q = pool.get_quota("a").unwrap();
+        assert_eq!(q.plan.as_deref(), Some("pro"));
+        assert_eq!(q.usage_percent, Some(12.0));
+        assert_eq!(q.error.as_deref(), Some("timeout"));
+        assert!(q.from_cache);
     }
 
     #[tokio::test]
