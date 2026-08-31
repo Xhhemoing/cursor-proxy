@@ -131,15 +131,34 @@ fn now_unix() -> f64 {
 
 /// 去掉上游套餐标签里的 Grok / SuperGrok 品牌字样, 只保留档位 (对客户端和面板都不暴露渠道).
 pub fn sanitize_plan_label(raw: &str) -> String {
-    let mut s = raw.to_string();
-    for pat in ["SuperGrok", "Super Grok", "super grok", "supergrok", "Grok", "grok", "GROK", "xAI", "x.ai"] {
-        s = s.replace(pat, " ");
+    // 大小写无关地抹掉品牌 token; 兼容空格/连字符/下划线分隔的 slug (如 "supergrok-heavy").
+    let lower = raw.to_lowercase();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    let bytes = lower.as_bytes();
+    let brands = ["supergrok", "super grok", "super-grok", "super_grok", "grok", "xai", "x.ai"];
+    'outer: while i < bytes.len() {
+        for b in brands {
+            if lower[i..].starts_with(b) {
+                out.push(' ');
+                i += b.len();
+                continue 'outer;
+            }
+        }
+        out.push(raw[i..].chars().next().unwrap());
+        i += raw[i..].chars().next().unwrap().len_utf8();
     }
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if s.is_empty() {
+    // 归一化分隔符, 去掉品牌抹除后残留的边缘连字符/下划线
+    let cleaned: Vec<String> = out
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '_')
+        .map(|w| w.trim_matches(|c: char| c == '-' || c == '_'))
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect();
+    if cleaned.is_empty() {
         "Pro".to_string()
     } else {
-        s
+        cleaned.join(" ")
     }
 }
 
@@ -181,14 +200,14 @@ pub fn parse_quota(sand: &Value, period: &Value) -> QuotaSnapshot {
                 out.plan = plan
                     .get("planName")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .map(sanitize_plan_label);
             }
         }
         if out.plan.is_none() {
             out.plan = obj
                 .get("planName")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(sanitize_plan_label);
         }
         out.billing_cycle_start_at = obj.get("billingCycleStart").and_then(as_unix);
         out.billing_cycle_end_at = obj.get("billingCycleEnd").and_then(as_unix);
@@ -453,10 +472,14 @@ mod tests {
     #[test]
     fn plan_label_hides_grok() {
         assert_eq!(super::sanitize_plan_label("SuperGrok Heavy"), "Heavy");
+        assert_eq!(super::sanitize_plan_label("supergrok-heavy"), "heavy");
+        assert_eq!(super::sanitize_plan_label("super_grok_pro"), "pro");
         assert_eq!(super::sanitize_plan_label("SuperGrok"), "Pro");
         assert_eq!(super::sanitize_plan_label("Grok Pro"), "Pro");
         assert_eq!(super::sanitize_plan_label("Ultra Plan"), "Ultra Plan");
-        assert!(!super::sanitize_plan_label("SuperGrok Heavy").to_lowercase().contains("grok"));
+        for l in ["SuperGrok Heavy", "supergrok-heavy", "SUPERGROK_HEAVY", "grok", "xAI Grok"] {
+            assert!(!super::sanitize_plan_label(l).to_lowercase().contains("grok"));
+        }
     }
 
     use super::*;
