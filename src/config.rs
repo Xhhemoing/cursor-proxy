@@ -166,7 +166,7 @@ fn default_log_file() -> String {
     "proxy.log".into()
 }
 fn default_model() -> String {
-    "kimi-k3".into()
+    "kimi-k3-max".into()
 }
 fn default_max_concurrency() -> usize {
     5

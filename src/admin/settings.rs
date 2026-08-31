@@ -21,14 +21,28 @@ pub struct LogsQuery {
     pub status: Option<u16>,
     pub stream: Option<bool>,
     pub client_ip: Option<String>,
+    /// 增量游标: 只返回 ID > after 的日志
+    pub after: Option<u64>,
 }
 
-/// GET /admin/api/logs — 最近日志 (新→旧)，支持筛选
+/// GET /admin/api/logs — 最近日志 (新→旧)，支持筛选 + 增量游标
 pub async fn api_logs_recent(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LogsQuery>,
 ) -> impl IntoResponse {
     let n = q.n.unwrap_or(50).clamp(1, 500);
+    // 增量模式: 只取新日志
+    if let Some(after) = q.after {
+        let logs = state.log_buffer.query_after(after, n);
+        let max_id = state.log_buffer.max_id();
+        return Json(json!({
+            "logs": logs,
+            "count": logs.len(),
+            "max_id": max_id,
+            "incremental": true,
+        }));
+    }
+    // 全量模式
     let mut filter = crate::logbuf::LogFilter::new();
     filter.limit = n;
     filter.model = q.model;
@@ -37,9 +51,12 @@ pub async fn api_logs_recent(
     filter.stream = q.stream;
     filter.client_ip = q.client_ip;
     let logs = state.log_buffer.query(&filter);
+    let max_id = state.log_buffer.max_id();
     Json(json!({
         "logs": logs,
         "count": logs.len(),
+        "max_id": max_id,
+        "incremental": false,
     }))
 }
 

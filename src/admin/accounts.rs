@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::config::{self, Account};
 use crate::AppState;
 
-/// GET /admin/api/pool — 号池统计（支持 q/filter/sort/page，默认不全量返回账号）
+/// GET /admin/api/pool — 号池统计（支持 q/filter/sort/page + version 缓存验证）
 #[derive(Deserialize, Default)]
 pub struct PoolQuery {
     pub q: Option<String>,
@@ -24,25 +24,37 @@ pub struct PoolQuery {
     pub proxy_id: Option<String>,
     /// 1 = 兼容旧面板，返回全部账号
     pub all: Option<u8>,
+    /// 客户端已知数据版本号; 匹配时返回 304
+    pub version: Option<u64>,
 }
 
 pub async fn api_pool_stats(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PoolQuery>,
-) -> impl IntoResponse {
+) -> Response {
     if q.all == Some(1) && q.page.is_none() {
-        return Json(state.pool.stats());
+        return Json(state.pool.stats()).into_response();
     }
-    let mut stats = state.pool.query_accounts(
+    let client_version = q.version.unwrap_or(0);
+    let (version, result) = state.pool.query_accounts_cached(
         q.q.as_deref().unwrap_or(""),
         q.filter.as_deref().unwrap_or("all"),
         q.sort.as_deref().unwrap_or("attention"),
         q.page.unwrap_or(1),
         q.page_size.unwrap_or(50),
         q.proxy_id.as_deref().unwrap_or(""),
+        client_version,
     );
-    enrich_proxy_bindings(&state, &mut stats);
-    Json(stats)
+    match result {
+        None => (StatusCode::NOT_MODIFIED, Json(json!({"version": version}))).into_response(),
+        Some(mut stats) => {
+            enrich_proxy_bindings(&state, &mut stats);
+            if let Some(obj) = stats.as_object_mut() {
+                obj.insert("version".into(), json!(version));
+            }
+            Json(stats).into_response()
+        }
+    }
 }
 
 fn enrich_proxy_bindings(state: &AppState, stats: &mut serde_json::Value) {
@@ -315,6 +327,10 @@ pub async fn api_account_probe_all(State(state): State<Arc<AppState>>) -> impl I
                     .probe_quota(&acc.access_token, &acc.machine_id)
                     .await;
                 state.pool.set_quota(&id, snap.clone());
+                // 持久化
+                if let Err(e) = state.quota_store.save(&id, &snap).await {
+                    tracing::warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                }
                 json!({"id": id, "quota": snap})
             }
         })
@@ -322,6 +338,47 @@ pub async fn api_account_probe_all(State(state): State<Arc<AppState>>) -> impl I
         .collect()
         .await;
     Json(json!({"status": "ok", "probed": out.len(), "results": out}))
+}
+
+/// GET /admin/api/quota/history/:id — 账号额度历史
+pub async fn api_quota_history(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let limit = q
+        .get("n")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 500);
+    match state.quota_store.history(&id, limit).await {
+        Ok(history) => Json(json!({
+            "account_id": id,
+            "count": history.len(),
+            "history": history,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /admin/api/quota/refresh — 手动触发全量额度刷新
+pub async fn api_quota_refresh(State(state): State<Arc<AppState>>) -> Response {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let store = state.quota_store.clone();
+        let config = crate::quota::AutoRefreshConfig {
+            interval_secs: 0, // 立即执行
+            concurrency: 10,
+            enabled: true,
+        };
+        crate::quota::auto_refresh_loop(state, store, config).await;
+    });
+    Json(json!({"status": "ok", "message": "quota refresh triggered"})).into_response()
 }
 
 /// POST /admin/api/accounts/import — 批量导入账号（JSON 数组 / CSV / 纯文本粘贴）

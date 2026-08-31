@@ -12,6 +12,8 @@ pub struct LogBuffer {
     capacity: usize,
     /// 持久化通道: 请求线程只做一次无锁 send, 写盘在专用线程
     persist_tx: Option<mpsc::Sender<String>>,
+    /// 单调递增日志 ID (用于增量查询游标)
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl LogBuffer {
@@ -20,6 +22,7 @@ impl LogBuffer {
             entries: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
             persist_tx: None,
+            next_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -33,6 +36,7 @@ impl LogBuffer {
             entries: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
             persist_tx: Some(tx),
+            next_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -42,6 +46,9 @@ impl LogBuffer {
             // 写线程挂了也不能影响请求
             let _ = tx.send(line);
         }
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut entry = entry;
+        entry["_id"] = serde_json::json!(id);
         let mut entries = self.entries.lock().unwrap();
         if entries.len() >= self.capacity {
             entries.pop_front();
@@ -69,6 +76,23 @@ impl LogBuffer {
             .take(filter.limit)
             .cloned()
             .collect()
+    }
+
+    /// 增量查询: 只返回 ID > after_id 的新日志
+    pub fn query_after(&self, after_id: u64, limit: usize) -> Vec<serde_json::Value> {
+        let entries = self.entries.lock().unwrap();
+        entries
+            .iter()
+            .rev()
+            .filter(|e| e.get("_id").and_then(|v| v.as_u64()).unwrap_or(0) > after_id)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// 当前最大日志 ID
+    pub fn max_id(&self) -> u64 {
+        self.next_id.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1)
     }
 
     pub fn len(&self) -> usize {

@@ -36,7 +36,7 @@ uuid = { version = "1", features = ["v4", "v5"] }
 base64 = "0.22"
 bytes = "1"
 futures-util = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "1"

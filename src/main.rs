@@ -23,6 +23,7 @@ mod billing;
 mod ratelimit;
 mod proxypool;
 pub mod error;
+mod health;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -67,6 +68,10 @@ pub struct AppState {
     cursor_factory: CursorFactory,
     /// 每 API Key 并发信号量 (key 字符串 → Semaphore)
     key_semaphores: dashmap::DashMap<String, std::sync::Arc<tokio::sync::Semaphore>>,
+    /// 管理面板 SSE 事件总线
+    event_bus: admin::events::EventBus,
+    /// 额度历史持久化存储
+    quota_store: std::sync::Arc<quota::QuotaStore>,
 }
 
 /// 按出口代理缓存 CursorClient. 直连共用一个, 每个 proxy_id 一个.
@@ -206,6 +211,10 @@ async fn main() -> anyhow::Result<()> {
         proxies,
         cursor_factory,
         key_semaphores: dashmap::DashMap::new(),
+        event_bus: admin::events::EventBus::new(),
+        quota_store: std::sync::Arc::new(quota::QuotaStore::open(
+            &std::path::Path::new(&config.billing.db_file).with_file_name("quota.db")
+        )?),
     });
     info!(
         event = "billing_init",
@@ -218,6 +227,45 @@ async fn main() -> anyhow::Result<()> {
 
     // 恢复历史用量
     state.key_usage.load_from_disk();
+
+    // 恢复额度缓存 (重启后立即可见)
+    {
+        let state = state.clone();
+        let store = state.quota_store.clone();
+        tokio::spawn(async move {
+            match store.load_latest().await {
+                Ok(latest) => {
+                    let n = latest.len();
+                    for (id, snap) in latest {
+                        state.pool.set_quota(&id, snap);
+                    }
+                    info!(event = "quota_cache_restore", count = n, "quota cache restored from disk");
+                }
+                Err(e) => {
+                    warn!(event = "quota_cache_restore", error = %e, "failed to restore quota cache");
+                }
+            }
+        });
+    }
+
+    // 额度自动刷新 (每 5 分钟, 可配置)
+    {
+        let state = state.clone();
+        let store = state.quota_store.clone();
+        let refresh_config = quota::AutoRefreshConfig {
+            interval_secs: std::env::var("CFP_QUOTA_REFRESH_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300),
+            concurrency: 10,
+            enabled: std::env::var("CFP_QUOTA_REFRESH_ENABLED")
+                .map(|s| s != "0" && s != "false")
+                .unwrap_or(true),
+        };
+        tokio::spawn(async move {
+            quota::auto_refresh_loop(state, store, refresh_config).await;
+        });
+    }
 
     // 定时落盘用量 (每 30s)
     {
@@ -313,8 +361,12 @@ async fn main() -> anyhow::Result<()> {
                     let has_quota = snap.has_available_usage == Some(true);
                     let error = snap.error.is_some();
                     
-                    state.pool.set_quota(&id, snap);
-                    
+                    state.pool.set_quota(&id, snap.clone());
+                    // 持久化到历史
+                    if let Err(e) = state.quota_store.save(&id, &snap).await {
+                        warn!(event = "quota_persist", account = %id, error = %e, "failed to save quota");
+                    }
+
                     if has_quota && !error {
                         // 探测成功且额度可用 → 清除冷却
                         state.pool.clear_cooldown(&id);
@@ -326,6 +378,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        });
+    }
+
+    // SSE 池状态广播 (每 2s, 替代前端轮询)
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            admin::events::pool_broadcast_loop(state).await;
         });
     }
 
@@ -365,6 +425,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/billing/tags", get(admin::api_billing_tags))
         .route("/admin/api/billing/stats", get(admin::api_billing_stats))
         .route("/admin/api/billing/pricing", get(admin::api_pricing_get).post(admin::api_pricing_patch))
+        .route("/admin/api/events", get(admin::api_events))
+        .route("/admin/api/quota/history/:id", get(admin::api_quota_history))
+        .route("/admin/api/quota/refresh", post(admin::api_quota_refresh))
+        .route("/admin/api/health/diagnose", get(admin::api_health_diagnose))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth_mw,

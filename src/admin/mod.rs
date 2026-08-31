@@ -7,6 +7,8 @@ pub mod keys;
 pub mod settings;
 pub mod billing;
 pub mod proxies;
+pub mod events;
+pub mod health_api;
 
 use axum::response::{Html, IntoResponse};
 
@@ -21,3 +23,5 @@ pub use keys::*;
 pub use settings::*;
 pub use billing::*;
 pub use proxies::*;
+pub use events::*;
+pub use health_api::*;

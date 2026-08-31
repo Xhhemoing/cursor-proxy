@@ -77,6 +77,10 @@ pub struct AccountPool {
     max_concurrency: usize,
     /// 全部繁忙时最长排队等待; 0 = 不排队
     acquire_wait: Duration,
+    /// 数据版本号: 任何账号状态变更时递增, 用于缓存有效性判断
+    version: Arc<AtomicU64>,
+    /// 缓存的查询结果 (version, json)
+    query_cache: Arc<parking_lot::RwLock<Option<(u64, serde_json::Value)>>>,
 }
 
 #[derive(Debug, Default)]
@@ -161,6 +165,8 @@ impl AccountPool {
             sessions: Arc::new(DashMap::new()),
             max_concurrency,
             acquire_wait: Duration::ZERO,
+            version: Arc::new(AtomicU64::new(0)),
+            query_cache: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -424,6 +430,7 @@ impl AccountPool {
                 slot.set_cooldown(secs);
             }
         }
+        self.bump_version();
     }
 
     /// 动态冷却: 错误率越高冷却越长，上限 5 分钟
@@ -461,6 +468,7 @@ impl AccountPool {
                 stats.auto_disabled_count.fetch_add(1, Ordering::Relaxed);
                 stats.consecutive_errors.store(0, Ordering::Relaxed);
             }
+            self.bump_version();
             true
         } else {
             false
@@ -472,6 +480,8 @@ impl AccountPool {
         self.disabled.get_mut(account_id).map(|mut v| {
             let old = *v;
             *v = !enabled;
+            drop(v);
+            self.bump_version();
             old
         })
     }
@@ -479,7 +489,10 @@ impl AccountPool {
     pub fn toggle_account(&self, account_id: &str) -> Option<bool> {
         self.disabled.get_mut(account_id).map(|mut v| {
             *v = !*v;
-            !*v
+            let new = !*v;
+            drop(v);
+            self.bump_version();
+            new
         })
     }
 
@@ -491,6 +504,7 @@ impl AccountPool {
     pub fn clear_cooldown(&self, account_id: &str) -> bool {
         if let Some(slot) = self.slots.get(account_id) {
             slot.clear_cooldown();
+            self.bump_version();
             true
         } else {
             false
@@ -500,11 +514,57 @@ impl AccountPool {
     /// 设置额度快照
     pub fn set_quota(&self, account_id: &str, snap: QuotaSnapshot) {
         self.quotas.insert(account_id.to_string(), snap);
+        self.bump_version();
     }
 
     /// 获取额度快照
     pub fn get_quota(&self, account_id: &str) -> Option<QuotaSnapshot> {
         self.quotas.get(account_id).map(|r| r.clone())
+    }
+
+    /// 递增数据版本号 (任何状态变更时调用)
+    pub fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 当前数据版本号
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// 带缓存的账号查询: 版本号未变时直接返回缓存
+    pub fn query_accounts_cached(
+        &self,
+        q: &str,
+        filter: &str,
+        sort: &str,
+        page: usize,
+        page_size: usize,
+        proxy_id: &str,
+        client_version: u64,
+    ) -> (u64, Option<serde_json::Value>) {
+        let current_version = self.version();
+        // 客户端版本已是最新 → 304 Not Modified
+        if client_version == current_version && client_version > 0 {
+            return (current_version, None);
+        }
+        // 检查缓存
+        {
+            let cache = self.query_cache.read();
+            if let Some((v, ref json)) = *cache {
+                if v == current_version {
+                    return (current_version, Some(json.clone()));
+                }
+            }
+        }
+        // 重新构建
+        let result = self.query_accounts(q, filter, sort, page, page_size, proxy_id);
+        // 只缓存无搜索/过滤的默认视图 (最常见场景)
+        if q.is_empty() && filter == "all" && sort == "attention" && page == 1 && proxy_id.is_empty() {
+            let mut cache = self.query_cache.write();
+            *cache = Some((current_version, result.clone()));
+        }
+        (current_version, Some(result))
     }
 
     /// 账号健康评分

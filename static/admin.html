@@ -215,6 +215,16 @@
     .acard .foot button.ghost { border-color: transparent; color: var(--ink-2); }
     .acard .chk { position: absolute; left: 18px; bottom: 18px; }
 
+    /* 额度更新动画 + 进度条 */
+    .quota-flash { animation: quotaFlash 1s ease; }
+    @keyframes quotaFlash { 0% { background: var(--ok-bg); } 100% { background: transparent; } }
+    td.quota-cell { transition: background .3s; }
+    .quota-bar { height: 4px; background: var(--bg-3); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+    .quota-bar-fill { height: 100%; border-radius: 2px; transition: width .3s; }
+    .quota-bar-fill.ok { background: var(--ok); }
+    .quota-bar-fill.warn { background: var(--warn); }
+    .quota-bar-fill.bad { background: var(--bad); }
+
     /* 日志 */
     .log { font: 12px/1.4 var(--mono); max-height: none; overflow: auto; flex: 1; min-height: 0; }
     .log div { display: grid; grid-template-columns: 150px 48px 160px 110px 1fr; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
@@ -280,6 +290,7 @@
         <a href="#billing" data-page="billing">计费账单</a>
         <div class="grp">观测</div>
         <a href="#overview" data-page="overview">概览</a>
+        <a href="#health" data-page="health">健康诊断<span class="badge" id="nav-health-badge"></span></a>
         <a href="#logs" data-page="logs">请求日志</a>
         <div class="grp">系统</div>
         <a href="#settings" data-page="settings">运行参数</a>
@@ -740,6 +751,28 @@
         </div>
         <div class="panel fill" style="display:flex;flex-direction:column;flex:1;min-height:0;margin-bottom:0"><div class="log" id="log-body"></div></div>
       </section>
+
+      <!-- ================= 健康诊断 ================= -->
+      <section class="page page-fill" id="page-health">
+        <div class="page-head">
+          <div><h2>健康诊断</h2><p>智能检测 IP / 账号 / 调用状态 · 分级反馈 + 处理建议</p></div>
+          <div class="actions">
+            <button type="button" class="ghost" id="health-refresh">重新诊断</button>
+          </div>
+        </div>
+        <div class="stats" id="health-stats">
+          <div class="stat"><div class="l">健康分</div><div class="v" id="health-score">–</div><div class="s">0-100</div></div>
+          <div class="stat"><div class="l">严重</div><div class="v bad" id="health-critical">–</div><div class="s">需立即处理</div></div>
+          <div class="stat"><div class="l">警告</div><div class="v warn" id="health-warning">–</div><div class="s">建议关注</div></div>
+          <div class="stat"><div class="l">提示</div><div class="v" id="health-info">–</div><div class="s">优化建议</div></div>
+        </div>
+        <div class="panel fill" id="health-panel">
+          <div class="ph"><h3>诊断结果</h3><p id="health-time">尚未诊断</p></div>
+          <div id="health-findings" style="padding:12px;overflow-y:auto;flex:1;min-height:0">
+            <div style="color:var(--muted);text-align:center;padding:40px">点击「重新诊断」开始检测</div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
   <script>
@@ -784,6 +817,14 @@
       if (q.has_available_usage === false) bits.push('无余量');
       if (q.next_reset_at) bits.push('重置 ' + new Date(q.next_reset_at * 1000).toISOString().slice(0, 16).replace('T', ' '));
       if (q.error) bits.push('err ' + q.error);
+      // 缓存标记 + 时间
+      if (q.from_cache && q.cached_at) {
+        const age = Math.round((Date.now() / 1000 - q.cached_at) / 60);
+        bits.push('缓存 ' + (age < 1 ? '刚刚' : age + '分钟前'));
+      } else if (q.checked_at) {
+        const age = Math.round((Date.now() / 1000 - q.checked_at) / 60);
+        bits.push(age < 1 ? '刚刚' : age + '分钟前');
+      }
       return bits.join(' · ') || '已探测无数据';
     }
     // 分页状态
@@ -791,6 +832,11 @@
     const ACC_PAGE_SIZE = 50;
     let accView = 'list';
     let accQueryBusy = false;
+    // 缓存状态
+    let lastPoolVersion = 0;
+    let lastPoolData = null;
+    let lastLogId = 0;
+    let lastLogs = [];
     try { accView = localStorage.getItem('cfp.accView') || 'list'; } catch (e) {}
     function applyAccView() {
       document.getElementById('acc-cards').style.display = accView === 'card' ? 'grid' : 'none';
@@ -1220,13 +1266,35 @@
     }
     async function loadAll() {
       loadRpm();
-      const [pool, settings, keys, logs, proxies] = await Promise.all([
-        api('/admin/api/pool?' + poolQuery()),
+      // 号池: 带版本号缓存验证
+      const poolParams = poolQuery();
+      const poolUrl = '/admin/api/pool?' + poolParams + (lastPoolVersion > 0 ? '&version=' + lastPoolVersion : '');
+      const [poolResp, settings, keys, logs, proxies] = await Promise.all([
+        api(poolUrl).catch((e) => {
+          if (e.message && e.message.includes('304')) return { __notModified: true };
+          throw e;
+        }),
         api('/admin/api/settings'),
         api('/admin/api/keys'),
-        api('/admin/api/logs?n=40'),
+        api('/admin/api/logs?n=40' + (lastLogId > 0 ? '&after=' + lastLogId : '')),
         api('/admin/api/proxies').catch(() => ({ nodes: [], total: 0, healthy: 0, unhealthy: 0, bound_accounts: 0 })),
       ]);
+      // 处理 304 Not Modified
+      let pool = poolResp;
+      if (poolResp.__notModified) {
+        pool = lastPoolData; // 复用上次数据
+      } else {
+        lastPoolVersion = pool.version || 0;
+        lastPoolData = pool;
+      }
+      // 日志增量合并
+      let allLogs = logs.logs || [];
+      if (logs.incremental && lastLogId > 0) {
+        // 增量: 新日志 prepend 到现有列表
+        allLogs = [...allLogs, ...lastLogs].slice(0, 40);
+      }
+      if (logs.max_id) lastLogId = logs.max_id;
+      lastLogs = allLogs;
       document.getElementById('k-total').textContent = pool.total_accounts;
       document.getElementById('k-avail').textContent = pool.available;
       document.getElementById('k-inflight').textContent = pool.inflight;
@@ -1239,7 +1307,7 @@
       document.getElementById('f-conc').value = settings.max_concurrency_per_account;
       renderAccounts(pool);
       renderKeys(keys);
-      renderLogs(logs.logs);
+      renderLogs(allLogs);
       renderProxies(proxies);
       document.getElementById('nav-pool-badge').textContent = pool.available + '/' + pool.total_accounts;
       document.getElementById('k-cooling').textContent = String(pool.cooling || 0);
@@ -1277,7 +1345,7 @@
       document.getElementById('ov-cur').textContent = r.currency ? '(' + r.currency + ')' : '';
     }
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'settings', 'logs'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'settings', 'logs', 'health'];
     function showPage(name) {
       // 支持 #billing/records 直达 tab
       const [base, sub] = (name || '').split('/');
@@ -1308,6 +1376,59 @@
       applyTheme(t);
     })();
     document.getElementById('ov-refresh').addEventListener('click', () => loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); }));
+    document.getElementById('health-refresh').addEventListener('click', () => loadHealth().catch((e) => toast('health-time', e.message, true)));
+    async function loadHealth() {
+      const data = await api('/admin/api/health/diagnose');
+      document.getElementById('health-score').textContent = data.score;
+      document.getElementById('health-critical').textContent = data.summary.critical_count;
+      document.getElementById('health-warning').textContent = data.summary.warning_count;
+      document.getElementById('health-info').textContent = data.summary.info_count;
+      document.getElementById('health-time').textContent = '诊断时间: ' + new Date(data.generated_at).toLocaleString();
+      const badge = document.getElementById('nav-health-badge');
+      if (data.summary.critical_count > 0) { badge.textContent = data.summary.critical_count; badge.style.background = 'var(--bad)'; }
+      else if (data.summary.warning_count > 0) { badge.textContent = data.summary.warning_count; badge.style.background = 'var(--warn)'; }
+      else { badge.textContent = ''; }
+      const box = document.getElementById('health-findings');
+      if (!data.findings.length) {
+        box.innerHTML = '<div style="color:var(--ok);text-align:center;padding:40px;font-size:16px">✓ 所有检查通过，系统运行正常</div>';
+        return;
+      }
+      // XSS-safe: 所有用户可控文本都经 esc() 转义，action.path 来自后端固定路由白名单
+      box.innerHTML = data.findings.map((f) => {
+        const sevColor = { critical: 'var(--bad)', warning: 'var(--warn)', info: 'var(--accent)' }[f.severity] || 'var(--muted)';
+        const sevLabel = { critical: '严重', warning: '警告', info: '提示' }[f.severity] || f.severity;
+        const catLabel = { ip: 'IP/代理', account: '账号', call: '调用', config: '配置', system: '系统' }[f.category] || f.category;
+        let actionBtn = '';
+        if (f.action && f.action.path) {
+          actionBtn = '<button type="button" class="ghost sm" style="margin-left:8px" onclick="healthAction(this)" data-method="' + esc(f.action.method || 'POST') + '" data-path="' + esc(f.action.path) + '" data-body="' + (f.action.body ? esc(JSON.stringify(f.action.body)) : '') + '">' + esc(f.action.label || '执行') + '</button>';
+        }
+        return '<div style="border-left:3px solid ' + sevColor + ';padding:12px 16px;margin-bottom:12px;background:var(--panel);border-radius:0 8px 8px 0">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+            '<span style="color:' + sevColor + ';font-weight:600;font-size:12px;text-transform:uppercase">' + sevLabel + '</span>' +
+            '<span style="color:var(--muted);font-size:12px">' + catLabel + '</span>' +
+          '</div>' +
+          '<div style="margin-bottom:8px">' + esc(f.message) + '</div>' +
+          (f.suggestion ? '<div style="color:var(--muted);font-size:13px;margin-bottom:8px">建议: ' + esc(f.suggestion) + '</div>' : '') +
+          '<div style="display:flex;align-items:center">' + actionBtn + '</div>' +
+        '</div>';
+      }).join('');
+    }
+    window.healthAction = async function(btn) {
+      const method = btn.dataset.method || 'POST';
+      const path = btn.dataset.path;
+      const bodyRaw = btn.dataset.body;
+      const body = bodyRaw ? JSON.parse(bodyRaw) : undefined;
+      btn.disabled = true; btn.textContent = '执行中…';
+      try {
+        await api(path, { method, body: body ? JSON.stringify(body) : undefined });
+        btn.textContent = '✓ 已执行'; btn.style.color = 'var(--ok)';
+        setTimeout(() => loadHealth().catch(() => {}), 1500);
+      } catch (e) {
+        btn.textContent = '✗ 失败'; btn.style.color = 'var(--bad)';
+        toast('health-time', e.message, true);
+      }
+    };
+    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
     document.getElementById('settings-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
@@ -2007,9 +2128,172 @@
         } else loadAll().catch(() => {});
       });
     });
+    // ---------- 智能轮询 + SSE 实时推送 ----------
+    let pollTimer = null;
+    let pollInterval = 10000; // 轮询降为 10s 兜底 (SSE 为主)
+    let eventSource = null;
+    let sseConnected = false;
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => {
+        if (!document.hidden && !sseConnected) loadAll().catch(() => setLive(false));
+      }, pollInterval);
+    }
+    function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+    function startSSE() {
+      if (eventSource) eventSource.close();
+      const q = new URLSearchParams(location.search).get('token');
+      const url = '/admin/api/events' + (q ? '?token=' + encodeURIComponent(q) : '');
+      eventSource = new EventSource(url);
+
+      eventSource.addEventListener('pool_update', (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          updatePoolFromEvent(ev.data);
+          setLive(true);
+          sseConnected = true;
+        } catch (err) { console.error('SSE pool_update parse error', err); }
+      });
+
+      eventSource.addEventListener('log', (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          prependLog(ev.data);
+        } catch (err) { console.error('SSE log parse error', err); }
+      });
+
+      eventSource.addEventListener('config', (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          updateConfigFromEvent(ev.data);
+        } catch (err) { console.error('SSE config parse error', err); }
+      });
+
+      eventSource.addEventListener('quota_update', (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          updateQuotaFromEvent(ev.data);
+        } catch (err) { console.error('SSE quota_update parse error', err); }
+      });
+
+      eventSource.onerror = () => {
+        sseConnected = false;
+        setLive(false);
+        // 5s 后重连
+        setTimeout(() => { if (!document.hidden) startSSE(); }, 5000);
+      };
+
+      eventSource.onopen = () => {
+        sseConnected = true;
+        setLive(true);
+      };
+    }
+
+    function stopSSE() {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      sseConnected = false;
+    }
+
+    // 从 SSE 事件更新池数据 (轻量, 不重新渲染整个列表)
+    function updatePoolFromEvent(data) {
+      if (!data) return;
+      document.getElementById('k-total').textContent = data.total_accounts ?? '—';
+      document.getElementById('k-avail').textContent = data.available ?? '—';
+      document.getElementById('k-inflight').textContent = data.inflight ?? '—';
+      document.getElementById('k-cooling').textContent = String(data.cooling || 0);
+      document.getElementById('nav-pool-badge').textContent = (data.available ?? 0) + '/' + (data.total_accounts ?? 0);
+      // 如果当前在 pool 页面, 触发一次完整刷新以更新表格
+      const poolPage = document.getElementById('page-pool');
+      if (poolPage && poolPage.classList.contains('active')) {
+        loadAll().catch(() => {});
+      }
+    }
+
+    function updateConfigFromEvent(data) {
+      if (!data) return;
+      if (data.default_model) document.getElementById('k-model').textContent = data.default_model;
+      if (data.default_model) document.getElementById('f-model').value = data.default_model;
+      if (data.timeout_s) document.getElementById('f-timeout').value = data.timeout_s;
+      if (data.max_concurrency_per_account) document.getElementById('f-conc').value = data.max_concurrency_per_account;
+    }
+
+    // SSE 额度更新: 更新对应账号行的额度显示
+    function updateQuotaFromEvent(data) {
+      if (!data || !data.account_id || !data.quota) return;
+      const accId = data.account_id;
+      const quota = data.quota;
+      // 更新表格中的额度单元格 (如果当前在 pool 页面)
+      const rows = document.querySelectorAll('#acc-table tbody tr');
+      rows.forEach((row) => {
+        const idCell = row.querySelector('td:first-child');
+        if (idCell && idCell.textContent.trim() === accId) {
+          const quotaCell = row.querySelector('td.quota-cell');
+          if (quotaCell) {
+            quotaCell.textContent = fmtQuota(quota);
+            quotaCell.classList.add('quota-flash');
+            setTimeout(() => quotaCell.classList.remove('quota-flash'), 1000);
+          }
+        }
+      });
+      // 更新卡片视图
+      const cards = document.querySelectorAll('.acard');
+      cards.forEach((card) => {
+        const idEl = card.querySelector('.id');
+        if (idEl && idEl.textContent.trim() === accId) {
+          const metaEl = card.querySelector('.meta');
+          if (metaEl) {
+            metaEl.textContent = fmtQuota(quota);
+            metaEl.classList.add('quota-flash');
+            setTimeout(() => metaEl.classList.remove('quota-flash'), 1000);
+          }
+        }
+      });
+    }
+
+    // 日志 prepend (新日志插入顶部, 保持最多 40 条)
+    function prependLog(entry) {
+      // 主日志页 + 概览页日志
+      ['log-body', 'log-body-ov'].forEach((id) => {
+        const box = document.getElementById(id);
+        if (!box) return;
+        // 移除 "还没有请求" 空状态
+        const empty = box.querySelector('.empty');
+        if (empty) empty.remove();
+        const row = document.createElement('div');
+        const d = entry.ts ? new Date(entry.ts) : null;
+        const p2 = (n) => String(n).padStart(2, '0');
+        row.appendChild(el('span', null, d && !isNaN(d) ? (localDate(d) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds())) : String(entry.ts || '')));
+        row.appendChild(el('span', { class: entry.status >= 400 ? 'bad' : 'ok' }, String(entry.status || '')));
+        row.appendChild(el('span', null, String(entry.model || '')));
+        row.appendChild(el('span', null, String(entry.account || '')));
+        const detail = (entry.stream ? 'SSE ' : '') + (entry.total_tokens || 0) + ' tok  ' + (entry.latency_ms || 0) + ' ms';
+        row.appendChild(el('span', null, detail));
+        box.insertBefore(row, box.firstChild);
+        // 保持数量: log-body 40条, log-body-ov 12条
+        const max = id === 'log-body-ov' ? 12 : 40;
+        while (box.children.length > max) box.removeChild(box.lastChild);
+      });
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopPolling();
+        stopSSE();
+      } else {
+        startPolling();
+        startSSE();
+        loadAll().catch(() => {});
+      }
+    });
+
+    // 操作后即时刷新（不等待下一轮轮询）
+    function refreshSoon() { setTimeout(() => loadAll().catch(() => {}), 100); }
     showPage(location.hash.slice(1));
     loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });
-    setInterval(() => { if (!document.hidden) loadAll().catch(() => setLive(false)); }, 5000);
+    startPolling();
+    startSSE();
   </script>
 </body>
 </html>
