@@ -348,7 +348,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/api/proxies/import", post(admin::api_proxies_import))
         .route("/admin/api/proxies/export", get(admin::api_proxies_export))
         .route("/admin/api/proxies/probe", post(admin::api_proxies_probe))
-        .route("/admin/api/proxies/import", post(admin::api_proxies_import))
         .route("/admin/api/proxies/rebalance", post(admin::api_proxies_rebalance))
         .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
         .route("/admin/api/keys/import", post(admin::api_keys_import))
