@@ -250,6 +250,20 @@ async fn main() -> anyhow::Result<()> {
                 tick.tick().await;
                 let removed = state.pool.gc_sessions();
                 state.rate_limiter.gc();
+                // GC: 清理不活跃 key 的 RPM 桶和并发信号量
+                {
+                    let cfg = state.config.load();
+                    let active: Vec<String> = cfg.api_keys.iter().map(|k| k.key.clone()).collect();
+                    state.metrics.rpm_keys.gc(&active);
+                    state.key_semaphores.retain(|k, _| active.contains(k));
+                }
+                // GC: 清理不活跃账号的 RPM 桶
+                {
+                    let active: Vec<String> = state.pool.account_rows().iter()
+                        .filter_map(|r| r["id"].as_str().map(|s| s.to_string()))
+                        .collect();
+                    state.metrics.rpm_accounts.gc(&active);
+                }
                 if removed > 0 {
                     info!(event = "session_gc", removed, live = state.pool.session_count(), "expired sessions cleared");
                 }

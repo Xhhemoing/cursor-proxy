@@ -13,3 +13,4 @@
 /billing.db
 /billing.db-wal
 /billing.db-shm
+accounts.json.bak*

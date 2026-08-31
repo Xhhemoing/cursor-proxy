@@ -365,8 +365,11 @@ pub async fn api_keys_import(
     let mut imported = 0usize;
     let mut skipped = 0usize;
     let mut errors = Vec::new();
+    // 事务性导入: 先验证全部, 再一次性写入
     {
         let mut config = state.config.lock();
+        // 第一遍: 验证
+        let mut valid = Vec::new();
         for rec in records {
             if rec.key.len() < 16 {
                 errors.push(json!({"key_prefix": &rec.key[..rec.key.len().min(8)], "error": "key too short"}));
@@ -376,11 +379,17 @@ pub async fn api_keys_import(
                 skipped += 1;
                 continue;
             }
+            valid.push(rec);
+        }
+        // 第二遍: 一次性写入
+        for rec in valid {
             config.api_keys.push(rec);
             imported += 1;
         }
-        if let Err(e) = config::save_config(&config) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+        if imported > 0 {
+            if let Err(e) = config::save_config(&config) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+            }
         }
     }
     state.audit.key_op("import", "batch", json!({"imported": imported, "skipped": skipped}));
