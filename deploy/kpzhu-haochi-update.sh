@@ -51,6 +51,11 @@ install -d bin
 [ -f $UNIT_DST ] && cp -a $UNIT_DST $UNIT_DST.bak.$STAMP
 [ -d static ] && cp -a static static.bak.$STAMP
 systemctl --user stop cursor-proxy || true
+# 兜底: 干掉 systemd 管不到的孤儿进程 (KillMode=mixed 或手动运行可能残留), 否则新进程会 Address already in use
+pkill -f '[b]in/cursor-fast-proxy-rs' 2>/dev/null || true
+for _ in 1 2 3 4 5; do ss -ltn 2>/dev/null | grep -q ':8800 ' || break; sleep 1; done
+pkill -9 -f '[b]in/cursor-fast-proxy-rs' 2>/dev/null || true
+systemctl --user reset-failed cursor-proxy 2>/dev/null || true
 install -m 755 $BUILD_DIR/target/release/cursor-fast-proxy-rs bin/cursor-fast-proxy-rs
 rsync -a --delete $BUILD_DIR/static/ static/
 rsync -a --delete $BUILD_DIR/src/ src/
