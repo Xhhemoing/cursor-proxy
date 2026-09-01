@@ -1284,6 +1284,8 @@ async fn inference_handler(
                 Dialect::Responses => "response.completed",
             };
             let mut sent_terminal = false;
+            // 空内容追踪: 上游返回 200 但无实际内容时, 流式也要返回错误而非静默 200
+            let mut has_content = false;
             // 心跳保活: 思考间隔较长时定期发注释帧, 防中间层 (nginx/CF/客户端) 掐空闲连接。
             let heartbeat = Duration::from_secs(15);
             let mut last_frame = std::time::Instant::now();
@@ -1327,6 +1329,17 @@ async fn inference_handler(
                         if let Some(u) = usage_frame {
                             usage = u;
                         }
+                        // 检测是否有实际内容（非空 delta / tool_call / thinking）
+                        if !has_content {
+                            let sse_str = sse.as_str();
+                            if sse_str.contains("\"content\":\"") && !sse_str.contains("\"content\":\"\"")
+                                || sse_str.contains("\"tool_calls\"")
+                                || sse_str.contains("\"thinking\"")
+                                || sse_str.contains("content_block")
+                            {
+                                has_content = true;
+                            }
+                        }
                         if sse.contains(terminal_marker) {
                             sent_terminal = true;
                         }
@@ -1340,6 +1353,23 @@ async fn inference_handler(
                         break;
                     }
                 }
+            }
+            // 空内容检测: 上游返回 200 但无任何实际内容时, 发错误帧而非静默 [DONE]
+            // 这样客户端能区分 "正常结束" 和 "上游返回空" 两种情况
+            if !has_content {
+                warn!(
+                    event = "empty_content_stream",
+                    req_id = %rid,
+                    account = %aid,
+                    "stream completed with zero content, sending error instead of terminal"
+                );
+                metrics.observe_err();
+                // 发送 SSE 错误帧（OpenAI 风格）而非静默 [DONE]
+                let err_frame = format!(
+                    "data: {{\"error\":{{\"message\":\"upstream returned empty content\",\"type\":\"server_error\",\"code\":\"empty_content\"}}}}\n\ndata: [DONE]\n\n"
+                );
+                let _ = tx.send(Ok(Bytes::from(err_frame))).await;
+                sent_terminal = true; // 已发错误终止帧, 不再补发
             }
             // 上游中断/无 responseInfo 结束时补发标准收尾帧, 让客户端干净收尾而非卡住
             if !sent_terminal {
