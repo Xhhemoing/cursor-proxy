@@ -448,12 +448,23 @@ where
                         }
                         if obj.get("responseInfo").is_some() || obj.get("invocationId").is_some() {
                             let u = usage.unwrap_or_default();
+                            // 从 responseInfo 提取上游真实的 stop reason
+                            // Cursor 帧: responseInfo.stopReason 可能是 "STOP" / "MAX_TOKENS" / "LENGTH" 等
+                            let upstream_stop = obj
+                                .get("responseInfo")
+                                .and_then(|ri| ri.get("stopReason"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            out.upstream_stop_reason = upstream_stop.to_string();
+                            let was_truncated = crate::protocol::out_was_truncated(&out);
                             match dialect {
                                 Dialect::Chat => {
-                                    let finish = if out.tool_calls.is_empty() {
-                                        "stop"
-                                    } else {
+                                    let finish = if !out.tool_calls.is_empty() {
                                         "tool_calls"
+                                    } else if was_truncated {
+                                        "length"
+                                    } else {
+                                        "stop"
                                     };
                                     sse_buf.push_str(&openai_chunk(
                                         &id,
@@ -477,10 +488,12 @@ where
                                             &json!({"type": "content_block_stop", "index": index}),
                                         ));
                                     }
-                                    let stop = if out.tool_calls.is_empty() {
-                                        "end_turn"
-                                    } else {
+                                    let stop = if !out.tool_calls.is_empty() {
                                         "tool_use"
+                                    } else if was_truncated {
+                                        "max_tokens"
+                                    } else {
+                                        "end_turn"
                                     };
                                     sse_buf.push_str(&sse_event(
                                         "message_delta",
@@ -605,6 +618,14 @@ where
             usage = u;
         }
         if obj.get("responseInfo").is_some() || obj.get("invocationId").is_some() {
+            // 提取上游 stop reason 用于截断检测
+            if let Some(sr) = obj
+                .get("responseInfo")
+                .and_then(|ri| ri.get("stopReason"))
+                .and_then(|v| v.as_str())
+            {
+                out.upstream_stop_reason = sr.to_string();
+            }
             break;
         }
     }

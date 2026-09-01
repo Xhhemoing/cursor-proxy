@@ -15,6 +15,8 @@ pub struct AssistantOut {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub thinking: String,
+    /// 上游原始的 stop reason (responseInfo.stopReason), 用于判断输出是否被截断
+    pub upstream_stop_reason: String,
 }
 
 pub fn hosted_web_search(tools: Option<&Value>) -> bool {
@@ -489,6 +491,15 @@ pub fn apply_tool_call_part(out: &mut AssistantOut, part: &Value) {
     });
 }
 
+/// 判断 AssistantOut 是否被上游截断 (max_tokens / length limit)
+pub fn out_was_truncated(out: &AssistantOut) -> bool {
+    let r = &out.upstream_stop_reason;
+    r.contains("MAX_TOKENS")
+        || r.contains("LENGTH")
+        || r.contains("max_tokens")
+        || r.contains("length")
+}
+
 pub fn anthropic_message(
     id: &str,
     model: &str,
@@ -510,10 +521,12 @@ pub fn anthropic_message(
     if content.is_empty() {
         content.push(json!({"type": "text", "text": ""}));
     }
-    let stop = if out.tool_calls.is_empty() {
-        "end_turn"
-    } else {
+    let stop = if !out.tool_calls.is_empty() {
         "tool_use"
+    } else if out_was_truncated(out) {
+        "max_tokens"
+    } else {
+        "end_turn"
     };
     json!({
         "id": id,
@@ -580,10 +593,12 @@ pub fn openai_message_with_tools(
     out: &AssistantOut,
     usage: &crate::translate::Usage,
 ) -> Value {
-    let finish = if out.tool_calls.is_empty() {
-        "stop"
-    } else {
+    let finish = if !out.tool_calls.is_empty() {
         "tool_calls"
+    } else if out_was_truncated(out) {
+        "length"
+    } else {
+        "stop"
     };
     let mut message = json!({
         "role": "assistant",

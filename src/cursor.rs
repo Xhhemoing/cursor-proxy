@@ -19,7 +19,8 @@ pub const CLIENT_TYPE: &str = "sand";
 pub const CLIENT_VERSION: &str = "0.18.0";
 pub const KIMI_K3_CONTEXT_WINDOW: u32 = 1_048_576;
 /// 客户端未传 max_tokens 时, 所有模型给长输出预算, 避免上游默认 8k 截断.
-pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
+/// 128k 而非 32k: kimi-k3 官方支持长输出, 32k 对长代码/长文档场景仍频繁截断.
+pub const DEFAULT_MAX_TOKENS: u32 = 131_072;
 /// maxTokens 下限保护: 客户端传 <1024 时自动提升到 1024, 防止上游报错.
 pub const MAX_TOKENS_FLOOR: u32 = 1024;
 
@@ -691,8 +692,8 @@ mod tests {
         assert!(is_kimi_family("Kimi-K3-high"));
         assert!(!is_kimi_family("claude-sonnet-4-6"));
         assert_eq!(context_window_for("kimi-k3"), 1_048_576);
-        assert_eq!(default_max_tokens_for("kimi-k3"), Some(32_768));
-        assert_eq!(default_max_tokens_for("claude-sonnet-4-6"), Some(32_768));
+        assert_eq!(default_max_tokens_for("kimi-k3"), Some(131_072));
+        assert_eq!(default_max_tokens_for("claude-sonnet-4-6"), Some(131_072));
     }
 
     #[test]
@@ -786,7 +787,7 @@ mod tests {
 
     #[test]
     fn max_tokens_floor_protection() {
-        assert_eq!(effective_max_tokens(None, "kimi-k3"), 32_768);
+        assert_eq!(effective_max_tokens(None, "kimi-k3"), 131_072);
         assert_eq!(effective_max_tokens(Some(16), "kimi-k3"), 1024);
         assert_eq!(effective_max_tokens(Some(1024), "kimi-k3"), 1024);
         assert_eq!(effective_max_tokens(Some(4096), "kimi-k3"), 4096);

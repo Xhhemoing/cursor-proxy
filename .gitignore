@@ -20,3 +20,6 @@
 /account-state.json.tmp
 accounts.json.bak*
 static/admin.html.bak*
+src.bak.*/
+deploy-*.sh
+deploy-*.py
