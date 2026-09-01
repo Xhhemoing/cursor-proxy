@@ -990,7 +990,8 @@ async fn inference_handler(
     let max_tokens = body
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .map(|v| v as u32)
+        .or(Some(crate::cursor::DEFAULT_MAX_TOKENS));
     let max_mode = crate::cursor::max_mode_from_request(&body);
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
     let tools = body.get("tools").cloned();

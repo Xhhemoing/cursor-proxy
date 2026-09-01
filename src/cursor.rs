@@ -131,12 +131,9 @@ pub fn effective_max_tokens(client_value: Option<u32>, _model: &str) -> u32 {
     if v < MAX_TOKENS_FLOOR { MAX_TOKENS_FLOOR } else { v }
 }
 
-pub fn context_window_for(model: &str) -> u32 {
-    if is_kimi_family(model) {
-        KIMI_K3_CONTEXT_WINDOW
-    } else {
-        KIMI_K3_CONTEXT_WINDOW
-    }
+pub fn context_window_for(_model: &str) -> u32 {
+    // 仅支持 kimi-k3 家族, 统一 1M 上下文
+    KIMI_K3_CONTEXT_WINDOW
 }
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// 解码缓冲上限: 允许一帧 + 余量.
@@ -278,9 +275,9 @@ pub fn build_cursor_body_with_tools(
     }
 
     let mut requested_model = json!({"modelId": model});
-    if let Some(mm) = max_mode {
-        requested_model["maxMode"] = json!(mm);
-    }
+    // maxMode 默认开启: 确保 1M 上下文可用 (Cursor EM 模式)
+    let mm = max_mode.unwrap_or(true);
+    requested_model["maxMode"] = json!(mm);
 
     let mut body = json!({
         "requestedModel": requested_model,
