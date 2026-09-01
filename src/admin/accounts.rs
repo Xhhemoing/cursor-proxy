@@ -119,7 +119,7 @@ pub async fn api_account_toggle(
     };
     match config::persist_account_enabled(&id, enabled) {
         Ok(_) => {
-            state.pool.rebuild_available_ids(); // 重建可用列表，确保开关立即生效
+            state.pool.rebuild_available_slots(); // 重建可用列表，确保开关立即生效
             state
                 .audit
                 .account_op("toggle", &id, json!({"enabled": enabled}));
@@ -167,7 +167,7 @@ pub async fn api_account_set_enabled(
     }
     match config::persist_account_enabled(&id, body.enabled) {
         Ok(_) => {
-            state.pool.rebuild_available_ids(); // 重建可用列表，确保禁用立即生效
+            state.pool.rebuild_available_slots(); // 重建可用列表，确保禁用立即生效
             state
                 .audit
                 .account_op("set_enabled", &id, json!({"enabled": body.enabled}));
@@ -722,7 +722,7 @@ pub async fn api_accounts_batch_edit(
             }
         }
     }
-    state.pool.rebuild_available_ids();
+    state.pool.rebuild_available_slots();
     state.audit.account_op(
         "batch_edit",
         "batch",

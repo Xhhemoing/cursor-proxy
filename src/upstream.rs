@@ -54,6 +54,7 @@ impl UpstreamClient {
         parallel_tool_calls: Option<bool>,
         conversation_id: Option<&str>,
         cursor_override: Option<&CursorClient>,
+        max_mode: Option<bool>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError>
     {
         match self {
@@ -70,6 +71,7 @@ impl UpstreamClient {
                     tool_choice,
                     parallel_tool_calls,
                     conversation_id,
+                    max_mode,
                 );
                 let stream = client
                     .stream(token, mid, &body)

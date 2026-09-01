@@ -984,8 +984,8 @@ async fn inference_handler(
     let max_tokens = body
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
-        .or_else(|| crate::cursor::default_max_tokens_for(&model));
+        .map(|v| v as u32);
+    let max_mode = crate::cursor::max_mode_from_request(&body);
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
     let tools = body.get("tools").cloned();
     let tool_choice = body.get("tool_choice").cloned();
@@ -1096,6 +1096,7 @@ async fn inference_handler(
     let mut last_error = String::new();
     let mut frames_opt = None;
     let mut current_permit = Some(permit);
+    let mut current_max_tokens = max_tokens;
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
@@ -1150,7 +1151,7 @@ async fn inference_handler(
             .stream(
                 &model,
                 messages,
-                max_tokens,
+                current_max_tokens,
                 temperature,
                 cursor_auth,
                 tools.as_ref(),
@@ -1158,6 +1159,7 @@ async fn inference_handler(
                 parallel_tool_calls,
                 Some(conv_id.as_str()),
                 cursor_override.as_ref(),
+                max_mode,
             )
             .await
         {
@@ -1172,6 +1174,25 @@ async fn inference_handler(
                 last_error = e.to_string();
                 state.pool.release(&account_id, true, 30);
                 state.metrics.observe_err();
+
+                // 输出 token 限制错误: 自动降 budget 重试 (不切换账号, 同号重试)
+                if translate::is_output_token_limit_error_str(&last_error) {
+                    let new_budget = translate::lower_output_budget(
+                        current_max_tokens.unwrap_or(crate::cursor::DEFAULT_MAX_TOKENS),
+                    );
+                    if new_budget < current_max_tokens.unwrap_or(crate::cursor::DEFAULT_MAX_TOKENS) {
+                        info!(
+                            event = "output_budget_retry",
+                            req_id = %request_id,
+                            old_budget = current_max_tokens,
+                            new_budget = new_budget,
+                            "output token limit hit, retrying with lower budget"
+                        );
+                        current_max_tokens = Some(new_budget);
+                        // 不 continue, 直接同号重试 (不消耗额外 retry 次数)
+                        continue;
+                    }
+                }
 
                 // 自动禁用: 连续错误 >= 5 次
                 if state.pool.should_auto_disable(&account_id, 5) {

@@ -9,6 +9,7 @@ use crate::protocol::{
     anthropic_message, apply_tool_call_part, openai_message_with_tools, responses_message,
     sse_event, AssistantOut,
 };
+use crate::cursor::MAX_TOKENS_FLOOR;
 
 pub fn openai_error(message: &str, code: &str, status: u16) -> Value {
     json!({
@@ -155,6 +156,48 @@ fn openai_tool_delta(index: usize, id: &str, name: &str, args_delta: &str) -> Va
             "function": {"name": name, "arguments": args_delta},
         }]
     })
+}
+
+/// 检测上游帧是否为输出 token 限制错误 (isOutputTokenLimitError)
+/// Cursor 在输出超限时会在流中发送此错误帧, 需要自动降 budget 重试.
+pub fn is_output_token_limit_error(obj: &Value) -> bool {
+    // 检查 error 字段
+    if let Some(err) = obj.get("error").and_then(|v| v.as_str()) {
+        if err.contains("isOutputTokenLimitError") || err.contains("output token limit") {
+            return true;
+        }
+    }
+    // 检查 errorCode / errorType
+    if let Some(code) = obj.get("errorCode").and_then(|v| v.as_str()) {
+        if code.contains("OutputTokenLimit") || code.contains("output_token_limit") {
+            return true;
+        }
+    }
+    // 检查 message 字段
+    if let Some(msg) = obj.get("message").and_then(|v| v.as_str()) {
+        if msg.contains("output token limit") || msg.contains("max output tokens") {
+            return true;
+        }
+    }
+    false
+}
+
+/// 检测上游帧是否为输出 token 限制错误 (从错误字符串)
+pub fn is_output_token_limit_error_str(err: &str) -> bool {
+    err.contains("isOutputTokenLimitError")
+        || err.contains("output token limit")
+        || err.contains("max output tokens")
+        || err.contains("OutputTokenLimit")
+}
+
+/// 计算重试时的降低后 maxTokens: 当前值减半, 但不低于 floor.
+pub fn lower_output_budget(current: u32) -> u32 {
+    let halved = current / 2;
+    if halved < MAX_TOKENS_FLOOR {
+        MAX_TOKENS_FLOOR
+    } else {
+        halved
+    }
 }
 
 /// 流式翻译

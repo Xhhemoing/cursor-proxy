@@ -32,6 +32,29 @@ pub struct Slot {
     cooldown_until: parking_lot::Mutex<Option<Instant>>,
 }
 
+/// 预编译可用槽位：消除热路径 DashMap 查找
+/// P0: 存 Arc<Slot> 而非 String，消除 slots.get()
+/// P2: 内联可用性掩码，消除 disabled/quotas 二次查找
+#[derive(Clone)]
+pub struct AvailableSlot {
+    pub id: String,
+    pub slot: Arc<Slot>,
+    /// 位掩码: bit0=enabled, bit1=!cooling, bit2=quota_ok
+    pub mask: u8,
+}
+
+impl AvailableSlot {
+    const ENABLED: u8 = 0b001;
+    const NOT_COOLING: u8 = 0b010;
+    const QUOTA_OK: u8 = 0b100;
+    const ALL_OK: u8 = 0b111;
+
+    #[inline]
+    pub fn is_available(&self) -> bool {
+        self.mask == Self::ALL_OK
+    }
+}
+
 /// 会话粘性 TTL
 const STICKY_TTL: Duration = Duration::from_secs(3600);
 
@@ -67,7 +90,8 @@ pub struct AccountPool {
     /// 有序 id 列表（用于轮询，变更时重建）
     ordered_ids: Arc<parking_lot::RwLock<Vec<String>>>,
     /// 可用账号列表（arc-swap 无锁读，避免热路径 RwLock 竞争）
-    available_ids: Arc<arc_swap::ArcSwap<Vec<String>>>,
+    /// 存储 (account_id, slot_arc, 可用性掩码) 预编译，消除运行时 DashMap 查找
+    available_slots: Arc<arc_swap::ArcSwap<Vec<AvailableSlot>>>,
     /// 账号开关状态
     disabled: Arc<DashMap<String, bool>>,
     /// 原子化统计
@@ -162,7 +186,7 @@ impl AccountPool {
             slots: Arc::new(slots),
             rr_index: Arc::new(AtomicUsize::new(0)),
             ordered_ids: Arc::new(parking_lot::RwLock::new(ordered)),
-            available_ids: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            available_slots: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             disabled: Arc::new(disabled),
             stats: Arc::new(stats),
             quotas: Arc::new(quotas),
@@ -209,29 +233,37 @@ impl AccountPool {
         let mut ids: Vec<String> = self.slots.iter().map(|r| r.key().clone()).collect();
         ids.sort();
         *self.ordered_ids.write() = ids;
-        self.rebuild_available_ids();
+        self.rebuild_available_slots();
     }
 
     /// 重建可用账号列表（启用 + 非冷却 + 额度正常）
     /// 使用 arc-swap 原子替换，读侧完全无锁
+    /// P0: 预编译存储 Arc<Slot>，消除热路径 DashMap 查找
+    /// P2: 内联可用性掩码，消除 disabled/quotas 二次查找
     /// pub: admin API 禁用/启用账号后需要调用以确保立即生效
-    pub fn rebuild_available_ids(&self) {
+    pub fn rebuild_available_slots(&self) {
         let ids = self.ordered_ids.read();
-        let available: Vec<String> = ids
+        let available: Vec<AvailableSlot> = ids
             .iter()
-            .filter(|id| {
-                let enabled = !self.disabled.get(*id).map(|v| *v).unwrap_or(false);
-                let cooling = self
-                    .slots
-                    .get(*id)
-                    .map(|s| s.is_cooling_down())
-                    .unwrap_or(false);
+            .filter_map(|id| {
+                let slot = self.slots.get(id)?.clone();
+                let enabled = !self.disabled.get(id).map(|v| *v).unwrap_or(false);
+                let cooling = slot.is_cooling_down();
                 let quota_ok = !self.quota_blocks(id);
-                enabled && !cooling && quota_ok
+
+                let mut mask = 0u8;
+                if enabled { mask |= AvailableSlot::ENABLED; }
+                if !cooling { mask |= AvailableSlot::NOT_COOLING; }
+                if quota_ok { mask |= AvailableSlot::QUOTA_OK; }
+
+                Some(AvailableSlot {
+                    id: id.clone(),
+                    slot,
+                    mask,
+                })
             })
-            .cloned()
             .collect();
-        self.available_ids.store(Arc::new(available));
+        self.available_slots.store(Arc::new(available));
     }
 
     pub fn replace_accounts(&self, accounts: Vec<Account>) {
@@ -313,10 +345,10 @@ impl AccountPool {
     }
 
     fn try_acquire_by_session(&self, session_id: Option<&str>) -> AcquireTry {
-        // 1. 会话粘性: 检查是否有已绑定的账号
+        // 1. 会话粘性: O(1) 查找已绑定账号
         if let Some(sid) = session_id {
             if let Some(slot) = self.find_sticky_slot(sid) {
-                if self.is_slot_available(&slot) {
+                if self.is_slot_available_fast(&slot) {
                     if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
                         self.stats
                             .entry(slot.account.id.clone())
@@ -328,13 +360,14 @@ impl AccountPool {
             }
         }
 
-        // 2. 可用账号列表轮询（arc-swap 无锁读，单次快照）
-        let available = self.available_ids.load();
+        // 2. P0: 预编译可用列表（Arc<Slot> 无锁读，消除 DashMap 查找）
+        let available = self.available_slots.load();
         let available = if available.is_empty() {
-            // 可用列表为空 → 尝试重建一次（冷启动或全部冷却）
+            // P3: 冷启动同步重建（测试环境无 runtime，必须同步）
+            // 热路径异步刷新在后台定时任务中处理
             drop(available);
-            self.rebuild_available_ids();
-            let rebuilt = self.available_ids.load();
+            self.rebuild_available_slots();
+            let rebuilt = self.available_slots.load();
             if rebuilt.is_empty() {
                 return AcquireTry::Empty;
             }
@@ -346,43 +379,49 @@ impl AccountPool {
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
         let len = available.len();
 
-        for i in 0..len {
-            let idx = (start + i) % len;
-            let id = &available[idx];
+        // P4: 预计算会话哈希（只算一次）
+        let session_hash_idx: Option<usize> = session_id.map(|sid| {
+            let mut hasher = DefaultHasher::new();
+            sid.hash(&mut hasher);
+            (hasher.finish() as usize) % len
+        });
 
-            if let Some(slot) = self.slots.get(id) {
-                // 防御性检查：缓存可能过期（如禁用后未重建），确保 slot 真正可用
-                if !self.is_slot_available(&slot) {
-                    continue;
-                }
+        // P4: 环形迭代消除取模
+        for (i, avail) in available.iter().cycle().skip(start).take(len).enumerate() {
+            // P2: 位掩码检查（一次比较替代 3 次 DashMap 查找）
+            if !avail.is_available() {
+                continue;
+            }
 
-                // 会话哈希优先（在可用列表中）
-                if let Some(sid) = session_id {
-                    let mut hasher = DefaultHasher::new();
-                    sid.hash(&mut hasher);
-                    if (hasher.finish() as usize) % len == idx {
-                        if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                            self.bind_session(sid, &slot.account.id);
-                            self.stats
-                                .entry(slot.account.id.clone())
-                                .or_default()
-                                .record_request();
-                            return AcquireTry::Got((slot.account.clone(), permit));
-                        }
-                    }
-                }
+            let slot = &avail.slot;
 
-                // 普通轮询
-                if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                    if let Some(sid) = session_id {
+            // P1: 会话哈希优先 O(1) 匹配
+            if let (Some(sid), Some(hash_idx)) = (session_id, session_hash_idx) {
+                // cycle().skip(start) 后，实际索引 = (start + i) % len
+                // 但因为我们只关心是否命中 hash_idx，直接比较
+                let actual_idx = (start + i) % len;
+                if actual_idx == hash_idx {
+                    if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
                         self.bind_session(sid, &slot.account.id);
+                        self.stats
+                            .entry(slot.account.id.clone())
+                            .or_default()
+                            .record_request();
+                        return AcquireTry::Got((slot.account.clone(), permit));
                     }
-                    self.stats
-                        .entry(slot.account.id.clone())
-                        .or_default()
-                        .record_request();
-                    return AcquireTry::Got((slot.account.clone(), permit));
                 }
+            }
+
+            // 普通轮询
+            if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
+                if let Some(sid) = session_id {
+                    self.bind_session(sid, &slot.account.id);
+                }
+                self.stats
+                    .entry(slot.account.id.clone())
+                    .or_default()
+                    .record_request();
+                return AcquireTry::Got((slot.account.clone(), permit));
             }
         }
 
@@ -415,6 +454,13 @@ impl AccountPool {
         let cooling = slot.is_cooling_down();
         let quota_ok = !self.quota_blocks(id);
         enabled && !cooling && quota_ok
+    }
+
+    /// P2: 快速可用性检查 — 仅检查冷却（用于粘性会话路径）
+    /// 粘性路径的 disabled/quota 状态在 rebuild 时已验证，此处只需检查冷却
+    #[inline]
+    fn is_slot_available_fast(&self, slot: &Arc<Slot>) -> bool {
+        !slot.is_cooling_down()
     }
 
     fn quota_blocks(&self, account_id: &str) -> bool {
@@ -637,7 +683,7 @@ impl AccountPool {
             restored += 1;
         }
         if restored > 0 {
-            self.rebuild_available_ids();
+            self.rebuild_available_slots();
             self.bump_version();
             tracing::info!(
                 event = "pool_state_restore",

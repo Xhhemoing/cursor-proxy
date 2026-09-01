@@ -18,26 +18,41 @@ pub const STREAM_PATH: &str = "/aiserver.v1.InferenceService/Stream";
 pub const CLIENT_TYPE: &str = "sand";
 pub const CLIENT_VERSION: &str = "0.18.0";
 pub const KIMI_K3_CONTEXT_WINDOW: u32 = 1_048_576;
-/// 客户端未传 max_tokens 时, kimi 家族给长输出预算, 避免上游默认 8k 截断.
-pub const KIMI_DEFAULT_MAX_TOKENS: u32 = 32_768;
+/// 客户端未传 max_tokens 时, 所有模型给长输出预算, 避免上游默认 8k 截断.
+pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
+/// maxTokens 下限保护: 客户端传 <1024 时自动提升到 1024, 防止上游报错.
+pub const MAX_TOKENS_FLOOR: u32 = 1024;
 
 pub fn is_kimi_family(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m == "kimi-k3" || m.starts_with("kimi-k3-") || m.starts_with("kimi-k2")
 }
 
-/// 客户端省略 max_tokens 时的默认输出预算; 非 kimi 不注入, 避免 Gemini 类模型踩 8k 坑.
-pub fn default_max_tokens_for(model: &str) -> Option<u32> {
-    if is_kimi_family(model) {
-        Some(KIMI_DEFAULT_MAX_TOKENS)
-    } else {
-        None
-    }
+pub fn is_gemini_3_family(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("gemini-3.")
+}
+
+/// 客户端省略 max_tokens 时的默认输出预算; 所有模型统一 32k, 避免上游默认 8k 截断.
+pub fn default_max_tokens_for(_model: &str) -> Option<u32> {
+    Some(DEFAULT_MAX_TOKENS)
+}
+
+/// 计算最终生效的 maxTokens: 客户端值优先, 无则默认 32k, 低于 floor 则提升到 floor.
+pub fn effective_max_tokens(client_value: Option<u32>, _model: &str) -> u32 {
+    let v = client_value.unwrap_or(DEFAULT_MAX_TOKENS);
+    if v < MAX_TOKENS_FLOOR { MAX_TOKENS_FLOOR } else { v }
 }
 
 pub fn context_window_for(model: &str) -> u32 {
     if is_kimi_family(model) {
         KIMI_K3_CONTEXT_WINDOW
+    } else if is_gemini_3_family(model) {
+        1_000_000
+    } else if model.to_ascii_lowercase().starts_with("claude-") {
+        200_000
+    } else if model.to_ascii_lowercase().starts_with("gpt-") {
+        128_000
     } else {
         200_000
     }
@@ -120,6 +135,7 @@ pub fn build_cursor_body(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -136,6 +152,27 @@ pub fn conversation_id_for(session_id: Option<&str>, account_id: Option<&str>) -
     }
 }
 
+/// 从请求体提取 maxMode 标志 (支持三种客户端传入方式)
+pub fn max_mode_from_request(body: &Value) -> Option<bool> {
+    // 1. snake_case: max_mode
+    if let Some(v) = body.get("max_mode").and_then(|v| v.as_bool()) {
+        return Some(v);
+    }
+    // 2. camelCase: maxMode (OpenAI 风格客户端实际发送的)
+    if let Some(v) = body.get("maxMode").and_then(|v| v.as_bool()) {
+        return Some(v);
+    }
+    // 3. Cursor 原生格式: requestedModel.maxMode
+    if let Some(v) = body
+        .get("requestedModel")
+        .and_then(|r| r.get("maxMode"))
+        .and_then(|v| v.as_bool())
+    {
+        return Some(v);
+    }
+    None
+}
+
 pub fn build_cursor_body_with_tools(
     messages: &[Value],
     model: &str,
@@ -145,6 +182,7 @@ pub fn build_cursor_body_with_tools(
     tool_choice: Option<&Value>,
     parallel_tool_calls: Option<bool>,
     conversation_id: Option<&str>,
+    max_mode: Option<bool>,
 ) -> Value {
     let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
     if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
@@ -158,8 +196,13 @@ pub fn build_cursor_body_with_tools(
         );
     }
 
+    let mut requested_model = json!({"modelId": model});
+    if let Some(mm) = max_mode {
+        requested_model["maxMode"] = json!(mm);
+    }
+
     let mut body = json!({
-        "requestedModel": {"modelId": model},
+        "requestedModel": requested_model,
         "conversationId": conversation_id
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -167,9 +210,9 @@ pub fn build_cursor_body_with_tools(
         "messages": cursor_msgs,
         "stream": true,
     });
-    if let Some(mt) = max_tokens {
-        body["maxTokens"] = json!(mt);
-    }
+    // maxTokens: 客户端值优先, 无则默认 32k, 低于 floor 则提升到 floor
+    let mt = effective_max_tokens(max_tokens, model);
+    body["maxTokens"] = json!(mt);
     if let Some(t) = temperature {
         body["temperature"] = json!(t);
     }
@@ -571,7 +614,40 @@ mod tests {
         assert!(!is_kimi_family("claude-sonnet-4-6"));
         assert_eq!(context_window_for("kimi-k3"), 1_048_576);
         assert_eq!(default_max_tokens_for("kimi-k3"), Some(32_768));
-        assert_eq!(default_max_tokens_for("claude-sonnet-4-6"), None);
+        assert_eq!(default_max_tokens_for("claude-sonnet-4-6"), Some(32_768));
+    }
+
+    #[test]
+    fn gemini_3_family_gets_1m_context() {
+        assert!(is_gemini_3_family("gemini-3.5"));
+        assert!(is_gemini_3_family("gemini-3.6-pro"));
+        assert!(is_gemini_3_family("Gemini-3.7"));
+        assert!(!is_gemini_3_family("gemini-2.5"));
+        assert_eq!(context_window_for("gemini-3.5"), 1_000_000);
+        assert_eq!(context_window_for("gemini-3.6"), 1_000_000);
+        assert_eq!(context_window_for("claude-sonnet-4-6"), 200_000);
+        assert_eq!(context_window_for("gpt-4o"), 128_000);
+    }
+
+    #[test]
+    fn max_tokens_floor_protection() {
+        assert_eq!(effective_max_tokens(None, "kimi-k3"), 32_768);
+        assert_eq!(effective_max_tokens(Some(16), "kimi-k3"), 1024);
+        assert_eq!(effective_max_tokens(Some(1024), "kimi-k3"), 1024);
+        assert_eq!(effective_max_tokens(Some(4096), "kimi-k3"), 4096);
+        assert_eq!(effective_max_tokens(Some(0), "claude-sonnet-4-6"), 1024);
+    }
+
+    #[test]
+    fn max_mode_from_request_variants() {
+        assert_eq!(max_mode_from_request(&json!({"max_mode": true})), Some(true));
+        assert_eq!(max_mode_from_request(&json!({"maxMode": true})), Some(true));
+        assert_eq!(
+            max_mode_from_request(&json!({"requestedModel": {"maxMode": true}})),
+            Some(true)
+        );
+        assert_eq!(max_mode_from_request(&json!({"max_mode": false})), Some(false));
+        assert_eq!(max_mode_from_request(&json!({})), None);
     }
 
     #[test]
@@ -589,6 +665,7 @@ mod tests {
             Some(&tools),
             Some(&json!("required")),
             Some(false),
+            None,
             None,
         );
         assert_eq!(body["tools"][0]["name"], "bash");
@@ -608,7 +685,7 @@ mod tests {
         assert_ne!(a, c);
         let msgs = vec![json!({"role": "user", "content": "hi"})];
         let body =
-            build_cursor_body_with_tools(&msgs, "kimi-k3", None, None, None, None, None, Some(&a));
+            build_cursor_body_with_tools(&msgs, "kimi-k3", None, None, None, None, None, Some(&a), None);
         assert_eq!(body["conversationId"], a);
     }
 }
