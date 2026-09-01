@@ -36,7 +36,15 @@ pub fn openai_chunk(chunk_id: &str, model: &str, delta: Value, finish: Option<&s
             "finish_reason": finish,
         }],
     });
-    format!("data: {}\n\n", serde_json::to_string(&payload).unwrap())
+    // 使用 to_string 预分配 + 单次写入，避免多次格式化和分配
+    let mut buf = String::with_capacity(256);
+    buf.push_str("data: ");
+    // String 实现了 fmt::Write 但不实现 io::Write，所以直接用 to_string
+    // 关键优化是预分配容量 + 避免 format! 的二次分配
+    let json_str = serde_json::to_string(&payload).unwrap();
+    buf.push_str(&json_str);
+    buf.push_str("\n\n");
+    buf
 }
 
 /// 一次请求的 token 用量 (四类分别计价)
@@ -200,7 +208,7 @@ pub fn lower_output_budget(current: u32) -> u32 {
     }
 }
 
-/// 流式翻译
+/// 流式翻译 — 预分配缓冲 + 减少中间分配
 pub fn upstream_to_dialect_stream<E>(
     frames: Pin<Box<dyn Stream<Item = Result<Value, E>> + Send>>,
     model: &str,
@@ -221,6 +229,8 @@ where
     let mut started_tools: Vec<String> = Vec::new();
     let mut anthropic_text_open = false;
     let mut anthropic_started = false;
+    // P0: 预分配 SSE 缓冲，减少高频小帧的重复分配
+    let mut sse_buf = String::with_capacity(4096);
 
     futures_util::stream::unfold(
         (
@@ -234,8 +244,9 @@ where
             dialect,
             anthropic_text_open,
             anthropic_started,
+            sse_buf,
         ),
-        |(
+        move |(
             mut frames,
             id,
             model,
@@ -246,7 +257,10 @@ where
             dialect,
             mut anthropic_text_open,
             mut anthropic_started,
+            mut sse_buf,
         )| async move {
+            // 每帧复用缓冲
+            let sse_buf = &mut sse_buf;
             loop {
                 match frames.next().await {
                     Some(Ok(obj)) => {
@@ -294,12 +308,12 @@ where
                                             } else {
                                                 json!({"content": text})
                                             };
-                                            sse.push_str(&openai_chunk(&id, &model, delta, None));
+                                            sse_buf.push_str(&openai_chunk(&id, &model, delta, None));
                                         }
                                         Dialect::Anthropic => {
                                             if !anthropic_text_open {
                                                 anthropic_text_open = true;
-                                                sse.push_str(&sse_event(
+                                                sse_buf.push_str(&sse_event(
                                                     "content_block_start",
                                                     &json!({
                                                         "type": "content_block_start",
@@ -308,7 +322,7 @@ where
                                                     }),
                                                 ));
                                             }
-                                            sse.push_str(&sse_event(
+                                            sse_buf.push_str(&sse_event(
                                                 "content_block_delta",
                                                 &json!({
                                                     "type": "content_block_delta",
@@ -319,7 +333,7 @@ where
                                         }
                                         Dialect::Responses => {
                                             first = false;
-                                            sse.push_str(&sse_event(
+                                            sse_buf.push_str(&sse_event(
                                                 "response.output_text.delta",
                                                 &json!({"type": "response.output_text.delta", "delta": text}),
                                             ));
@@ -331,7 +345,7 @@ where
                         if let Some(think) = obj.get("thinkingPart").and_then(|v| v.as_object()) {
                             if let Some(text) = think.get("text").and_then(|v| v.as_str()) {
                                 if !text.is_empty() && dialect == Dialect::Chat {
-                                    sse.push_str(&openai_chunk(
+                                    sse_buf.push_str(&openai_chunk(
                                         &id,
                                         &model,
                                         json!({"content": format!("<think>{}</think>", text)}),
@@ -361,7 +375,7 @@ where
                                 match dialect {
                                     Dialect::Chat => {
                                         first = false;
-                                        sse.push_str(&openai_chunk(
+                                        sse_buf.push_str(&openai_chunk(
                                             &id,
                                             &model,
                                             openai_tool_delta(idx, &c.id, &c.name, &args_delta),
@@ -372,7 +386,7 @@ where
                                         if !started_tools.iter().any(|x| x == &c.id) {
                                             let index =
                                                 if anthropic_text_open { 1 + idx } else { idx };
-                                            sse.push_str(&sse_event(
+                                            sse_buf.push_str(&sse_event(
                                                 "content_block_start",
                                                 &json!({
                                                     "type": "content_block_start",
@@ -390,7 +404,7 @@ where
                                         if !args_delta.is_empty() {
                                             let index =
                                                 if anthropic_text_open { 1 + idx } else { idx };
-                                            sse.push_str(&sse_event(
+                                            sse_buf.push_str(&sse_event(
                                                 "content_block_delta",
                                                 &json!({
                                                     "type": "content_block_delta",
@@ -403,7 +417,7 @@ where
                                     Dialect::Responses => {
                                         first = false;
                                         if !started_tools.iter().any(|x| x == &c.id) {
-                                            sse.push_str(&sse_event(
+                                            sse_buf.push_str(&sse_event(
                                                 "response.output_item.added",
                                                 &json!({
                                                     "type": "response.output_item.added",
@@ -419,7 +433,7 @@ where
                                             started_tools.push(c.id.clone());
                                         }
                                         if !args_delta.is_empty() {
-                                            sse.push_str(&sse_event(
+                                            sse_buf.push_str(&sse_event(
                                                 "response.function_call_arguments.delta",
                                                 &json!({
                                                     "type": "response.function_call_arguments.delta",
@@ -441,24 +455,24 @@ where
                                     } else {
                                         "tool_calls"
                                     };
-                                    sse.push_str(&openai_chunk(
+                                    sse_buf.push_str(&openai_chunk(
                                         &id,
                                         &model,
                                         json!({}),
                                         Some(finish),
                                     ));
-                                    sse.push_str("data: [DONE]\n\n");
+                                    sse_buf.push_str("data: [DONE]\n\n");
                                 }
                                 Dialect::Anthropic => {
                                     if anthropic_text_open {
-                                        sse.push_str(&sse_event(
+                                        sse_buf.push_str(&sse_event(
                                             "content_block_stop",
                                             &json!({"type": "content_block_stop", "index": 0}),
                                         ));
                                     }
                                     for (i, _) in out.tool_calls.iter().enumerate() {
                                         let index = if anthropic_text_open { 1 + i } else { i };
-                                        sse.push_str(&sse_event(
+                                        sse_buf.push_str(&sse_event(
                                             "content_block_stop",
                                             &json!({"type": "content_block_stop", "index": index}),
                                         ));
@@ -468,7 +482,7 @@ where
                                     } else {
                                         "tool_use"
                                     };
-                                    sse.push_str(&sse_event(
+                                    sse_buf.push_str(&sse_event(
                                         "message_delta",
                                         &json!({
                                             "type": "message_delta",
@@ -476,21 +490,21 @@ where
                                             "usage": {"output_tokens": u.output}
                                         }),
                                     ));
-                                    sse.push_str(&sse_event(
+                                    sse_buf.push_str(&sse_event(
                                         "message_stop",
                                         &json!({"type": "message_stop"}),
                                     ));
                                 }
                                 Dialect::Responses => {
                                     let final_obj = responses_message(&id, &model, &out, &u);
-                                    sse.push_str(&sse_event(
+                                    sse_buf.push_str(&sse_event(
                                         "response.completed",
                                         &json!({"type": "response.completed", "response": final_obj}),
                                     ));
                                 }
                             }
                             return Some((
-                                Ok((sse, usage)),
+                                Ok((std::mem::take(sse_buf), usage)),
                                 (
                                     frames,
                                     id,
@@ -502,14 +516,15 @@ where
                                     dialect,
                                     anthropic_text_open,
                                     anthropic_started,
+                                    String::with_capacity(4096), // 重置缓冲
                                 ),
                             ));
                         }
-                        if sse.is_empty() {
+                        if sse_buf.is_empty() {
                             continue;
                         }
                         return Some((
-                            Ok((sse, usage)),
+                            Ok((std::mem::take(sse_buf), usage)),
                             (
                                 frames,
                                 id,
@@ -521,6 +536,7 @@ where
                                 dialect,
                                 anthropic_text_open,
                                 anthropic_started,
+                                String::with_capacity(4096), // 重置缓冲
                             ),
                         ));
                     }
@@ -538,6 +554,7 @@ where
                                 dialect,
                                 anthropic_text_open,
                                 anthropic_started,
+                                String::with_capacity(4096), // 重置缓冲
                             ),
                         ));
                     }
