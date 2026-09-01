@@ -1439,6 +1439,46 @@ async fn inference_handler(
         };
         match full {
             Ok((result, usage)) => {
+                // P0: 空内容检测 — 上游返回 200 但 content 为空时自动重试一次
+                // 注意: 此处不在 for 循环内, 不能 continue; 空内容直接返回错误让客户端重试
+                let is_empty = result
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true);
+                if is_empty {
+                    warn!(
+                        event = "empty_content",
+                        req_id = %request_id,
+                        "upstream returned empty content"
+                    );
+                    state.pool.release(&account_id, true, 5);
+                    state.metrics.observe_err();
+                    state.ledger.record(billing::BillingRecord::build(
+                        &bctx,
+                        &request_id,
+                        &model,
+                        &account_id,
+                        usage,
+                        false,
+                        502,
+                        start.elapsed().as_millis() as u64,
+                        &client_ip,
+                    ));
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(openai_error(
+                            "upstream returned empty content",
+                            "empty_content",
+                            502,
+                        )),
+                    )
+                        .into_response());
+                }
+
                 let latency = start.elapsed().as_millis() as u64;
                 let log_entry = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),

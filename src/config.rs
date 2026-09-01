@@ -160,7 +160,7 @@ fn default_backend() -> String {
     "https://api2.cursor.sh".into()
 }
 fn default_timeout() -> u64 {
-    1800
+    120  // 思考超时控制: 120s 强制返回, 避免算法设计等场景 243s 过长
 }
 fn default_log_file() -> String {
     "proxy.log".into()
