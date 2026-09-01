@@ -324,7 +324,10 @@ impl ProxyPool {
     }
 
     pub fn bound_count(&self, proxy_id: &str) -> usize {
-        self.bindings.iter().filter(|r| r.value() == proxy_id).count()
+        self.bindings
+            .iter()
+            .filter(|r| r.value() == proxy_id)
+            .count()
     }
 
     pub fn node(&self, id: &str) -> Option<ProxyNode> {
@@ -428,10 +431,7 @@ impl ProxyPool {
             .filter(|n| n.enabled)
             .filter(|n| self.node_healthy(&n.id))
             .filter(|n| region.is_empty() || n.region == region)
-            .filter(|n| {
-                tags.is_empty()
-                    || tags.iter().any(|t| n.tags.iter().any(|nt| nt == t))
-            })
+            .filter(|n| tags.is_empty() || tags.iter().any(|t| n.tags.iter().any(|nt| nt == t)))
             .filter(|n| {
                 let Some(cap) = cap_for(n, mode) else {
                     return true;
@@ -524,7 +524,10 @@ impl ProxyPool {
             }
             let mut row = n.sanitized();
             if let Some(obj) = row.as_object_mut() {
-                obj.insert("health".into(), serde_json::to_value(&health).unwrap_or_default());
+                obj.insert(
+                    "health".into(),
+                    serde_json::to_value(&health).unwrap_or_default(),
+                );
                 obj.insert("bound_accounts".into(), serde_json::json!(bound));
             }
             nodes.push(row);
@@ -692,7 +695,11 @@ impl ProxyPool {
         })
     }
 
-    pub fn rebalance(&self, account_ids: &[String], tags_of: &HashMap<String, Vec<String>>) -> usize {
+    pub fn rebalance(
+        &self,
+        account_ids: &[String],
+        tags_of: &HashMap<String, Vec<String>>,
+    ) -> usize {
         let cfg = self.cfg.load();
         if !cfg.enabled {
             return 0;
@@ -732,7 +739,11 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
         "http" => ProxyKind::Http,
         "https" => ProxyKind::Https,
         "socks5" | "socks5h" | "socks" => ProxyKind::Socks5,
-        _ => return Err(format!("unsupported proxy scheme '{scheme}' (http/https/socks5)")),
+        _ => {
+            return Err(format!(
+                "unsupported proxy scheme '{scheme}' (http/https/socks5)"
+            ))
+        }
     };
     let (creds, hostport) = if let Some((c, h)) = rest.split_once('@') {
         (Some(c), h)
@@ -741,12 +752,19 @@ pub fn parse_proxy_url(url: &str) -> Result<ParsedProxy, String> {
     };
     let hostport = hostport.trim_end_matches('/');
     let (host, port) = if let Some((h, p)) = hostport.rsplit_once(':') {
-        let port: u16 = p
-            .parse()
-            .map_err(|_| format!("invalid proxy port '{p}'"))?;
-        (h.trim_start_matches('[').trim_end_matches(']').to_string(), port)
+        let port: u16 = p.parse().map_err(|_| format!("invalid proxy port '{p}'"))?;
+        (
+            h.trim_start_matches('[').trim_end_matches(']').to_string(),
+            port,
+        )
     } else {
-        let default_port = if kind == ProxyKind::Socks5 { 1080 } else if scheme == "https" { 443 } else { 80 };
+        let default_port = if kind == ProxyKind::Socks5 {
+            1080
+        } else if scheme == "https" {
+            443
+        } else {
+            80
+        };
         (hostport.to_string(), default_port)
     };
     if host.is_empty() {
@@ -888,7 +906,11 @@ pub fn parse_proxy_line(line: &str, default_scheme: &str) -> Result<Option<Strin
         parse_proxy_url(line)?;
         return Ok(Some(line.to_string()));
     }
-    let build = |host: &str, port: &str, user: Option<&str>, pass: Option<&str>| -> Result<String, String> {
+    let build = |host: &str,
+                 port: &str,
+                 user: Option<&str>,
+                 pass: Option<&str>|
+     -> Result<String, String> {
         let url = match user {
             Some(u) if !u.is_empty() => format!(
                 "{scheme}://{}:{}@{}:{}",
@@ -950,8 +972,24 @@ fn percent_encode_userinfo(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'!' | b'$'
-            | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' => out.push(b as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'=' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1085,12 +1123,20 @@ mod tests {
         assert_eq!(ok("1.2.3.4 8080"), "http://1.2.3.4:8080");
         assert_eq!(ok("1.2.3.4:8080 u:p"), "http://u:p@1.2.3.4:8080");
         assert_eq!(ok("1.2.3.4:8080:u:p@ss"), "http://u:p%40ss@1.2.3.4:8080");
-        assert_eq!(parse_proxy_line("1.2.3.4:8080", "https").unwrap().unwrap(), "https://1.2.3.4:8080");
+        assert_eq!(
+            parse_proxy_line("1.2.3.4:8080", "https").unwrap().unwrap(),
+            "https://1.2.3.4:8080"
+        );
         assert!(parse_proxy_line("", "http").unwrap().is_none());
         assert!(parse_proxy_line("# c", "http").unwrap().is_none());
         assert!(parse_proxy_line("1.2.3.4:abc", "http").is_err());
         assert_eq!(ok("socks5://u:p@1.2.3.4:1080"), "socks5://u:p@1.2.3.4:1080");
-        assert_eq!(parse_proxy_line("1.2.3.4:1080:u:p", "socks5").unwrap().unwrap(), "socks5://u:p@1.2.3.4:1080");
+        assert_eq!(
+            parse_proxy_line("1.2.3.4:1080:u:p", "socks5")
+                .unwrap()
+                .unwrap(),
+            "socks5://u:p@1.2.3.4:1080"
+        );
         assert!(parse_proxy_line("ftp://1.2.3.4:21", "http").is_err());
         let sp = parse_proxy_url("socks5://1.2.3.4").unwrap();
         assert!(sp.socks5);

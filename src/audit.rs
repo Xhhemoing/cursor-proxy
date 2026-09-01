@@ -61,10 +61,6 @@ impl AuditLog {
 
     /// 便捷方法: 设置变更
     pub fn settings_op(&self, changed: &[&str]) {
-        self.record(
-            "settings.update",
-            "admin",
-            json!({ "changed": changed }),
-        );
+        self.record("settings.update", "admin", json!({ "changed": changed }));
     }
 }

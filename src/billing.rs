@@ -143,7 +143,13 @@ impl BillingCtx {
                 r.sales_id.clone(),
                 r.tags.clone(),
             ),
-            None => ("anonymous".into(), "-".into(), "(no auth)".into(), None, Vec::new()),
+            None => (
+                "anonymous".into(),
+                "-".into(),
+                "(no auth)".into(),
+                None,
+                Vec::new(),
+            ),
         };
         let commission_bps = sales_id
             .as_deref()
@@ -329,8 +335,12 @@ impl Ledger {
         let ignored = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicU64::new(0));
         {
-            let (pending, written, ignored, failed) =
-                (pending.clone(), written.clone(), ignored.clone(), failed.clone());
+            let (pending, written, ignored, failed) = (
+                pending.clone(),
+                written.clone(),
+                ignored.clone(),
+                failed.clone(),
+            );
             std::thread::Builder::new()
                 .name("billing-writer".into())
                 .spawn(move || writer_loop(conn, rx, pending, written, ignored, failed))?;
@@ -351,7 +361,10 @@ impl Ledger {
         if self.tx.send(Msg::Record(Box::new(rec))).is_err() {
             self.pending.fetch_sub(1, Ordering::Relaxed);
             self.failed.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(event = "billing_writer_dead", "billing writer thread gone; record lost");
+            tracing::error!(
+                event = "billing_writer_dead",
+                "billing writer thread gone; record lost"
+            );
         }
     }
 
@@ -367,12 +380,17 @@ impl Ledger {
     /// 请求 WAL 截断检查点; 写线程处理, 不阻塞请求路径.
     pub fn request_checkpoint(&self) {
         if self.tx.send(Msg::Checkpoint).is_err() {
-            tracing::warn!(event = "billing_checkpoint", "writer gone, skip wal checkpoint");
+            tracing::warn!(
+                event = "billing_checkpoint",
+                "writer gone, skip wal checkpoint"
+            );
         }
     }
 
     pub fn stats(&self) -> Value {
-        let size = std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(&self.db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         json!({
             "db_file": self.db_path.display().to_string(),
             "db_bytes": size,
@@ -401,7 +419,9 @@ impl Ledger {
 /// 增量迁移: 老库补缓存列 (SQLite ALTER TABLE ADD COLUMN 带默认值, 对既有行安全)
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(billing_records)")?;
-    let cols: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
     for (name, ddl) in [
         ("cache_read_tokens", "ALTER TABLE billing_records ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0"),
         ("cache_write_tokens", "ALTER TABLE billing_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
@@ -502,8 +522,9 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         )?;
-        let mut ins_tag =
-            tx.prepare_cached("INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)")?;
+        let mut ins_tag = tx.prepare_cached(
+            "INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)",
+        )?;
         for r in batch {
             let tags_json = serde_json::to_string(&r.tags).unwrap_or_else(|_| "[]".into());
             let n = ins.execute(params![
@@ -592,7 +613,10 @@ pub fn parse_time(s: &str, tz_offset_minutes: i32, end_of_unit: bool) -> Option<
         if let Ok(d) = NaiveDate::parse_from_str(&norm, "%Y-%m-%d") {
             (d.and_hms_opt(0, 0, 0)?, 86400)
         } else if hour_only {
-            (NaiveDateTime::parse_from_str(&format!("{norm}:00"), "%Y-%m-%d %H:%M").ok()?, 3600)
+            (
+                NaiveDateTime::parse_from_str(&format!("{norm}:00"), "%Y-%m-%d %H:%M").ok()?,
+                3600,
+            )
         } else if let Ok(dt) = NaiveDateTime::parse_from_str(&norm, "%Y-%m-%d %H:%M") {
             (dt, 60)
         } else if let Ok(dt) = NaiveDateTime::parse_from_str(&norm, "%Y-%m-%d %H:%M:%S") {
@@ -680,7 +704,9 @@ fn build_where(f: &Filter) -> Where {
 }
 
 fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// 记录行 → JSON (金额同时给 nano 整数与可读字符串)
@@ -758,7 +784,9 @@ pub fn query_records(
     args.push(&lim);
     args.push(&off);
     let rows = stmt
-        .query_map(params_from_iter(args), |r| row_to_json(r, tz_offset_minutes))?
+        .query_map(params_from_iter(args), |r| {
+            row_to_json(r, tz_offset_minutes)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok((rows, total))
 }
@@ -876,7 +904,9 @@ pub fn summary(
 /// 所有出现过的标签 (供筛选下拉)
 pub fn distinct_tags(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT DISTINCT tag FROM billing_tags ORDER BY tag")?;
-    let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+    let rows = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
     Ok(rows)
 }
 
@@ -963,7 +993,12 @@ mod tests {
         }
     }
     fn u(i: u64, o: u64) -> Usage {
-        Usage { input: i, output: o, cache_read: 0, cache_write: 0 }
+        Usage {
+            input: i,
+            output: o,
+            cache_read: 0,
+            cache_write: 0,
+        }
     }
 
     #[test]
@@ -974,9 +1009,24 @@ mod tests {
             price("claude-opus-*", 15.0, 75.0),
             price("claude-opus-4-6", 10.0, 50.0),
         ];
-        assert_eq!(resolve_price(&prices, "claude-opus-4-6").unwrap().input_per_m, 10.0);
-        assert_eq!(resolve_price(&prices, "claude-opus-4-1").unwrap().input_per_m, 15.0);
-        assert_eq!(resolve_price(&prices, "claude-sonnet-4-6").unwrap().input_per_m, 3.0);
+        assert_eq!(
+            resolve_price(&prices, "claude-opus-4-6")
+                .unwrap()
+                .input_per_m,
+            10.0
+        );
+        assert_eq!(
+            resolve_price(&prices, "claude-opus-4-1")
+                .unwrap()
+                .input_per_m,
+            15.0
+        );
+        assert_eq!(
+            resolve_price(&prices, "claude-sonnet-4-6")
+                .unwrap()
+                .input_per_m,
+            3.0
+        );
         assert_eq!(resolve_price(&prices, "grok-4.6").unwrap().input_per_m, 1.0);
         assert!(resolve_price(&prices[1..], "grok-4.6").is_none());
     }
@@ -984,11 +1034,25 @@ mod tests {
     #[test]
     fn money_is_exact_integer_math() {
         // $3 / 1M input, $15 / 1M output
-        let q = PriceQuote { input_micro: 3_000_000, output_micro: 15_000_000, cache_read_micro: 300_000, cache_write_micro: 3_750_000, priced: true };
+        let q = PriceQuote {
+            input_micro: 3_000_000,
+            output_micro: 15_000_000,
+            cache_read_micro: 300_000,
+            cache_write_micro: 3_750_000,
+            priced: true,
+        };
         // 1234 in + 567 out → 1234*3 + 567*15 = 3702 + 8505 = 12207 micro = 0.012207
         let c = cost_nano(&u(1234, 567), &q);
         // 缓存: 1000 读 @0.3 + 200 写 @3.75 → 300 + 750 = 1050 micro
-        let cc = cost_nano(&Usage { input: 0, output: 0, cache_read: 1000, cache_write: 200 }, &q);
+        let cc = cost_nano(
+            &Usage {
+                input: 0,
+                output: 0,
+                cache_read: 1000,
+                cache_write: 200,
+            },
+            &q,
+        );
         assert_eq!(cc, 1_050_000);
         assert_eq!(c, 12_207_000);
         assert_eq!(fmt_money(c), "0.012207");
@@ -1011,7 +1075,11 @@ mod tests {
         let cfg = BillingConfig {
             default_commission_bps: 500,
             prices: vec![price("*", 1.0, 1.0)],
-            sales: vec![SalesRecord { id: "alice".into(), name: "Alice".into(), commission_bps: 2000 }],
+            sales: vec![SalesRecord {
+                id: "alice".into(),
+                name: "Alice".into(),
+                commission_bps: 2000,
+            }],
             ..Default::default()
         };
         let mut rec = ApiKeyRecord::from_raw("sk-test-key-0000000".into());
@@ -1019,21 +1087,45 @@ mod tests {
         let ctx = BillingCtx::from_key(&cfg, Some(&rec), "x");
         assert_eq!(ctx.commission_bps, 2000);
         rec.sales_id = Some("nobody".into());
-        assert_eq!(BillingCtx::from_key(&cfg, Some(&rec), "x").commission_bps, 500);
+        assert_eq!(
+            BillingCtx::from_key(&cfg, Some(&rec), "x").commission_bps,
+            500
+        );
         rec.sales_id = None;
-        assert_eq!(BillingCtx::from_key(&cfg, Some(&rec), "x").commission_bps, 500);
+        assert_eq!(
+            BillingCtx::from_key(&cfg, Some(&rec), "x").commission_bps,
+            500
+        );
         assert!(!BillingCtx::from_key(&cfg, None, "x").quote.priced || true);
     }
 
     #[test]
     fn parse_time_formats() {
         // 2026-01-01 00:00 +08:00 = 2025-12-31T16:00:00Z = 1767196800
-        assert_eq!(parse_time("2026-01-01", 480, false), Some(1_767_196_800_000));
-        assert_eq!(parse_time("2026-01-01", 480, true), Some(1_767_196_800_000 + 86_400_000));
-        assert_eq!(parse_time("2026-01-01 08", 480, false), Some(1_767_196_800_000 + 8 * 3_600_000));
-        assert_eq!(parse_time("2026-01-01T08:30", 480, false), Some(1_767_196_800_000 + 8 * 3_600_000 + 30 * 60_000));
-        assert_eq!(parse_time("1767196800", 480, false), Some(1_767_196_800_000));
-        assert_eq!(parse_time("1767196800123", 480, false), Some(1_767_196_800_123));
+        assert_eq!(
+            parse_time("2026-01-01", 480, false),
+            Some(1_767_196_800_000)
+        );
+        assert_eq!(
+            parse_time("2026-01-01", 480, true),
+            Some(1_767_196_800_000 + 86_400_000)
+        );
+        assert_eq!(
+            parse_time("2026-01-01 08", 480, false),
+            Some(1_767_196_800_000 + 8 * 3_600_000)
+        );
+        assert_eq!(
+            parse_time("2026-01-01T08:30", 480, false),
+            Some(1_767_196_800_000 + 8 * 3_600_000 + 30 * 60_000)
+        );
+        assert_eq!(
+            parse_time("1767196800", 480, false),
+            Some(1_767_196_800_000)
+        );
+        assert_eq!(
+            parse_time("1767196800123", 480, false),
+            Some(1_767_196_800_123)
+        );
         assert_eq!(parse_time("garbage", 480, false), None);
     }
 
@@ -1043,8 +1135,25 @@ mod tests {
         dir.join("billing.db")
     }
 
-    fn rec(ctx: &BillingCtx, req: &str, model: &str, inp: u64, out: u64, status: u16) -> BillingRecord {
-        BillingRecord::build(ctx, req, model, "acc1", u(inp, out), false, status, 100, "127.0.0.1")
+    fn rec(
+        ctx: &BillingCtx,
+        req: &str,
+        model: &str,
+        inp: u64,
+        out: u64,
+        status: u16,
+    ) -> BillingRecord {
+        BillingRecord::build(
+            ctx,
+            req,
+            model,
+            "acc1",
+            u(inp, out),
+            false,
+            status,
+            100,
+            "127.0.0.1",
+        )
     }
 
     #[test]
@@ -1072,7 +1181,11 @@ mod tests {
         let ledger = Ledger::open(&db).unwrap();
         let cfg = BillingConfig {
             prices: vec![price("m1", 3.0, 15.0)],
-            sales: vec![SalesRecord { id: "s1".into(), name: "S".into(), commission_bps: 1000 }],
+            sales: vec![SalesRecord {
+                id: "s1".into(),
+                name: "S".into(),
+                commission_bps: 1000,
+            }],
             ..Default::default()
         };
         let mut key = ApiKeyRecord::from_raw("sk-aaaaaaaaaaaaaaaa".into());
@@ -1107,40 +1220,75 @@ mod tests {
         assert_eq!(sum[0]["unpriced"], 1);
 
         // 标签筛选 + 按标签分组
-        let f = Filter { tag: Some("vip".into()), ..Default::default() };
+        let f = Filter {
+            tag: Some("vip".into()),
+            ..Default::default()
+        };
         let (rows, _) = query_records(&conn, &f, 100, 0, 480).unwrap();
         assert_eq!(rows.len(), 4);
-        let f = Filter { tag: Some("nope".into()), ..Default::default() };
+        let f = Filter {
+            tag: Some("nope".into()),
+            ..Default::default()
+        };
         let (rows, _) = query_records(&conn, &f, 100, 0, 480).unwrap();
         assert_eq!(rows.len(), 0);
         let by_tag = summary(&conn, &Filter::default(), GroupBy::Tag, 480).unwrap();
         assert_eq!(by_tag.len(), 2);
 
         // 销售 / 模型 / 状态 / 未定价 / 自由搜索
-        let f = Filter { sales: Some("s1".into()), status: Some(200), ..Default::default() };
+        let f = Filter {
+            sales: Some("s1".into()),
+            status: Some(200),
+            ..Default::default()
+        };
         let (_, n) = query_records(&conn, &f, 10, 0, 480).unwrap();
         assert_eq!(n, 3);
-        let f = Filter { model: Some("m*".into()), ..Default::default() };
+        let f = Filter {
+            model: Some("m*".into()),
+            ..Default::default()
+        };
         let (_, n) = query_records(&conn, &f, 10, 0, 480).unwrap();
         assert_eq!(n, 3);
-        let f = Filter { unpriced: true, ..Default::default() };
+        let f = Filter {
+            unpriced: true,
+            ..Default::default()
+        };
         let (_, n) = query_records(&conn, &f, 10, 0, 480).unwrap();
         assert_eq!(n, 1);
-        let f = Filter { q: Some("客户".into()), ..Default::default() };
+        let f = Filter {
+            q: Some("客户".into()),
+            ..Default::default()
+        };
         let (_, n) = query_records(&conn, &f, 10, 0, 480).unwrap();
         assert_eq!(n, 4);
-        let f = Filter { q: Some("proj".into()), ..Default::default() };
+        let f = Filter {
+            q: Some("proj".into()),
+            ..Default::default()
+        };
         let (_, n) = query_records(&conn, &f, 10, 0, 480).unwrap();
         assert_eq!(n, 4);
 
         // 按天 / 小时 分组各只有一桶
-        assert_eq!(summary(&conn, &Filter::default(), GroupBy::Day, 480).unwrap().len(), 1);
-        assert_eq!(summary(&conn, &Filter::default(), GroupBy::Hour, 480).unwrap().len(), 1);
+        assert_eq!(
+            summary(&conn, &Filter::default(), GroupBy::Day, 480)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            summary(&conn, &Filter::default(), GroupBy::Hour, 480)
+                .unwrap()
+                .len(),
+            1
+        );
         let by_key = summary(&conn, &Filter::default(), GroupBy::Key, 480).unwrap();
         assert_eq!(by_key[0]["key_name"], "客户A");
 
         // 时间窗: 未来 → 空
-        let f = Filter { from_ms: Some(now_ms() + 60_000), ..Default::default() };
+        let f = Filter {
+            from_ms: Some(now_ms() + 60_000),
+            ..Default::default()
+        };
         let (_, n) = query_records(&conn, &f, 10, 0, 480).unwrap();
         assert_eq!(n, 0);
 
@@ -1156,7 +1304,10 @@ mod tests {
         // 32 线程 × 500 条, 每条 1 输入 token @ $1/M → 总额恰好 16000 micro
         let db = tmp_db();
         let ledger = Arc::new(Ledger::open(&db).unwrap());
-        let cfg = BillingConfig { prices: vec![price("*", 1.0, 0.0)], ..Default::default() };
+        let cfg = BillingConfig {
+            prices: vec![price("*", 1.0, 0.0)],
+            ..Default::default()
+        };
         let key = ApiKeyRecord::from_raw("sk-bbbbbbbbbbbbbbbb".into());
         let ctx = Arc::new(BillingCtx::from_key(&cfg, Some(&key), "m"));
         let handles: Vec<_> = (0..32)

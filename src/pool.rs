@@ -198,8 +198,10 @@ impl AccountPool {
     }
 
     fn bind_session(&self, session_id: &str, account_id: &str) {
-        self.sessions
-            .insert(session_id.to_string(), (account_id.to_string(), Instant::now() + STICKY_TTL));
+        self.sessions.insert(
+            session_id.to_string(),
+            (account_id.to_string(), Instant::now() + STICKY_TTL),
+        );
     }
 
     /// 重建有序 id 列表（账号变更时调用）
@@ -219,7 +221,11 @@ impl AccountPool {
             .iter()
             .filter(|id| {
                 let enabled = !self.disabled.get(*id).map(|v| *v).unwrap_or(false);
-                let cooling = self.slots.get(*id).map(|s| s.is_cooling_down()).unwrap_or(false);
+                let cooling = self
+                    .slots
+                    .get(*id)
+                    .map(|s| s.is_cooling_down())
+                    .unwrap_or(false);
                 let quota_ok = !self.quota_blocks(id);
                 enabled && !cooling && quota_ok
             })
@@ -300,7 +306,9 @@ impl AccountPool {
         }
     }
 
-    pub async fn acquire(&self) -> Result<(Account, tokio::sync::OwnedSemaphorePermit), AcquireError> {
+    pub async fn acquire(
+        &self,
+    ) -> Result<(Account, tokio::sync::OwnedSemaphorePermit), AcquireError> {
         self.acquire_by_session(None).await
     }
 
@@ -558,13 +566,23 @@ impl AccountPool {
         let mut accounts = Vec::new();
         for entry in self.slots.iter() {
             let id = entry.key().clone();
-            let remaining = entry.value().cooldown_remaining().map(|d| d.as_secs()).unwrap_or(0);
+            let remaining = entry
+                .value()
+                .cooldown_remaining()
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let stats = self.stats.get(&id);
             accounts.push(PersistedAccountState {
                 id,
                 cooldown_remaining_secs: remaining,
-                requests: stats.as_ref().map(|s| s.requests.load(Ordering::Relaxed)).unwrap_or(0),
-                errors: stats.as_ref().map(|s| s.errors.load(Ordering::Relaxed)).unwrap_or(0),
+                requests: stats
+                    .as_ref()
+                    .map(|s| s.requests.load(Ordering::Relaxed))
+                    .unwrap_or(0),
+                errors: stats
+                    .as_ref()
+                    .map(|s| s.errors.load(Ordering::Relaxed))
+                    .unwrap_or(0),
                 consecutive_errors: stats.as_ref().map(|s| s.consecutive_errors()).unwrap_or(0),
                 auto_disabled_count: stats
                     .as_ref()
@@ -573,7 +591,10 @@ impl AccountPool {
                 saved_at: now,
             });
         }
-        let blob = PersistedPoolState { saved_at: now, accounts };
+        let blob = PersistedPoolState {
+            saved_at: now,
+            accounts,
+        };
         if let Ok(json) = serde_json::to_string_pretty(&blob) {
             let tmp = path.with_extension("json.tmp");
             if std::fs::write(&tmp, json).is_ok() {
@@ -587,7 +608,10 @@ impl AccountPool {
             return;
         };
         let Ok(blob) = serde_json::from_str::<PersistedPoolState>(&raw) else {
-            tracing::warn!(event = "pool_state_restore", "account-state.json malformed, ignoring");
+            tracing::warn!(
+                event = "pool_state_restore",
+                "account-state.json malformed, ignoring"
+            );
             return;
         };
         let mut restored = 0usize;
@@ -603,15 +627,23 @@ impl AccountPool {
             if let Some(stats) = self.stats.get(&rec.id) {
                 stats.requests.store(rec.requests, Ordering::Relaxed);
                 stats.errors.store(rec.errors, Ordering::Relaxed);
-                stats.consecutive_errors.store(rec.consecutive_errors, Ordering::Relaxed);
-                stats.auto_disabled_count.store(rec.auto_disabled_count, Ordering::Relaxed);
+                stats
+                    .consecutive_errors
+                    .store(rec.consecutive_errors, Ordering::Relaxed);
+                stats
+                    .auto_disabled_count
+                    .store(rec.auto_disabled_count, Ordering::Relaxed);
             }
             restored += 1;
         }
         if restored > 0 {
             self.rebuild_available_ids();
             self.bump_version();
-            tracing::info!(event = "pool_state_restore", restored, "account runtime state restored");
+            tracing::info!(
+                event = "pool_state_restore",
+                restored,
+                "account runtime state restored"
+            );
         }
     }
 
@@ -658,7 +690,12 @@ impl AccountPool {
         // 重新构建
         let result = self.query_accounts(q, filter, sort, page, page_size, proxy_id);
         // 只缓存无搜索/过滤的默认视图 (最常见场景)
-        if q.is_empty() && filter == "all" && sort == "attention" && page == 1 && proxy_id.is_empty() {
+        if q.is_empty()
+            && filter == "all"
+            && sort == "attention"
+            && page == 1
+            && proxy_id.is_empty()
+        {
             let mut cache = self.query_cache.write();
             *cache = Some((current_version, result.clone()));
         }
@@ -743,7 +780,9 @@ impl AccountPool {
             if !quota_ok {
                 quota_blocked += 1;
             }
-            total_inflight += self.max_concurrency.saturating_sub(slot.sem.available_permits());
+            total_inflight += self
+                .max_concurrency
+                .saturating_sub(slot.sem.available_permits());
             if let Some(s) = self.stats.get(id) {
                 total_requests += s.requests.load(Ordering::Relaxed);
                 let err = s.errors.load(Ordering::Relaxed);
@@ -786,24 +825,35 @@ impl AccountPool {
                 available += 1;
             }
 
-            let inflight = self.max_concurrency.saturating_sub(slot.sem.available_permits());
+            let inflight = self
+                .max_concurrency
+                .saturating_sub(slot.sem.available_permits());
             total_inflight += inflight;
             let (req, err) = self
                 .stats
                 .get(id)
-                .map(|s| (s.requests.load(Ordering::Relaxed), s.errors.load(Ordering::Relaxed)))
+                .map(|s| {
+                    (
+                        s.requests.load(Ordering::Relaxed),
+                        s.errors.load(Ordering::Relaxed),
+                    )
+                })
                 .unwrap_or((0, 0));
             total_requests += req;
             total_errors += err;
-            let stats = self.stats.get(id).map(|s| {
-                serde_json::json!({
-                    "requests": req,
-                    "errors": err,
-                    "consecutive_errors": s.consecutive_errors(),
-                    "error_rate": s.error_rate(),
-                    "auto_disabled_count": s.auto_disabled_count.load(Ordering::Relaxed),
+            let stats = self
+                .stats
+                .get(id)
+                .map(|s| {
+                    serde_json::json!({
+                        "requests": req,
+                        "errors": err,
+                        "consecutive_errors": s.consecutive_errors(),
+                        "error_rate": s.error_rate(),
+                        "auto_disabled_count": s.auto_disabled_count.load(Ordering::Relaxed),
+                    })
                 })
-            }).unwrap_or(serde_json::json!({}));
+                .unwrap_or(serde_json::json!({}));
 
             let cooldown_remaining = slot.cooldown_remaining().map(|d| d.as_secs());
 
@@ -871,7 +921,9 @@ impl AccountPool {
         let cooling = slot.is_cooling_down();
         let quota_ok = !self.quota_blocks(id);
         let is_available = enabled && !cooling && quota_ok;
-        let inflight = self.max_concurrency.saturating_sub(slot.sem.available_permits());
+        let inflight = self
+            .max_concurrency
+            .saturating_sub(slot.sem.available_permits());
         let (req, err, stats) = self
             .stats
             .get(id)
@@ -958,8 +1010,10 @@ impl AccountPool {
                 "enabled" | "available" => acc["available"].as_bool().unwrap_or(false),
                 "disabled" => !acc["enabled"].as_bool().unwrap_or(false),
                 "cooldown" => acc["cooldown"].as_bool().unwrap_or(false),
-                "error" => acc["errors"].as_u64().unwrap_or(0) > 0
-                    || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) > 0,
+                "error" => {
+                    acc["errors"].as_u64().unwrap_or(0) > 0
+                        || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) > 0
+                }
                 "quota" => !acc["quota_ok"].as_bool().unwrap_or(true),
                 "unhealthy" => acc["health_score"].as_u64().unwrap_or(100) < 50,
                 "attention" => {
@@ -989,24 +1043,25 @@ impl AccountPool {
             s
         };
 
-        rows.sort_by(|a, b| {
-            match sort {
-                "requests" => b["requests"].as_u64().cmp(&a["requests"].as_u64()),
-                "errors" => b["errors"].as_u64().cmp(&a["errors"].as_u64()),
-                "quota" => {
-                    let qa = a["quota"]["usage_percent"].as_f64().unwrap_or(999.0);
-                    let qb = b["quota"]["usage_percent"].as_f64().unwrap_or(999.0);
-                    qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
+        rows.sort_by(|a, b| match sort {
+            "requests" => b["requests"].as_u64().cmp(&a["requests"].as_u64()),
+            "errors" => b["errors"].as_u64().cmp(&a["errors"].as_u64()),
+            "quota" => {
+                let qa = a["quota"]["usage_percent"].as_f64().unwrap_or(999.0);
+                let qb = b["quota"]["usage_percent"].as_f64().unwrap_or(999.0);
+                qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            "health" => a["health_score"].as_u64().cmp(&b["health_score"].as_u64()),
+            "attention" => severity(b).cmp(&severity(a)),
+            _ => {
+                let sev = severity(b).cmp(&severity(a));
+                if sev != std::cmp::Ordering::Equal {
+                    return sev;
                 }
-                "health" => a["health_score"].as_u64().cmp(&b["health_score"].as_u64()),
-                "attention" => severity(b).cmp(&severity(a)),
-                _ => {
-                    let sev = severity(b).cmp(&severity(a));
-                    if sev != std::cmp::Ordering::Equal {
-                        return sev;
-                    }
-                    a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
-                }
+                a["id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["id"].as_str().unwrap_or(""))
             }
         });
 
@@ -1239,8 +1294,8 @@ mod tests {
 
     #[tokio::test]
     async fn busy_waits_then_succeeds() {
-        let pool = AccountPool::new(vec![acc("a", true)], 1)
-            .with_acquire_wait(Duration::from_millis(500));
+        let pool =
+            AccountPool::new(vec![acc("a", true)], 1).with_acquire_wait(Duration::from_millis(500));
         let (_, p1) = pool.acquire().await.unwrap();
         let pool2 = pool.clone();
         tokio::spawn(async move {
@@ -1259,7 +1314,10 @@ mod tests {
         let (_a, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
         assert_eq!(pool.session_count(), 1);
         assert_eq!(pool.gc_sessions(), 0);
-        pool.sessions.insert("dead".into(), ("a".into(), Instant::now() - Duration::from_secs(1)));
+        pool.sessions.insert(
+            "dead".into(),
+            ("a".into(), Instant::now() - Duration::from_secs(1)),
+        );
         assert_eq!(pool.gc_sessions(), 1);
         assert_eq!(pool.session_count(), 1);
     }
@@ -1267,7 +1325,10 @@ mod tests {
     #[test]
     fn empty_pool_is_empty() {
         let pool = AccountPool::new(vec![], 1);
-        assert!(matches!(pool.try_acquire_by_session(None), AcquireTry::Empty));
+        assert!(matches!(
+            pool.try_acquire_by_session(None),
+            AcquireTry::Empty
+        ));
     }
 
     #[test]

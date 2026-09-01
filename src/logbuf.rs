@@ -46,7 +46,9 @@ impl LogBuffer {
             // 写线程挂了也不能影响请求
             let _ = tx.send(line);
         }
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut entry = entry;
         entry["_id"] = serde_json::json!(id);
         let mut entries = self.entries.lock().unwrap();
@@ -92,7 +94,9 @@ impl LogBuffer {
 
     /// 当前最大日志 ID
     pub fn max_id(&self) -> u64 {
-        self.next_id.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(1)
+        self.next_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(1)
     }
 
     pub fn len(&self) -> usize {
@@ -178,7 +182,10 @@ fn persist_loop(path: std::path::PathBuf, rx: mpsc::Receiver<String>) {
                     writer = open().ok();
                 }
                 if let Some(w) = writer.as_mut() {
-                    if w.write_all(line.as_bytes()).and_then(|_| w.write_all(b"\n")).is_err() {
+                    if w.write_all(line.as_bytes())
+                        .and_then(|_| w.write_all(b"\n"))
+                        .is_err()
+                    {
                         writer = None; // 下次重新打开
                         continue;
                     }
@@ -299,7 +306,10 @@ mod tests {
         }
         // 等写线程收尾
         for _ in 0..50 {
-            if std::fs::read_to_string(&path).map(|s| s.lines().count() == 2).unwrap_or(false) {
+            if std::fs::read_to_string(&path)
+                .map(|s| s.lines().count() == 2)
+                .unwrap_or(false)
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -317,15 +327,30 @@ mod tests {
         std::fs::write(&path, b"gen0\n").unwrap();
         rotate_log_file(&path, 2);
         assert!(!path.exists());
-        assert_eq!(std::fs::read_to_string(dir.join("p.log.1")).unwrap(), "gen0\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("p.log.1")).unwrap(),
+            "gen0\n"
+        );
         std::fs::write(&path, b"gen1\n").unwrap();
         rotate_log_file(&path, 2);
-        assert_eq!(std::fs::read_to_string(dir.join("p.log.1")).unwrap(), "gen1\n");
-        assert_eq!(std::fs::read_to_string(dir.join("p.log.2")).unwrap(), "gen0\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("p.log.1")).unwrap(),
+            "gen1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("p.log.2")).unwrap(),
+            "gen0\n"
+        );
         std::fs::write(&path, b"gen2\n").unwrap();
         rotate_log_file(&path, 2);
-        assert_eq!(std::fs::read_to_string(dir.join("p.log.1")).unwrap(), "gen2\n");
-        assert_eq!(std::fs::read_to_string(dir.join("p.log.2")).unwrap(), "gen1\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("p.log.1")).unwrap(),
+            "gen2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("p.log.2")).unwrap(),
+            "gen1\n"
+        );
         assert!(!dir.join("p.log.3").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

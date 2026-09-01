@@ -95,7 +95,11 @@ pub async fn api_keys_add(
     // key 留空 → 服务端自动生成; 响应里回传完整 key (仅此一次明文返回)
     let (key, generated) = {
         let k = body.key.trim().to_string();
-        if k.is_empty() { (generate_key(), true) } else { (k, false) }
+        if k.is_empty() {
+            (generate_key(), true)
+        } else {
+            (k, false)
+        }
     };
     if let Err(msg) = validate_key_strength(&key) {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
@@ -109,7 +113,10 @@ pub async fn api_keys_add(
         request_limit: body.request_limit,
         expires_at: body.expires_at,
         tags: normalize_tags(body.tags),
-        sales_id: body.sales_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        sales_id: body
+            .sales_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         rpm_limit: body.rpm_limit,
         max_concurrency: body.max_concurrency,
     };
@@ -157,10 +164,16 @@ pub async fn api_keys_reveal(
 ) -> Response {
     let config = state.config.load();
     let Some(rec) = config.api_keys.get(index) else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "key index not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "key index not found"})),
+        )
+            .into_response();
     };
     let prefix: String = rec.key.chars().take(8).collect();
-    state.audit.key_op("reveal", &prefix, json!({"index": index}));
+    state
+        .audit
+        .key_op("reveal", &prefix, json!({"index": index}));
     Json(json!({"index": index, "key": rec.key, "name": rec.name})).into_response()
 }
 
@@ -235,8 +248,11 @@ pub async fn api_keys_patch(
         )
             .into_response();
     }
-    state.audit.key_op("patch", &prefix, json!({"index": index}));
-    Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
+    state
+        .audit
+        .key_op("patch", &prefix, json!({"index": index}));
+    Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)}))
+        .into_response()
 }
 
 /// DELETE /admin/api/keys/:index
@@ -271,8 +287,11 @@ pub async fn api_keys_delete(
     *state.config.lock() = snapshot.clone();
     state.key_usage.remove(&removed);
     let prefix: String = removed.chars().take(8).collect();
-    state.audit.key_op("delete", &prefix, json!({"index": index}));
-    Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
+    state
+        .audit
+        .key_op("delete", &prefix, json!({"index": index}));
+    Json(json!({"status": "ok", "keys": redacted_keys(&snapshot, &state.key_usage)}))
+        .into_response()
 }
 
 pub fn redacted_keys(config: &AppConfig, usage: &quota::KeyUsageStore) -> Value {
@@ -295,10 +314,7 @@ pub fn redacted_keys(config: &AppConfig, usage: &quota::KeyUsageStore) -> Value 
 
 /// POST /admin/api/keys/import — 批量导入 API Key (JSON 数组或 CSV)
 /// CSV 列: key,name,description,token_limit,request_limit,rpm_limit,max_concurrency,expires_at,tags,sales_id
-pub async fn api_keys_import(
-    State(state): State<Arc<AppState>>,
-    body: String,
-) -> Response {
+pub async fn api_keys_import(State(state): State<Arc<AppState>>, body: String) -> Response {
     let records: Vec<ApiKeyRecord> = match serde_json::from_str::<Vec<ApiKeyRecord>>(&body) {
         Ok(recs) => recs,
         Err(_) => {
@@ -307,7 +323,8 @@ pub async fn api_keys_import(
             let header = match lines.next() {
                 Some(h) => h.to_lowercase(),
                 None => {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "empty CSV"}))).into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "empty CSV"})))
+                        .into_response();
                 }
             };
             let cols: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
@@ -315,7 +332,13 @@ pub async fn api_keys_import(
 
             let key_idx = match find(&["key", "api_key", "token"]) {
                 Some(i) => i,
-                None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "CSV must have a 'key' column"}))).into_response(),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "CSV must have a 'key' column"})),
+                    )
+                        .into_response()
+                }
             };
             let name_idx = find(&["name"]);
             let desc_idx = find(&["description", "desc"]);
@@ -330,17 +353,40 @@ pub async fn api_keys_import(
             let mut recs = Vec::new();
             for line in lines {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let parts: Vec<&str> = line.split(',').collect();
-                let get = |idx: Option<usize>| idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string());
+                let get = |idx: Option<usize>| {
+                    idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string())
+                };
                 let key = match get(Some(key_idx)) {
                     Some(k) if !k.is_empty() => k,
                     _ => continue,
                 };
-                let parse_u64 = |idx: Option<usize>| get(idx).and_then(|s| s.parse::<u64>().ok()).filter(|&v| v > 0);
-                let parse_u32 = |idx: Option<usize>| get(idx).and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
-                let parse_i64 = |idx: Option<usize>| get(idx).and_then(|s| s.parse::<i64>().ok()).filter(|&v| v > 0);
-                let tags = get(tags_idx).map(|s| s.split(';').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()).unwrap_or_default();
+                let parse_u64 = |idx: Option<usize>| {
+                    get(idx)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .filter(|&v| v > 0)
+                };
+                let parse_u32 = |idx: Option<usize>| {
+                    get(idx)
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .filter(|&v| v > 0)
+                };
+                let parse_i64 = |idx: Option<usize>| {
+                    get(idx)
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .filter(|&v| v > 0)
+                };
+                let tags = get(tags_idx)
+                    .map(|s| {
+                        s.split(';')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 recs.push(ApiKeyRecord {
                     key,
                     name: get(name_idx).unwrap_or_default(),
@@ -356,7 +402,11 @@ pub async fn api_keys_import(
                 });
             }
             if recs.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"error": "no valid rows parsed"}))).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "no valid rows parsed"})),
+                )
+                    .into_response();
             }
             recs
         }
@@ -388,12 +438,21 @@ pub async fn api_keys_import(
         }
         if imported > 0 {
             if let Err(e) = config::save_config(&config) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
             }
         }
     }
-    state.audit.key_op("import", "batch", json!({"imported": imported, "skipped": skipped}));
-    Json(json!({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors})).into_response()
+    state.audit.key_op(
+        "import",
+        "batch",
+        json!({"imported": imported, "skipped": skipped}),
+    );
+    Json(json!({"status": "ok", "imported": imported, "skipped": skipped, "errors": errors}))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -419,29 +478,58 @@ pub async fn api_keys_batch_edit(
     let snapshot = {
         let mut config = state.config.lock();
         for &idx in &body.indices {
-            let Some(rec) = config.api_keys.get_mut(idx) else { continue };
-            if let Some(en) = body.enabled { rec.enabled = en; }
-            if let Some(rpm) = body.rpm_limit { rec.rpm_limit = rpm.filter(|&v| v > 0); }
-            if let Some(mc) = body.max_concurrency { rec.max_concurrency = mc.filter(|&v| v > 0); }
-            if let Some(tl) = body.token_limit { rec.token_limit = tl.filter(|&v| v > 0); }
-            if let Some(rl) = body.request_limit { rec.request_limit = rl.filter(|&v| v > 0); }
-            if let Some(ref tags) = body.tags { rec.tags = normalize_tags(tags.clone()); }
-            if let Some(ref sid) = body.sales_id { rec.sales_id = sid.clone().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()); }
+            let Some(rec) = config.api_keys.get_mut(idx) else {
+                continue;
+            };
+            if let Some(en) = body.enabled {
+                rec.enabled = en;
+            }
+            if let Some(rpm) = body.rpm_limit {
+                rec.rpm_limit = rpm.filter(|&v| v > 0);
+            }
+            if let Some(mc) = body.max_concurrency {
+                rec.max_concurrency = mc.filter(|&v| v > 0);
+            }
+            if let Some(tl) = body.token_limit {
+                rec.token_limit = tl.filter(|&v| v > 0);
+            }
+            if let Some(rl) = body.request_limit {
+                rec.request_limit = rl.filter(|&v| v > 0);
+            }
+            if let Some(ref tags) = body.tags {
+                rec.tags = normalize_tags(tags.clone());
+            }
+            if let Some(ref sid) = body.sales_id {
+                rec.sales_id = sid
+                    .clone()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
             updated += 1;
         }
         config.clone()
     };
     if let Err(e) = config::save_config(&snapshot) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
     }
-    state.audit.key_op("batch_edit", "batch", json!({"updated": updated, "indices": body.indices}));
+    state.audit.key_op(
+        "batch_edit",
+        "batch",
+        json!({"updated": updated, "indices": body.indices}),
+    );
     Json(json!({"status": "ok", "updated": updated, "keys": redacted_keys(&snapshot, &state.key_usage)})).into_response()
 }
 
 /// GET /admin/api/keys/export — 导出全部 key (含完整 key, 用于备份/迁移)
 pub async fn api_keys_export(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.config.load();
-    state.audit.key_op("export", "all", json!({"count": config.api_keys.len()}));
+    state
+        .audit
+        .key_op("export", "all", json!({"count": config.api_keys.len()}));
     Json(json!({
         "exported_at": chrono::Utc::now().to_rfc3339(),
         "count": config.api_keys.len(),

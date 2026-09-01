@@ -121,10 +121,7 @@ pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
     for m in messages {
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         if role == "tool" {
-            let call_id = m
-                .get("tool_call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let call_id = m.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
             let text = content_to_text(m.get("content").unwrap_or(&Value::Null));
             out.push(json!({
                 "role": "user",
@@ -251,10 +248,7 @@ pub fn anthropic_to_openai_chat(body: &Value) -> Result<Value, String> {
                             }));
                         }
                         "tool_result" => {
-                            let id = b
-                                .get("tool_use_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
                             let c = match b.get("content") {
                                 Some(Value::String(s)) => s.clone(),
                                 Some(other) => content_to_text(other),
@@ -495,7 +489,12 @@ pub fn apply_tool_call_part(out: &mut AssistantOut, part: &Value) {
     });
 }
 
-pub fn anthropic_message(id: &str, model: &str, out: &AssistantOut, usage: &crate::translate::Usage) -> Value {
+pub fn anthropic_message(
+    id: &str,
+    model: &str,
+    out: &AssistantOut,
+    usage: &crate::translate::Usage,
+) -> Value {
     let mut content: Vec<Value> = Vec::new();
     if !out.text.is_empty() {
         content.push(json!({"type": "text", "text": out.text}));
@@ -533,7 +532,12 @@ pub fn anthropic_message(id: &str, model: &str, out: &AssistantOut, usage: &crat
     })
 }
 
-pub fn responses_message(id: &str, model: &str, out: &AssistantOut, usage: &crate::translate::Usage) -> Value {
+pub fn responses_message(
+    id: &str,
+    model: &str,
+    out: &AssistantOut,
+    usage: &crate::translate::Usage,
+) -> Value {
     let mut output: Vec<Value> = Vec::new();
     if !out.text.is_empty() || out.tool_calls.is_empty() {
         output.push(json!({
@@ -570,7 +574,12 @@ pub fn responses_message(id: &str, model: &str, out: &AssistantOut, usage: &crat
     })
 }
 
-pub fn openai_message_with_tools(id: &str, model: &str, out: &AssistantOut, usage: &crate::translate::Usage) -> Value {
+pub fn openai_message_with_tools(
+    id: &str,
+    model: &str,
+    out: &AssistantOut,
+    usage: &crate::translate::Usage,
+) -> Value {
     let finish = if out.tool_calls.is_empty() {
         "stop"
     } else {
@@ -609,7 +618,11 @@ pub fn openai_message_with_tools(id: &str, model: &str, out: &AssistantOut, usag
 }
 
 pub fn sse_event(event: &str, data: &Value) -> String {
-    format!("event: {}\ndata: {}\n\n", event, serde_json::to_string(data).unwrap())
+    format!(
+        "event: {}\ndata: {}\n\n",
+        event,
+        serde_json::to_string(data).unwrap()
+    )
 }
 
 #[cfg(test)]
@@ -708,7 +721,9 @@ mod tests {
         let resp = responses_message("resp_x", "kimi-k3", &out, &usage);
         assert_eq!(resp["output"][0]["type"], "function_call");
         assert_eq!(resp["output"][0]["call_id"], "c1");
-        assert!(hosted_web_search(Some(&json!([{"type": "web_search_preview"}]))));
+        assert!(hosted_web_search(Some(
+            &json!([{"type": "web_search_preview"}])
+        )));
         assert!(!hosted_web_search(Some(
             &json!([{"type": "function", "function": {"name": "bash"}}])
         )));

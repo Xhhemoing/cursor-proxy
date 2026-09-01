@@ -65,11 +65,20 @@ pub async fn api_settings_get(State(state): State<Arc<AppState>>) -> impl IntoRe
     let config = state.config.load();
     let mut view = config.public_view();
     if let Some(obj) = view.as_object_mut() {
-        obj.insert("upstreams".into(), json!(state.upstreams.keys().collect::<Vec<_>>()));
+        obj.insert(
+            "upstreams".into(),
+            json!(state.upstreams.keys().collect::<Vec<_>>()),
+        );
         obj.insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
         obj.insert(
             "restart_required_fields".into(),
-            json!(["timeout_s", "max_concurrency_per_account", "backend", "host", "port"]),
+            json!([
+                "timeout_s",
+                "max_concurrency_per_account",
+                "backend",
+                "host",
+                "port"
+            ]),
         );
     }
     Json(view)

@@ -160,18 +160,15 @@ pub async fn api_proxies_import(
         .to_string();
 
     let existing = state.config.lock().proxy.nodes.clone();
-    let mut seen_urls: std::collections::HashSet<String> = existing
-        .iter()
-        .map(|n| n.url.trim().to_string())
-        .collect();
+    let mut seen_urls: std::collections::HashSet<String> =
+        existing.iter().map(|n| n.url.trim().to_string()).collect();
     let existing_ids: std::collections::HashSet<String> =
         existing.iter().map(|n| n.id.clone()).collect();
     // 编号从已有 prefix-N 的最大值之后继续
     let mut seq = existing
         .iter()
         .filter_map(|n| {
-            n.id
-                .strip_prefix(&prefix)
+            n.id.strip_prefix(&prefix)
                 .and_then(|r| r.strip_prefix('-'))
                 .and_then(|r| r.parse::<u32>().ok())
         })
@@ -213,7 +210,12 @@ pub async fn api_proxies_import(
             url,
             kind,
             region: body.region.trim().to_string(),
-            tags: body.tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            tags: body
+                .tags
+                .iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
             enabled: true,
             max_accounts: body.max_accounts,
             note: body.note.trim().to_string(),
@@ -328,7 +330,10 @@ pub async fn probe_nodes(state: &Arc<AppState>, ids: Option<&[String]>) -> Vec<s
     let nodes: Vec<ProxyNode> = cfg
         .nodes
         .iter()
-        .filter(|n| ids.map(|want| want.iter().any(|id| id == &n.id)).unwrap_or(true))
+        .filter(|n| {
+            ids.map(|want| want.iter().any(|id| id == &n.id))
+                .unwrap_or(true)
+        })
         .cloned()
         .collect();
     stream::iter(nodes)
@@ -340,15 +345,23 @@ pub async fn probe_nodes(state: &Arc<AppState>, ids: Option<&[String]>) -> Vec<s
                 let latency = start.elapsed().as_millis() as u64;
                 match result {
                     Ok(ip) => {
-                        state
-                            .proxies
-                            .record_probe(&n.id, true, Some(latency), Some(ip.clone()), None);
+                        state.proxies.record_probe(
+                            &n.id,
+                            true,
+                            Some(latency),
+                            Some(ip.clone()),
+                            None,
+                        );
                         json!({"id": n.id, "ok": true, "latency_ms": latency, "egress_ip": ip})
                     }
                     Err(e) => {
-                        state
-                            .proxies
-                            .record_probe(&n.id, false, Some(latency), None, Some(e.clone()));
+                        state.proxies.record_probe(
+                            &n.id,
+                            false,
+                            Some(latency),
+                            None,
+                            Some(e.clone()),
+                        );
                         json!({"id": n.id, "ok": false, "latency_ms": latency, "error": e})
                     }
                 }
@@ -364,7 +377,8 @@ async fn probe_one(url: &str, timeout: std::time::Duration) -> Result<String, St
     match parsed.kind {
         proxypool::ProxyKind::Socks5 => probe_via_socks5(&parsed, timeout).await,
         _ => {
-            let stream = proxypool::connect_via_http_proxy(&parsed, "api.ipify.org", 443, timeout).await?;
+            let stream =
+                proxypool::connect_via_http_proxy(&parsed, "api.ipify.org", 443, timeout).await?;
             probe_tls_read_ip(stream, timeout).await
         }
     }
@@ -380,7 +394,13 @@ async fn probe_via_socks5(
         (Some(u), Some(p)) => Some((u.as_str(), p.as_str())),
         _ => None,
     };
-    let connect_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Socks5Stream<tokio::net::TcpStream>, tokio_socks::Error>> + Send>> = match auth {
+    let connect_fut: std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Socks5Stream<tokio::net::TcpStream>, tokio_socks::Error>,
+                > + Send,
+        >,
+    > = match auth {
         Some((u, p)) => Box::pin(Socks5Stream::connect_with_password(
             (proxy.host.as_str(), proxy.port),
             ("api.ipify.org", 443u16),

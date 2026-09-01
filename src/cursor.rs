@@ -239,8 +239,10 @@ impl CursorClient {
 
     pub fn http(
         &self,
-    ) -> &Client<hyper_rustls::HttpsConnector<HttpConnector>, http_body_util::Full<hyper::body::Bytes>>
-    {
+    ) -> &Client<
+        hyper_rustls::HttpsConnector<HttpConnector>,
+        http_body_util::Full<hyper::body::Bytes>,
+    > {
         &self.client
     }
 
@@ -260,7 +262,8 @@ impl CursorClient {
         proxy_id: &str,
         proxy_url: &str,
     ) -> anyhow::Result<Self> {
-        let parsed = crate::proxypool::parse_proxy_url(proxy_url).map_err(|e| anyhow::anyhow!(e))?;
+        let parsed =
+            crate::proxypool::parse_proxy_url(proxy_url).map_err(|e| anyhow::anyhow!(e))?;
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_connect_timeout(Some(std::time::Duration::from_secs(10)));
@@ -326,8 +329,7 @@ impl CursorClient {
         machine_id: &str,
         body: &Value,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, CursorError>> + Send>>, CursorError> {
-        let payload = serde_json::to_vec(body)
-            .map_err(|e| CursorError::Decode(e.to_string()))?;
+        let payload = serde_json::to_vec(body).map_err(|e| CursorError::Decode(e.to_string()))?;
         let envelope = connect_envelope(&payload, 0);
 
         let mut req = hyper::Request::builder()
@@ -344,13 +346,20 @@ impl CursorClient {
         }
 
         let req = req
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(envelope)))
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                envelope,
+            )))
             .map_err(|e| CursorError::Network(e.to_string()))?;
 
         let timeout = std::time::Duration::from_secs(self.timeout_s.max(1));
         let resp = tokio::time::timeout(timeout, self.request(req))
             .await
-            .map_err(|_| CursorError::Network(format!("upstream response headers timeout after {}s", self.timeout_s)))?
+            .map_err(|_| {
+                CursorError::Network(format!(
+                    "upstream response headers timeout after {}s",
+                    self.timeout_s
+                ))
+            })?
             .map_err(|e| CursorError::Network(e.to_string()))?;
 
         let status = resp.status().as_u16();
@@ -370,7 +379,8 @@ impl CursorClient {
         // hyper Incoming → Bytes stream 适配
         use futures_util::StreamExt;
         use http_body_util::BodyExt;
-        let byte_stream = BodyExt::into_data_stream(resp.into_body()).map(|r| r.map_err(|e| e.to_string()));
+        let byte_stream =
+            BodyExt::into_data_stream(resp.into_body()).map(|r| r.map_err(|e| e.to_string()));
         Ok(Box::pin(FrameStream {
             body: Box::pin(byte_stream),
             buf: BytesMut::with_capacity(8192),
@@ -424,7 +434,8 @@ where
             // 先尝试从 buf 解析帧
             if self.buf.len() >= 5 {
                 let flags = self.buf[0];
-                let n = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
+                let n = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]])
+                    as usize;
                 if n > MAX_FRAME_BYTES {
                     return Poll::Ready(Some(Err(CursorError::Decode(format!(
                         "connect frame {n} bytes exceeds {MAX_FRAME_BYTES}"
@@ -494,9 +505,7 @@ fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut decoder = flate2::read::GzDecoder::new(data);
     let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| e.to_string())?;
+    decoder.read_to_end(&mut out).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
@@ -539,16 +548,13 @@ pub async fn refresh_access_token(
         .ok_or_else(|| "no access_token in refresh response".to_string())?
         .to_string();
 
-    let expires_in = body
-        .get("expires_in")
-        .and_then(|v| v.as_u64())
-        .map(|s| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                + s
-        });
+    let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).map(|s| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + s
+    });
 
     Ok((access_token, expires_in))
 }
@@ -601,11 +607,8 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         let msgs = vec![json!({"role": "user", "content": "hi"})];
-        let body = build_cursor_body_with_tools(
-            &msgs, "kimi-k3", None, None, None, None, None, Some(&a),
-        );
+        let body =
+            build_cursor_body_with_tools(&msgs, "kimi-k3", None, None, None, None, None, Some(&a));
         assert_eq!(body["conversationId"], a);
     }
 }
-
-

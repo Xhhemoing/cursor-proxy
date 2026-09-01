@@ -6,8 +6,8 @@ use std::pin::Pin;
 use uuid::Uuid;
 
 use crate::protocol::{
-    apply_tool_call_part, sse_event, anthropic_message, openai_message_with_tools, responses_message,
-    AssistantOut,
+    anthropic_message, apply_tool_call_part, openai_message_with_tools, responses_message,
+    sse_event, AssistantOut,
 };
 
 pub fn openai_error(message: &str, code: &str, status: u16) -> Value {
@@ -72,8 +72,16 @@ fn pick_u64(u: &Value, keys: &[&str]) -> Option<u64> {
 /// 从上游帧提取 usage (兼容 Cursor extendedUsage / OpenAI / Anthropic 命名)
 fn extract_usage(obj: &Value) -> Option<Usage> {
     let u = obj.get("extendedUsage").or_else(|| obj.get("usage"))?;
-    let mut input =
-        pick_u64(u, &["promptTokens", "inputTokens", "prompt_tokens", "input_tokens"]).unwrap_or(0);
+    let mut input = pick_u64(
+        u,
+        &[
+            "promptTokens",
+            "inputTokens",
+            "prompt_tokens",
+            "input_tokens",
+        ],
+    )
+    .unwrap_or(0);
     let output = pick_u64(
         u,
         &[
@@ -319,7 +327,8 @@ where
                                     }
                                     Dialect::Anthropic => {
                                         if !started_tools.iter().any(|x| x == &c.id) {
-                                            let index = if anthropic_text_open { 1 + idx } else { idx };
+                                            let index =
+                                                if anthropic_text_open { 1 + idx } else { idx };
                                             sse.push_str(&sse_event(
                                                 "content_block_start",
                                                 &json!({
@@ -336,7 +345,8 @@ where
                                             started_tools.push(c.id.clone());
                                         }
                                         if !args_delta.is_empty() {
-                                            let index = if anthropic_text_open { 1 + idx } else { idx };
+                                            let index =
+                                                if anthropic_text_open { 1 + idx } else { idx };
                                             sse.push_str(&sse_event(
                                                 "content_block_delta",
                                                 &json!({
@@ -388,7 +398,12 @@ where
                                     } else {
                                         "tool_calls"
                                     };
-                                    sse.push_str(&openai_chunk(&id, &model, json!({}), Some(finish)));
+                                    sse.push_str(&openai_chunk(
+                                        &id,
+                                        &model,
+                                        json!({}),
+                                        Some(finish),
+                                    ));
                                     sse.push_str("data: [DONE]\n\n");
                                 }
                                 Dialect::Anthropic => {
@@ -560,17 +575,26 @@ mod tests {
     #[tokio::test]
     async fn full_collects_tool_call() {
         let frames = stream::iter(vec![
-            Ok::<Value, String>(json!({"toolCallPart": {"name": "bash", "toolCallId": "c1", "arguments": {"command": "ls"}}})),
-            Ok(json!({"extendedUsage": {"promptTokens": 4, "completionTokens": 2}, "responseInfo": {}})),
+            Ok::<Value, String>(
+                json!({"toolCallPart": {"name": "bash", "toolCallId": "c1", "arguments": {"command": "ls"}}}),
+            ),
+            Ok(
+                json!({"extendedUsage": {"promptTokens": 4, "completionTokens": 2}, "responseInfo": {}}),
+            ),
         ]);
         let (v, u) = upstream_to_openai_full(Box::pin(frames), "kimi-k3")
             .await
             .unwrap();
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(v["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "bash");
+        assert_eq!(
+            v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "bash"
+        );
         assert_eq!(u.input, 4);
         let frames = stream::iter(vec![
-            Ok::<Value, String>(json!({"toolCallPart": {"name": "bash", "toolCallId": "c1", "arguments": {"command": "ls"}}})),
+            Ok::<Value, String>(
+                json!({"toolCallPart": {"name": "bash", "toolCallId": "c1", "arguments": {"command": "ls"}}}),
+            ),
             Ok(json!({"responseInfo": {}})),
         ]);
         let (v, _) = upstream_to_dialect_full(Box::pin(frames), "kimi-k3", Dialect::Anthropic)

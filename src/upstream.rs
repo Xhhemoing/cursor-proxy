@@ -1,10 +1,10 @@
 //! 上游抽象: Cursor Connect 协议 + OpenAI 兼容 API.
 
+use futures_util::stream::{Stream, StreamExt};
 use serde_json::Value;
 use std::pin::Pin;
-use futures_util::stream::{Stream, StreamExt};
 
-use crate::cursor::{CursorClient, CursorError, build_cursor_body_with_tools};
+use crate::cursor::{build_cursor_body_with_tools, CursorClient, CursorError};
 
 /// 上游类型
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +36,9 @@ impl UpstreamClient {
     }
 
     pub fn new_openai(base_url: &str, api_key: &str, timeout_s: u64) -> anyhow::Result<Self> {
-        Ok(Self::OpenAi(OpenAiClient::new(base_url, api_key, timeout_s)?))
+        Ok(Self::OpenAi(OpenAiClient::new(
+            base_url, api_key, timeout_s,
+        )?))
     }
 
     /// 流式调用
@@ -46,17 +48,19 @@ impl UpstreamClient {
         messages: &[Value],
         max_tokens: Option<u32>,
         temperature: Option<f64>,
-        cursor_auth: Option<(&str, &str)>,  // (access_token, machine_id) 仅 Cursor 用
+        cursor_auth: Option<(&str, &str)>, // (access_token, machine_id) 仅 Cursor 用
         tools: Option<&Value>,
         tool_choice: Option<&Value>,
         parallel_tool_calls: Option<bool>,
         conversation_id: Option<&str>,
         cursor_override: Option<&CursorClient>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError>
+    {
         match self {
             Self::Cursor(client) => {
                 let client = cursor_override.unwrap_or(client);
-                let (token, mid) = cursor_auth.ok_or_else(|| UpstreamError::Config("upstream auth required".into()))?;
+                let (token, mid) = cursor_auth
+                    .ok_or_else(|| UpstreamError::Config("upstream auth required".into()))?;
                 let body = build_cursor_body_with_tools(
                     messages,
                     model,
@@ -67,7 +71,9 @@ impl UpstreamClient {
                     parallel_tool_calls,
                     conversation_id,
                 );
-                let stream = client.stream(token, mid, &body).await
+                let stream = client
+                    .stream(token, mid, &body)
+                    .await
                     .map_err(|e| UpstreamError::Cursor(e))?;
                 Ok(Box::pin(stream.map(|r| r.map_err(UpstreamError::Cursor))))
             }
@@ -132,7 +138,8 @@ impl OpenAiClient {
             body["tool_choice"] = tc.clone();
         }
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .header("authorization", format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
@@ -194,7 +201,11 @@ where
                     }
                     match serde_json::from_str(data) {
                         Ok(v) => return std::task::Poll::Ready(Some(Ok(v))),
-                        Err(e) => return std::task::Poll::Ready(Some(Err(OpenAiError::Decode(e.to_string())))),
+                        Err(e) => {
+                            return std::task::Poll::Ready(Some(Err(OpenAiError::Decode(
+                                e.to_string(),
+                            ))))
+                        }
                     }
                 }
                 continue;

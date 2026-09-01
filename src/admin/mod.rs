@@ -3,12 +3,12 @@
 //! 拆分为 accounts / keys / settings 三个子模块.
 
 pub mod accounts;
-pub mod keys;
-pub mod settings;
 pub mod billing;
-pub mod proxies;
 pub mod events;
 pub mod health_api;
+pub mod keys;
+pub mod proxies;
+pub mod settings;
 
 use axum::response::{Html, IntoResponse};
 
@@ -19,9 +19,9 @@ pub async fn admin_page() -> impl IntoResponse {
 
 // Re-export 便于 main.rs 路由注册
 pub use accounts::*;
-pub use keys::*;
-pub use settings::*;
 pub use billing::*;
-pub use proxies::*;
 pub use events::*;
 pub use health_api::*;
+pub use keys::*;
+pub use proxies::*;
+pub use settings::*;

@@ -14,7 +14,9 @@ pub struct RpmTracker {
 
 impl RpmTracker {
     pub fn new() -> Self {
-        Self { buckets: DashMap::new() }
+        Self {
+            buckets: DashMap::new(),
+        }
     }
 
     /// 记录一次请求
@@ -170,7 +172,10 @@ impl Metrics {
         );
         for (key, tokens, _reqs) in usage.snapshot_all() {
             let prefix: String = key.chars().take(8).collect();
-            out.push_str(&format!("cfp_key_tokens_total{{key=\"{}\"}} {}\n", prefix, tokens));
+            out.push_str(&format!(
+                "cfp_key_tokens_total{{key=\"{}\"}} {}\n",
+                prefix, tokens
+            ));
         }
         out
     }

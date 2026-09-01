@@ -93,9 +93,18 @@ impl HealthEngine {
         // 排序：critical > warning > info
         findings.sort_by(|a, b| b.severity.cmp(&a.severity));
 
-        let critical = findings.iter().filter(|f| f.severity == Severity::Critical).count();
-        let warning = findings.iter().filter(|f| f.severity == Severity::Warning).count();
-        let info = findings.iter().filter(|f| f.severity == Severity::Info).count();
+        let critical = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Critical)
+            .count();
+        let warning = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+            .count();
+        let info = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Info)
+            .count();
 
         let summary_data = pool.summary();
         let total = summary_data["total_accounts"].as_u64().unwrap_or(0) as usize;
@@ -253,10 +262,17 @@ impl HealthEngine {
             });
             let top: Vec<_> = error_accounts.iter().take(5).collect();
             if !top.is_empty() {
-                let names: Vec<_> = top.iter().map(|a| a["id"].as_str().unwrap_or("?")).collect();
+                let names: Vec<_> = top
+                    .iter()
+                    .map(|a| a["id"].as_str().unwrap_or("?"))
+                    .collect();
                 findings.push(Finding {
                     category: "account".into(),
-                    severity: if erroring >= 3 { Severity::Critical } else { Severity::Warning },
+                    severity: if erroring >= 3 {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
                     message: format!("{} 个账号连续错误：{}", erroring, names.join(", ")),
                     context: serde_json::json!({"erroring": erroring, "top_accounts": names}),
                     suggestion: Some("检查这些账号的 token 是否失效，或手动禁用后重新导入".into()),
@@ -361,7 +377,8 @@ impl HealthEngine {
             }
 
             // 2.4 出口 IP 集中度（从 nodes 提取）
-            let mut ip_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut ip_count: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             for node in &nodes {
                 if let Some(ip) = node["health"]["egress_ip"].as_str() {
                     if !ip.is_empty() && ip != "—" {
@@ -394,7 +411,8 @@ impl HealthEngine {
         let mut status_4xx = 0usize;
         let mut status_5xx = 0usize;
         let mut status_429 = 0usize;
-        let mut error_kinds: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut error_kinds: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for entry in &recent {
             if let Some(status) = entry["status"].as_u64() {
@@ -442,7 +460,11 @@ impl HealthEngine {
             if *count >= total / 5 && *count >= 2 {
                 findings.push(Finding {
                     category: "call".into(),
-                    severity: if *count >= total / 3 { Severity::Critical } else { Severity::Warning },
+                    severity: if *count >= total / 3 {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
                     message: format!("错误类型集中：{} 出现 {} 次", kind, count),
                     context: serde_json::json!({"error_kind": kind, "count": count}),
                     suggestion: Some(format!("针对 {} 类型错误进行专项排查", kind)),
@@ -453,11 +475,7 @@ impl HealthEngine {
     }
 
     /// 系统 / 配置维度检测
-    fn check_config(
-        config: &ConfigCell,
-        pool: &AccountPool,
-        findings: &mut Vec<Finding>,
-    ) {
+    fn check_config(config: &ConfigCell, pool: &AccountPool, findings: &mut Vec<Finding>) {
         let cfg = config.load();
 
         // 4.1 并发配置 vs 账号数

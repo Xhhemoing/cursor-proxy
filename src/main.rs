@@ -8,22 +8,23 @@
 //! 接口: 标准 OpenAI 兼容 /v1/chat/completions (流式 SSE + 非流式).
 //! 上游: Cursor InferenceService/Stream (Connect 协议, hyper + rustls).
 
-mod config;
-mod cursor;
-mod pool;
-mod translate;
-mod protocol;
 mod admin;
-mod logbuf;
-mod quota;
-mod metrics;
-mod upstream;
 mod audit;
 mod billing;
-mod ratelimit;
-mod proxypool;
+mod config;
+mod cursor;
 pub mod error;
 mod health;
+mod kvv;
+mod logbuf;
+mod metrics;
+mod pool;
+mod protocol;
+mod proxypool;
+mod quota;
+mod ratelimit;
+mod translate;
+mod upstream;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -103,12 +104,8 @@ impl CursorFactory {
                 if let Some(c) = self.proxied.get(&n.id) {
                     return Ok(c.clone());
                 }
-                let c = CursorClient::new_via_http_proxy(
-                    &self.backend,
-                    self.timeout_s,
-                    &n.id,
-                    &n.url,
-                )?;
+                let c =
+                    CursorClient::new_via_http_proxy(&self.backend, self.timeout_s, &n.id, &n.url)?;
                 self.proxied.insert(n.id.clone(), c.clone());
                 Ok(c)
             }
@@ -120,11 +117,7 @@ impl CursorFactory {
         pool: &proxypool::ProxyPool,
         account: &config::Account,
     ) -> Result<(CursorClient, Option<String>), String> {
-        let node = pool.resolve(
-            &account.id,
-            account.proxy_id.as_deref(),
-            &account.tags,
-        )?;
+        let node = pool.resolve(&account.id, account.proxy_id.as_deref(), &account.tags)?;
         let id = node.as_ref().map(|n| n.id.clone());
         let client = self.for_node(node.as_ref()).map_err(|e| e.to_string())?;
         Ok((client, id))
@@ -150,7 +143,10 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::load()?;
     let accounts = config::load_accounts()?;
     if accounts.is_empty() {
-        tracing::warn!(event = "startup", "accounts.json empty; pool will accept admin upserts");
+        tracing::warn!(
+            event = "startup",
+            "accounts.json empty; pool will accept admin upserts"
+        );
     }
 
     info!(
@@ -199,14 +195,12 @@ async fn main() -> anyhow::Result<()> {
         upstreams,
         key_usage: std::sync::Arc::new(quota::KeyUsageStore::new()),
         metrics: std::sync::Arc::new(metrics::Metrics::new()),
-        audit: std::sync::Arc::new(
-            audit::AuditLog::new().unwrap_or_else(|e| {
-                warn!(event = "audit_init", error = %e, "audit log unavailable, continuing without");
-                // 无法打开审计文件时, 用一个指向 /dev/null 的句柄继续
-                audit::AuditLog::new_at(std::path::PathBuf::from("/dev/null"))
-                    .expect("/dev/null must open")
-            }),
-        ),
+        audit: std::sync::Arc::new(audit::AuditLog::new().unwrap_or_else(|e| {
+            warn!(event = "audit_init", error = %e, "audit log unavailable, continuing without");
+            // 无法打开审计文件时, 用一个指向 /dev/null 的句柄继续
+            audit::AuditLog::new_at(std::path::PathBuf::from("/dev/null"))
+                .expect("/dev/null must open")
+        })),
         rate_limiter: std::sync::Arc::new(ratelimit::RateLimiter::new()),
         ledger: std::sync::Arc::new(billing::Ledger::open(&config.billing.db_file)?),
         proxies,
@@ -214,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
         key_semaphores: dashmap::DashMap::new(),
         event_bus: admin::events::EventBus::new(),
         quota_store: std::sync::Arc::new(quota::QuotaStore::open(
-            &std::path::Path::new(&config.billing.db_file).with_file_name("quota.db")
+            &std::path::Path::new(&config.billing.db_file).with_file_name("quota.db"),
         )?),
     });
     info!(
@@ -231,7 +225,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 必须先占端口再跑后台探测。旧版本在 bind 前 spawn quota refresh,
     // 热更新时旧进程还占着 8800 → Address already in use → systemd 连崩。
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
     info!(event = "listening", addr = %listener.local_addr()?, "server ready");
 
     // 恢复额度缓存 (重启后立即可见, 等 bind 成功再灌, 避免 crash-loop 打上游)
@@ -246,7 +241,11 @@ async fn main() -> anyhow::Result<()> {
                         state.pool.restore_quota(&id, snap);
                     }
                     state.pool.bump_version();
-                    info!(event = "quota_cache_restore", count = n, "quota cache restored from disk");
+                    info!(
+                        event = "quota_cache_restore",
+                        count = n,
+                        "quota cache restored from disk"
+                    );
                 }
                 Err(e) => {
                     warn!(event = "quota_cache_restore", error = %e, "failed to restore quota cache");
@@ -315,13 +314,21 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // GC: 清理不活跃账号的 RPM 桶
                 {
-                    let active: Vec<String> = state.pool.account_rows().iter()
+                    let active: Vec<String> = state
+                        .pool
+                        .account_rows()
+                        .iter()
                         .filter_map(|r| r["id"].as_str().map(|s| s.to_string()))
                         .collect();
                     state.metrics.rpm_accounts.gc(&active);
                 }
                 if removed > 0 {
-                    info!(event = "session_gc", removed, live = state.pool.session_count(), "expired sessions cleared");
+                    info!(
+                        event = "session_gc",
+                        removed,
+                        live = state.pool.session_count(),
+                        "expired sessions cleared"
+                    );
                 }
                 state.pool.persist_runtime_state();
                 state.ledger.request_checkpoint();
@@ -333,20 +340,24 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let cooling = state.pool.cooling_accounts();
                 let quota_exhausted = state.pool.quota_exhausted_accounts();
-                
+
                 // 合并去重
-                let mut to_probe: std::collections::HashMap<String, crate::config::Account> = 
+                let mut to_probe: std::collections::HashMap<String, crate::config::Account> =
                     std::collections::HashMap::new();
                 for (id, acc) in cooling.into_iter().chain(quota_exhausted.into_iter()) {
                     to_probe.insert(id, acc);
                 }
-                
+
                 if to_probe.is_empty() {
                     continue;
                 }
-                
-                info!(event = "quota_probe", count = to_probe.len(), "probing cooling/exhausted accounts");
-                
+
+                info!(
+                    event = "quota_probe",
+                    count = to_probe.len(),
+                    "probing cooling/exhausted accounts"
+                );
+
                 // 并发探测，限制并发数避免打爆上游
                 use futures_util::stream::{self, StreamExt};
                 let probe_results: Vec<_> = stream::iter(to_probe)
@@ -365,11 +376,11 @@ async fn main() -> anyhow::Result<()> {
                     .buffer_unordered(50) // 并发 50 个
                     .collect()
                     .await;
-                
+
                 for (id, snap) in probe_results {
                     let has_quota = snap.has_available_usage == Some(true);
                     let error = snap.error.is_some();
-                    
+
                     state.pool.set_quota(&id, snap.clone());
                     if !error {
                         if let Err(e) = state.quota_store.save(&id, &snap).await {
@@ -403,42 +414,105 @@ async fn main() -> anyhow::Result<()> {
     let admin_routes = Router::new()
         .route("/admin", get(admin::admin_page))
         .route("/admin/api/pool", get(admin::api_pool_stats))
-        .route("/admin/api/accounts", get(admin::api_accounts_list).post(admin::api_account_upsert))
-        .route("/admin/api/accounts/:id", axum::routing::delete(admin::api_account_delete))
-        .route("/admin/api/accounts/:id/toggle", post(admin::api_account_toggle))
-        .route("/admin/api/accounts/:id/enabled", post(admin::api_account_set_enabled))
-        .route("/admin/api/accounts/:id/cooldown/clear", post(admin::api_account_clear_cooldown))
-        .route("/admin/api/accounts/:id/probe", post(admin::api_account_probe))
-        .route("/admin/api/accounts/probe-all", post(admin::api_account_probe_all))
-        .route("/admin/api/accounts/import", post(admin::api_accounts_import))
-        .route("/admin/api/accounts/export", get(admin::api_accounts_export))
+        .route(
+            "/admin/api/accounts",
+            get(admin::api_accounts_list).post(admin::api_account_upsert),
+        )
+        .route(
+            "/admin/api/accounts/:id",
+            axum::routing::delete(admin::api_account_delete),
+        )
+        .route(
+            "/admin/api/accounts/:id/toggle",
+            post(admin::api_account_toggle),
+        )
+        .route(
+            "/admin/api/accounts/:id/enabled",
+            post(admin::api_account_set_enabled),
+        )
+        .route(
+            "/admin/api/accounts/:id/cooldown/clear",
+            post(admin::api_account_clear_cooldown),
+        )
+        .route(
+            "/admin/api/accounts/:id/probe",
+            post(admin::api_account_probe),
+        )
+        .route(
+            "/admin/api/accounts/probe-all",
+            post(admin::api_account_probe_all),
+        )
+        .route(
+            "/admin/api/accounts/import",
+            post(admin::api_accounts_import),
+        )
+        .route(
+            "/admin/api/accounts/export",
+            get(admin::api_accounts_export),
+        )
         .route("/admin/api/accounts/batch", post(admin::api_accounts_batch))
         .route("/admin/api/pool/health", get(admin::api_pool_health))
-        .route("/admin/api/proxies", get(admin::api_proxies_get).post(admin::api_proxies_patch))
+        .route(
+            "/admin/api/proxies",
+            get(admin::api_proxies_get).post(admin::api_proxies_patch),
+        )
         .route("/admin/api/proxies/import", post(admin::api_proxies_import))
         .route("/admin/api/proxies/export", get(admin::api_proxies_export))
         .route("/admin/api/proxies/probe", post(admin::api_proxies_probe))
-        .route("/admin/api/proxies/rebalance", post(admin::api_proxies_rebalance))
-        .route("/admin/api/keys", get(admin::api_keys_list).post(admin::api_keys_add))
+        .route(
+            "/admin/api/proxies/rebalance",
+            post(admin::api_proxies_rebalance),
+        )
+        .route(
+            "/admin/api/keys",
+            get(admin::api_keys_list).post(admin::api_keys_add),
+        )
         .route("/admin/api/keys/import", post(admin::api_keys_import))
-        .route("/admin/api/keys/batch-edit", post(admin::api_keys_batch_edit))
+        .route(
+            "/admin/api/keys/batch-edit",
+            post(admin::api_keys_batch_edit),
+        )
         .route("/admin/api/keys/export", get(admin::api_keys_export))
-        .route("/admin/api/keys/:index", axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch))
+        .route(
+            "/admin/api/keys/:index",
+            axum::routing::delete(admin::api_keys_delete).post(admin::api_keys_patch),
+        )
         .route("/admin/api/keys/:index/reveal", get(admin::api_keys_reveal))
-        .route("/admin/api/accounts/batch-edit", post(admin::api_accounts_batch_edit))
+        .route(
+            "/admin/api/accounts/batch-edit",
+            post(admin::api_accounts_batch_edit),
+        )
         .route("/admin/api/rpm", get(admin::api_rpm_dashboard))
         .route("/admin/api/logs", get(admin::api_logs_recent))
-        .route("/admin/api/settings", get(admin::api_settings_get).post(admin::api_settings_patch))
-        .route("/admin/api/billing/records", get(admin::api_billing_records))
-        .route("/admin/api/billing/summary", get(admin::api_billing_summary))
+        .route(
+            "/admin/api/settings",
+            get(admin::api_settings_get).post(admin::api_settings_patch),
+        )
+        .route(
+            "/admin/api/billing/records",
+            get(admin::api_billing_records),
+        )
+        .route(
+            "/admin/api/billing/summary",
+            get(admin::api_billing_summary),
+        )
         .route("/admin/api/billing/export", get(admin::api_billing_export))
         .route("/admin/api/billing/tags", get(admin::api_billing_tags))
         .route("/admin/api/billing/stats", get(admin::api_billing_stats))
-        .route("/admin/api/billing/pricing", get(admin::api_pricing_get).post(admin::api_pricing_patch))
+        .route(
+            "/admin/api/billing/pricing",
+            get(admin::api_pricing_get).post(admin::api_pricing_patch),
+        )
         .route("/admin/api/events", get(admin::api_events))
-        .route("/admin/api/quota/history/:id", get(admin::api_quota_history))
+        .route(
+            "/admin/api/quota/history/:id",
+            get(admin::api_quota_history),
+        )
         .route("/admin/api/quota/refresh", post(admin::api_quota_refresh))
-        .route("/admin/api/health/diagnose", get(admin::api_health_diagnose))
+        .route(
+            "/admin/api/health/diagnose",
+            get(admin::api_health_diagnose),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth_mw,
@@ -468,7 +542,11 @@ async fn main() -> anyhow::Result<()> {
     state.key_usage.save_to_disk();
     state.pool.persist_runtime_state();
     let flushed = state.ledger.flush(Duration::from_secs(10));
-    info!(event = "shutdown", billing_flushed = flushed, "billing ledger flushed");
+    info!(
+        event = "shutdown",
+        billing_flushed = flushed,
+        "billing ledger flushed"
+    );
     info!(event = "shutdown", "usage persisted, bye");
     Ok(())
 }
@@ -548,7 +626,10 @@ async fn watch_config(state: Arc<AppState>) -> notify::Result<()> {
 
 /// API key 鉴权; 成功时返回命中的 key 记录 (None 表示未启用鉴权).
 /// 恒定时间比较防时序攻击; 过期 key 拒绝.
-fn check_auth<'a>(headers: &HeaderMap, config: &'a AppConfig) -> Result<Option<&'a ApiKeyRecord>, Response> {
+fn check_auth<'a>(
+    headers: &HeaderMap,
+    config: &'a AppConfig,
+) -> Result<Option<&'a ApiKeyRecord>, Response> {
     if config.api_keys.is_empty() {
         return Ok(None);
     }
@@ -606,7 +687,10 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         state.metrics.render(&state.pool, &state.key_usage),
     )
 }
@@ -855,6 +939,24 @@ async fn inference_handler(
     let request_id = format!("req-{}", uuid::Uuid::new_v4().simple());
     let start = Instant::now();
 
+    // ---- KVV (Kimi Vendor Verifier) 合规检查 ----
+    // 对应 Python 版 server.py 的 _kimi_vendor_param_check + _kimi_vendor_request_validate
+    // 在解析 messages 之前执行，因为 KVV 需要检查 body 结构（response_format/tool_choice/dynamic_tools）
+    if let Some(kvv_err) = kvv::kimi_vendor_param_check(&body) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(kvv_err),
+        )
+            .into_response());
+    }
+    if let Some(kvv_err) = kvv::kimi_vendor_request_validate(&body) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(kvv_err),
+        )
+            .into_response());
+    }
+
     // 解析请求
     let messages = body
         .get("messages")
@@ -862,7 +964,11 @@ async fn inference_handler(
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
-                Json(openai_error("messages is required", "missing_messages", 400)),
+                Json(openai_error(
+                    "messages is required",
+                    "missing_messages",
+                    400,
+                )),
             )
                 .into_response()
         })?;
@@ -871,7 +977,10 @@ async fn inference_handler(
         .and_then(|v| v.as_str())
         .unwrap_or(&config.default_model)
         .to_string();
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let max_tokens = body
         .get("max_tokens")
         .and_then(|v| v.as_u64())
@@ -927,7 +1036,11 @@ async fn inference_handler(
             state.metrics.observe_err();
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(openai_error("no eligible accounts in pool", "pool_empty", 503)),
+                Json(openai_error(
+                    "no eligible accounts in pool",
+                    "pool_empty",
+                    503,
+                )),
             )
                 .into_response());
         }
@@ -941,17 +1054,19 @@ async fn inference_handler(
         }
     };
     let mut account_id = account.id.clone();
-    let mut conv_id = crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
+    let mut conv_id =
+        crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
 
     // 记录 RPM (key + account 维度)
     state.metrics.observe_rpm(&used_key, &account_id);
 
     // 多上游路由：根据模型前缀选择上游
-    let upstream_name = if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
-        "openai"
-    } else {
-        "cursor"
-    };
+    let upstream_name =
+        if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
+            "openai"
+        } else {
+            "cursor"
+        };
 
     let upstream = match state.upstreams.get(upstream_name) {
         Some(u) => u,
@@ -966,7 +1081,11 @@ async fn inference_handler(
             );
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(openai_error("upstream not available", "upstream_error", 503)),
+                Json(openai_error(
+                    "upstream not available",
+                    "upstream_error",
+                    503,
+                )),
             )
                 .into_response());
         }
@@ -993,7 +1112,8 @@ async fn inference_handler(
             account.access_token = retry_account.access_token;
             account.machine_id = retry_account.machine_id;
             account_id = retry_account.id.clone();
-            conv_id = crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
+            conv_id =
+                crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
             info!(
                 event = "retry",
                 req_id = %request_id,
@@ -1020,7 +1140,9 @@ async fn inference_handler(
             crate::upstream::UpstreamClient::OpenAi(_) => (None, None),
         };
         let cursor_auth = match upstream {
-            crate::upstream::UpstreamClient::Cursor(_) => Some((account.access_token.as_str(), account.machine_id.as_str())),
+            crate::upstream::UpstreamClient::Cursor(_) => {
+                Some((account.access_token.as_str(), account.machine_id.as_str()))
+            }
             crate::upstream::UpstreamClient::OpenAi(_) => None,
         };
 
@@ -1050,7 +1172,7 @@ async fn inference_handler(
                 last_error = e.to_string();
                 state.pool.release(&account_id, true, 30);
                 state.metrics.observe_err();
-                
+
                 // 自动禁用: 连续错误 >= 5 次
                 if state.pool.should_auto_disable(&account_id, 5) {
                     state.pool.auto_disable(&account_id);
@@ -1061,7 +1183,7 @@ async fn inference_handler(
                         "account auto-disabled after 5 consecutive errors"
                     );
                 }
-                
+
                 error!(
                     event = "upstream_error",
                     req_id = %request_id,
@@ -1073,8 +1195,15 @@ async fn inference_handler(
                 );
                 if attempt == MAX_RETRIES - 1 {
                     state.ledger.record(billing::BillingRecord::build(
-                        &bctx, &request_id, &model, &account_id, translate::Usage::default(), stream, 502,
-                        start.elapsed().as_millis() as u64, &client_ip,
+                        &bctx,
+                        &request_id,
+                        &model,
+                        &account_id,
+                        translate::Usage::default(),
+                        stream,
+                        502,
+                        start.elapsed().as_millis() as u64,
+                        &client_ip,
                     ));
                     return Err((
                         StatusCode::BAD_GATEWAY,
@@ -1095,7 +1224,11 @@ async fn inference_handler(
         None => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(openai_error("no available account for retry", "pool_exhausted", 503)),
+                Json(openai_error(
+                    "no available account for retry",
+                    "pool_exhausted",
+                    503,
+                )),
             )
                 .into_response());
         }
@@ -1216,8 +1349,15 @@ async fn inference_handler(
             }
             metrics.observe_ok(usage.total());
             ledger.record(billing::BillingRecord::build(
-                &bctx_s, &rid, &model_clone, &aid, usage, true, 200,
-                latency, &client_ip,
+                &bctx_s,
+                &rid,
+                &model_clone,
+                &aid,
+                usage,
+                true,
+                200,
+                latency,
+                &client_ip,
             ));
             pool.record_success(&aid);
             // 成功时检查是否需要重新启用（连续错误已重置）
@@ -1243,7 +1383,8 @@ async fn inference_handler(
             upstream_timeout,
             upstream_to_dialect_full(frames, &model, dialect),
         )
-        .await {
+        .await
+        {
             Ok(r) => r,
             Err(_) => {
                 state.pool.release(&account_id, true, 10);
@@ -1256,8 +1397,15 @@ async fn inference_handler(
                     "non-stream upstream timeout"
                 );
                 state.ledger.record(billing::BillingRecord::build(
-                    &bctx, &request_id, &model, &account_id, translate::Usage::default(), false, 504,
-                    start.elapsed().as_millis() as u64, &client_ip,
+                    &bctx,
+                    &request_id,
+                    &model,
+                    &account_id,
+                    translate::Usage::default(),
+                    false,
+                    504,
+                    start.elapsed().as_millis() as u64,
+                    &client_ip,
                 ));
                 return Err((
                     StatusCode::GATEWAY_TIMEOUT,
@@ -1292,8 +1440,15 @@ async fn inference_handler(
                 }
                 state.metrics.observe_ok(usage.total());
                 state.ledger.record(billing::BillingRecord::build(
-                    &bctx, &request_id, &model, &account_id, usage, false, 200,
-                    latency, &client_ip,
+                    &bctx,
+                    &request_id,
+                    &model,
+                    &account_id,
+                    usage,
+                    false,
+                    200,
+                    latency,
+                    &client_ip,
                 ));
                 state.pool.record_success(&account_id);
                 state.pool.release(&account_id, false, 0);
@@ -1310,8 +1465,15 @@ async fn inference_handler(
                     "translate failed"
                 );
                 state.ledger.record(billing::BillingRecord::build(
-                    &bctx, &request_id, &model, &account_id, translate::Usage::default(), false, 500,
-                    start.elapsed().as_millis() as u64, &client_ip,
+                    &bctx,
+                    &request_id,
+                    &model,
+                    &account_id,
+                    translate::Usage::default(),
+                    false,
+                    500,
+                    start.elapsed().as_millis() as u64,
+                    &client_ip,
                 ));
                 Err((
                     StatusCode::INTERNAL_SERVER_ERROR,

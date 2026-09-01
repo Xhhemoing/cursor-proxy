@@ -28,7 +28,11 @@ fn bad(msg: impl Into<String>) -> Response {
 }
 
 fn internal(e: impl std::fmt::Display) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response()
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": e.to_string()})),
+    )
+        .into_response()
 }
 
 /// 从 query string 构造筛选器. 支持:
@@ -85,7 +89,10 @@ pub async fn api_billing_records(
         .and_then(|s| s.parse().ok())
         .unwrap_or(100usize)
         .clamp(1, MAX_PAGE);
-    let offset = q.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0usize);
+    let offset = q
+        .get("offset")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0usize);
     let ledger = state.ledger.clone();
     let res = tokio::task::spawn_blocking(move || {
         let conn = ledger.reader()?;
@@ -274,7 +281,12 @@ pub async fn api_pricing_patch(
             if m.is_empty() || m.len() > 120 {
                 return bad("price rule: model required (<=120 chars)");
             }
-            for v in [r.input_per_m, r.output_per_m, r.cache_read_per_m, r.cache_write_per_m] {
+            for v in [
+                r.input_per_m,
+                r.output_per_m,
+                r.cache_read_per_m,
+                r.cache_write_per_m,
+            ] {
                 if !v.is_finite() || v < 0.0 {
                     return bad(format!("price rule '{}': prices must be >= 0", m));
                 }

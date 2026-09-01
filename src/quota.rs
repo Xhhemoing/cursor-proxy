@@ -50,8 +50,14 @@ impl QuotaSnapshot {
         keep(&mut self.display_message, incoming.display_message);
         keep(&mut self.next_reset_at, incoming.next_reset_at);
         keep(&mut self.period_start_at, incoming.period_start_at);
-        keep(&mut self.billing_cycle_start_at, incoming.billing_cycle_start_at);
-        keep(&mut self.billing_cycle_end_at, incoming.billing_cycle_end_at);
+        keep(
+            &mut self.billing_cycle_start_at,
+            incoming.billing_cycle_start_at,
+        );
+        keep(
+            &mut self.billing_cycle_end_at,
+            incoming.billing_cycle_end_at,
+        );
         if incoming.checked_at.is_some() {
             self.checked_at = incoming.checked_at;
         }
@@ -114,7 +120,9 @@ pub fn as_unix(value: &Value) -> Option<f64> {
                 .map(|dt| dt.timestamp() as f64)
                 .or_else(|| {
                     chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
-                        .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"))
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S")
+                        })
                         .ok()
                         .map(|dt| dt.and_utc().timestamp() as f64)
                 })
@@ -147,7 +155,15 @@ pub fn sanitize_plan_label(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut i = 0usize;
     let bytes = lower.as_bytes();
-    let brands = ["supergrok", "super grok", "super-grok", "super_grok", "grok", "xai", "x.ai"];
+    let brands = [
+        "supergrok",
+        "super grok",
+        "super-grok",
+        "super_grok",
+        "grok",
+        "xai",
+        "x.ai",
+    ];
     'outer: while i < bytes.len() {
         for b in brands {
             if lower[i..].starts_with(b) {
@@ -253,7 +269,9 @@ impl CursorClient {
             req = req.header(k, v);
         }
         let req = req
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(payload.as_slice())))
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(
+                payload.as_slice(),
+            )))
             .map_err(|e| CursorError::Network(e.to_string()))?;
         let resp = self
             .request(req)
@@ -266,10 +284,7 @@ impl CursorClient {
             .to_bytes();
         if status >= 400 {
             let text = String::from_utf8_lossy(&body_bytes);
-            return Err(CursorError::Http(
-                status,
-                text.chars().take(200).collect(),
-            ));
+            return Err(CursorError::Http(status, text.chars().take(200).collect()));
         }
         if let Ok(v) = serde_json::from_slice::<Value>(&body_bytes) {
             return Ok(v);
@@ -287,11 +302,7 @@ impl CursorClient {
         Err(CursorError::Decode("dashboard response not json".into()))
     }
 
-    pub async fn probe_quota(
-        &self,
-        access_token: &str,
-        machine_id: &str,
-    ) -> QuotaSnapshot {
+    pub async fn probe_quota(&self, access_token: &str, machine_id: &str) -> QuotaSnapshot {
         let sand = self
             .dashboard_call(access_token, machine_id, "GetSandUsageStatus")
             .await;
@@ -366,7 +377,11 @@ impl KeyUsageStore {
                 },
             );
         }
-        tracing::info!(event = "usage_load", keys = self.tokens.len(), "usage restored from disk");
+        tracing::info!(
+            event = "usage_load",
+            keys = self.tokens.len(),
+            "usage restored from disk"
+        );
     }
 
     /// 落盘到 usage.json (原子写)
@@ -398,10 +413,13 @@ impl KeyUsageStore {
             p.requests.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let entry = self.tokens.entry(key.to_string()).or_insert_with(|| AtomicPair {
-            tokens: AtomicU64::new(0),
-            requests: AtomicU64::new(0),
-        });
+        let entry = self
+            .tokens
+            .entry(key.to_string())
+            .or_insert_with(|| AtomicPair {
+                tokens: AtomicU64::new(0),
+                requests: AtomicU64::new(0),
+            });
         entry.tokens.fetch_add(tokens, Ordering::Relaxed);
         entry.requests.fetch_add(1, Ordering::Relaxed);
     }
@@ -458,7 +476,11 @@ pub fn key_public(index: usize, rec: &ApiKeyRecord, used_tokens: u64, used_reque
     })
 }
 
-pub fn check_key_limits(rec: &ApiKeyRecord, used_tokens: u64, used_requests: u64) -> Result<(), String> {
+pub fn check_key_limits(
+    rec: &ApiKeyRecord,
+    used_tokens: u64,
+    used_requests: u64,
+) -> Result<(), String> {
     if !rec.enabled {
         return Err("API key disabled".into());
     }
@@ -488,8 +510,16 @@ mod tests {
         assert_eq!(super::sanitize_plan_label("SuperGrok"), "Pro");
         assert_eq!(super::sanitize_plan_label("Grok Pro"), "Pro");
         assert_eq!(super::sanitize_plan_label("Ultra Plan"), "Ultra Plan");
-        for l in ["SuperGrok Heavy", "supergrok-heavy", "SUPERGROK_HEAVY", "grok", "xAI Grok"] {
-            assert!(!super::sanitize_plan_label(l).to_lowercase().contains("grok"));
+        for l in [
+            "SuperGrok Heavy",
+            "supergrok-heavy",
+            "SUPERGROK_HEAVY",
+            "grok",
+            "xAI Grok",
+        ] {
+            assert!(!super::sanitize_plan_label(l)
+                .to_lowercase()
+                .contains("grok"));
         }
     }
 
@@ -545,8 +575,12 @@ mod tests {
             max_concurrency: None,
         };
         assert!(check_key_limits(&rec, 10, 1).is_ok());
-        assert!(check_key_limits(&rec, 100, 1).unwrap_err().contains("token"));
-        assert!(check_key_limits(&rec, 10, 2).unwrap_err().contains("request"));
+        assert!(check_key_limits(&rec, 100, 1)
+            .unwrap_err()
+            .contains("token"));
+        assert!(check_key_limits(&rec, 10, 2)
+            .unwrap_err()
+            .contains("request"));
         let mut disabled = rec.clone();
         disabled.enabled = false;
         assert!(check_key_limits(&disabled, 0, 0).is_err());
@@ -568,7 +602,9 @@ mod tests {
             max_concurrency: None,
         };
         assert!(rec.is_expired());
-        assert!(check_key_limits(&rec, 0, 0).unwrap_err().contains("expired"));
+        assert!(check_key_limits(&rec, 0, 0)
+            .unwrap_err()
+            .contains("expired"));
         let future = ApiKeyRecord {
             expires_at: Some(4_000_000_000), // 远未来
             ..rec.clone()
@@ -635,7 +671,9 @@ impl QuotaStore {
                 updated_at REAL NOT NULL
             );",
         )?;
-        Ok(Self { path: path.to_path_buf() })
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
     }
 
     fn open_conn(&self) -> anyhow::Result<rusqlite::Connection> {
@@ -712,7 +750,11 @@ impl QuotaStore {
     }
 
     /// 获取账号额度历史 (最近 N 条)
-    pub async fn history(&self, account_id: &str, limit: usize) -> anyhow::Result<Vec<QuotaSnapshot>> {
+    pub async fn history(
+        &self,
+        account_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<QuotaSnapshot>> {
         let account_id = account_id.to_string();
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
@@ -722,7 +764,7 @@ impl QuotaStore {
                         api_percent_used, total_percent_used, display_message, next_reset_at,
                         period_start_at, billing_cycle_start_at, billing_cycle_end_at,
                         checked_at, error, created_at
-                 FROM quota_snapshots WHERE account_id = ?1 ORDER BY created_at DESC LIMIT ?2"
+                 FROM quota_snapshots WHERE account_id = ?1 ORDER BY created_at DESC LIMIT ?2",
             )?;
             let rows = stmt.query_map(rusqlite::params![account_id, limit as i64], |row| {
                 Ok(QuotaSnapshot {
@@ -805,7 +847,8 @@ pub async fn auto_refresh_loop(
     if config.interval_secs == 0 {
         return;
     }
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(config.interval_secs.max(1)));
+    let mut tick =
+        tokio::time::interval(std::time::Duration::from_secs(config.interval_secs.max(1)));
     loop {
         tick.tick().await;
         run_refresh_once(&state, &store, config.concurrency).await;
@@ -829,7 +872,11 @@ async fn run_refresh_once(
         })
         .collect();
     let total = accounts.len();
-    tracing::info!(event = "quota_auto_refresh", total, "starting quota refresh");
+    tracing::info!(
+        event = "quota_auto_refresh",
+        total,
+        "starting quota refresh"
+    );
 
     use futures_util::stream::{self, StreamExt};
     let results: Vec<_> = stream::iter(accounts)

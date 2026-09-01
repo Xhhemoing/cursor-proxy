@@ -120,7 +120,9 @@ pub async fn api_account_toggle(
     match config::persist_account_enabled(&id, enabled) {
         Ok(_) => {
             state.pool.rebuild_available_ids(); // 重建可用列表，确保开关立即生效
-            state.audit.account_op("toggle", &id, json!({"enabled": enabled}));
+            state
+                .audit
+                .account_op("toggle", &id, json!({"enabled": enabled}));
             Json(json!({
                 "status": "ok",
                 "id": id,
@@ -392,10 +394,7 @@ pub async fn api_quota_refresh(State(state): State<Arc<AppState>>) -> Response {
 ///   JSON: [{"id":"...","access_token":"...","machine_id":"...",...}]
 ///   CSV:  自动检测列名 (id/name/email/access_token/refresh_token/machine_id/account_id/max_concurrency/disabled/enabled)
 ///   纯文本: 每行 id,access_token,machine_id[,refresh_token]
-pub async fn api_accounts_import(
-    State(state): State<Arc<AppState>>,
-    body: String,
-) -> Response {
+pub async fn api_accounts_import(State(state): State<Arc<AppState>>, body: String) -> Response {
     let body = body.trim();
     if body.is_empty() {
         return (
@@ -417,15 +416,27 @@ pub async fn api_accounts_import(
     let cols: Vec<&str> = header_lower.split(',').map(|s| s.trim()).collect();
 
     // 检测是否为 CSV 表头 (包含至少一个已知列名)
-    let known_cols = ["id", "name", "email", "access_token", "token", "refresh_token", "refresh",
-        "machine_id", "machine", "account_id", "max_concurrency", "disabled", "enabled"];
+    let known_cols = [
+        "id",
+        "name",
+        "email",
+        "access_token",
+        "token",
+        "refresh_token",
+        "refresh",
+        "machine_id",
+        "machine",
+        "account_id",
+        "max_concurrency",
+        "disabled",
+        "enabled",
+    ];
     let is_csv_header = cols.iter().any(|c| known_cols.contains(c));
 
     if is_csv_header {
         // 列名 -> 索引映射
-        let col_idx = |names: &[&str]| -> Option<usize> {
-            cols.iter().position(|c| names.contains(c))
-        };
+        let col_idx =
+            |names: &[&str]| -> Option<usize> { cols.iter().position(|c| names.contains(c)) };
 
         let id_idx = col_idx(&["id", "account_id"]);
         let name_idx = col_idx(&["name"]);
@@ -452,7 +463,9 @@ pub async fn api_accounts_import(
             }
             let parts: Vec<&str> = line.split(',').collect();
             let get = |idx: Option<usize>| -> String {
-                idx.and_then(|i| parts.get(i)).map(|s| s.trim().to_string()).unwrap_or_default()
+                idx.and_then(|i| parts.get(i))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
             };
 
             let id = get(Some(id_i));
@@ -512,7 +525,10 @@ pub async fn api_accounts_import(
         let id = parts[0].trim().to_string();
         let access_token = parts[1].trim().to_string();
         let machine_id = parts[2].trim().to_string();
-        let refresh_token = parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default();
+        let refresh_token = parts
+            .get(3)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
         if !id.is_empty() && !access_token.is_empty() {
             accs.push(Account {
                 id,
@@ -557,7 +573,11 @@ async fn do_import_accounts(state: Arc<AppState>, accounts: Vec<Account>) -> Res
         }
     }
 
-    state.audit.account_op("import", "batch", json!({"imported": imported, "errors": errors.len()}));
+    state.audit.account_op(
+        "import",
+        "batch",
+        json!({"imported": imported, "errors": errors.len()}),
+    );
     Json(json!({
         "status": "ok",
         "imported": imported,
@@ -581,13 +601,22 @@ pub async fn api_accounts_export(State(state): State<Arc<AppState>>) -> impl Int
 pub async fn api_pool_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let scores = state.pool.all_health_scores();
     let total = scores.len();
-    let healthy = scores.iter().filter(|s| s["health"]["score"].as_u64().unwrap_or(0) >= 80).count();
-    let degraded = scores.iter().filter(|s| {
-        let score = s["health"]["score"].as_u64().unwrap_or(0);
-        score >= 50 && score < 80
-    }).count();
-    let unhealthy = scores.iter().filter(|s| s["health"]["score"].as_u64().unwrap_or(0) < 50).count();
-    
+    let healthy = scores
+        .iter()
+        .filter(|s| s["health"]["score"].as_u64().unwrap_or(0) >= 80)
+        .count();
+    let degraded = scores
+        .iter()
+        .filter(|s| {
+            let score = s["health"]["score"].as_u64().unwrap_or(0);
+            score >= 50 && score < 80
+        })
+        .count();
+    let unhealthy = scores
+        .iter()
+        .filter(|s| s["health"]["score"].as_u64().unwrap_or(0) < 50)
+        .count();
+
     Json(json!({
         "total": total,
         "healthy": healthy,
@@ -609,7 +638,7 @@ pub async fn api_accounts_batch(
     Json(body): Json<BatchOpBody>,
 ) -> Response {
     let mut results = Vec::new();
-    
+
     for id in &body.ids {
         let result = match body.op.as_str() {
             "enable" => {
@@ -624,21 +653,23 @@ pub async fn api_accounts_batch(
                 let ok = state.pool.clear_cooldown(id);
                 json!({"id": id, "status": if ok { "cooldown_cleared" } else { "not_found" }})
             }
-            "delete" => {
-                match config::delete_account(id) {
-                    Ok(accounts) => {
-                        state.pool.replace_accounts(accounts);
-                        json!({"id": id, "status": "deleted"})
-                    }
-                    Err(e) => json!({"id": id, "error": e.to_string()}),
+            "delete" => match config::delete_account(id) {
+                Ok(accounts) => {
+                    state.pool.replace_accounts(accounts);
+                    json!({"id": id, "status": "deleted"})
                 }
-            }
+                Err(e) => json!({"id": id, "error": e.to_string()}),
+            },
             _ => json!({"id": id, "error": "unknown op"}),
         };
         results.push(result);
     }
-    
-    state.audit.account_op("batch", "batch", json!({"op": body.op, "count": body.ids.len()}));
+
+    state.audit.account_op(
+        "batch",
+        "batch",
+        json!({"op": body.op, "count": body.ids.len()}),
+    );
     Json(json!({"status": "ok", "results": results})).into_response()
 }
 
@@ -672,9 +703,15 @@ pub async fn api_accounts_batch_edit(
             errors.push(json!({"id": id, "error": "not found in config"}));
             continue;
         };
-        if let Some(en) = body.enabled { acc.enabled = en; }
-        if let Some(ref pid) = body.proxy_id { acc.proxy_id = pid.clone().filter(|s| !s.is_empty()); }
-        if let Some(ref t) = body.tags { acc.tags = t.clone(); }
+        if let Some(en) = body.enabled {
+            acc.enabled = en;
+        }
+        if let Some(ref pid) = body.proxy_id {
+            acc.proxy_id = pid.clone().filter(|s| !s.is_empty());
+        }
+        if let Some(ref t) = body.tags {
+            acc.tags = t.clone();
+        }
         match config::save_accounts(&accounts) {
             Ok(_) => {
                 state.pool.replace_accounts(accounts);
@@ -686,6 +723,10 @@ pub async fn api_accounts_batch_edit(
         }
     }
     state.pool.rebuild_available_ids();
-    state.audit.account_op("batch_edit", "batch", json!({"updated": updated, "ids": body.ids}));
+    state.audit.account_op(
+        "batch_edit",
+        "batch",
+        json!({"updated": updated, "ids": body.ids}),
+    );
     Json(json!({"status": "ok", "updated": updated, "errors": errors})).into_response()
 }
