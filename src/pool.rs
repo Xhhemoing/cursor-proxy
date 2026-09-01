@@ -851,6 +851,73 @@ impl AccountPool {
         })
     }
 
+    /// 账号状态分类汇总（用于前端状态卡片）
+    /// 分类逻辑:
+    ///   - available:  enabled && !cooling && quota_ok
+    ///   - disabled:   !enabled
+    ///   - cooling:    enabled && cooling
+    ///   - quota:      enabled && !cooling && !quota_ok
+    ///   - error:      enabled && !cooling && quota_ok && consecutive_errors > 0
+    ///   - healthy:    available && consecutive_errors == 0 && error_rate < 0.1
+    ///   - degraded:   available && (consecutive_errors > 0 || error_rate >= 0.1)
+    pub fn status_summary(&self) -> serde_json::Value {
+        let mut available = 0usize;
+        let mut disabled = 0usize;
+        let mut cooling = 0usize;
+        let mut quota_blocked = 0usize;
+        let mut erroring = 0usize;
+        let mut healthy = 0usize;
+        let mut degraded = 0usize;
+
+        for entry in self.slots.iter() {
+            let id = entry.key();
+            let slot = entry.value();
+            let enabled = !self.disabled.get(id).map(|v| *v).unwrap_or(false);
+            let cooling_now = slot.is_cooling_down();
+            let quota_ok = !self.quota_blocks(id);
+
+            if !enabled {
+                disabled += 1;
+                continue;
+            }
+            if cooling_now {
+                cooling += 1;
+                continue;
+            }
+            if !quota_ok {
+                quota_blocked += 1;
+                continue;
+            }
+
+            // 到这里是 available
+            available += 1;
+
+            if let Some(s) = self.stats.get(id) {
+                let consecutive = s.consecutive_errors();
+                let error_rate = s.error_rate();
+                if consecutive > 0 || error_rate >= 0.1 {
+                    erroring += 1;
+                    degraded += 1;
+                } else {
+                    healthy += 1;
+                }
+            } else {
+                healthy += 1;
+            }
+        }
+
+        serde_json::json!({
+            "total": self.slots.len(),
+            "available": available,
+            "disabled": disabled,
+            "cooling": cooling,
+            "quota_blocked": quota_blocked,
+            "erroring": erroring,
+            "healthy": healthy,
+            "degraded": degraded,
+        })
+    }
+
     /// 统计信息
     pub fn stats(&self) -> serde_json::Value {
         let mut accounts = Vec::new();
@@ -942,6 +1009,24 @@ impl AccountPool {
         stats: serde_json::Value,
         cooldown_remaining: Option<u64>,
     ) -> serde_json::Value {
+        // 计算账号状态分类
+        let status = if !enabled {
+            "disabled"
+        } else if cooling {
+            "cooling"
+        } else if !quota_ok {
+            "quota_exhausted"
+        } else {
+            // available，进一步区分 healthy/degraded
+            let consecutive = stats["consecutive_errors"].as_u64().unwrap_or(0);
+            let error_rate = stats["error_rate"].as_f64().unwrap_or(0.0);
+            if consecutive > 0 || error_rate >= 0.1 {
+                "degraded"
+            } else {
+                "healthy"
+            }
+        };
+
         serde_json::json!({
             "id": id,
             "enabled": enabled,
@@ -951,6 +1036,7 @@ impl AccountPool {
             "quota_ok": quota_ok,
             "quota": self.quotas.get(id).map(|q| q.clone()),
             "available": is_available,
+            "status": status,
             "requests": req,
             "errors": err,
             "inflight": inflight,
@@ -1055,13 +1141,15 @@ impl AccountPool {
             match filter {
                 "enabled" | "available" => acc["available"].as_bool().unwrap_or(false),
                 "disabled" => !acc["enabled"].as_bool().unwrap_or(false),
-                "cooldown" => acc["cooldown"].as_bool().unwrap_or(false),
+                "cooling" => acc["cooldown"].as_bool().unwrap_or(false),
                 "error" => {
                     acc["errors"].as_u64().unwrap_or(0) > 0
                         || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) > 0
                 }
-                "quota" => !acc["quota_ok"].as_bool().unwrap_or(true),
+                "quota" | "quota_exhausted" => !acc["quota_ok"].as_bool().unwrap_or(true),
                 "unhealthy" => acc["health_score"].as_u64().unwrap_or(100) < 50,
+                "healthy" => acc["status"].as_str().unwrap_or("") == "healthy",
+                "degraded" => acc["status"].as_str().unwrap_or("") == "degraded",
                 "attention" => {
                     !acc["enabled"].as_bool().unwrap_or(false)
                         || acc["cooldown"].as_bool().unwrap_or(false)
@@ -1130,6 +1218,8 @@ impl AccountPool {
             obj.insert("q".into(), serde_json::json!(q));
             obj.insert("filter".into(), serde_json::json!(filter));
             obj.insert("sort".into(), serde_json::json!(sort));
+            // 新增：状态分类汇总
+            obj.insert("status_summary".into(), self.status_summary());
         }
         out
     }

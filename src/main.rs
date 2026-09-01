@@ -977,6 +977,12 @@ async fn inference_handler(
         .and_then(|v| v.as_str())
         .unwrap_or(&config.default_model)
         .to_string();
+    // 自动识别思考程度：kimi-k3 → 根据请求特征映射到 max/high/low
+    let model = if model == "kimi-k3" {
+        crate::cursor::auto_select_kimi_model(&body).to_string()
+    } else {
+        model
+    };
     let stream = body
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -1060,13 +1066,8 @@ async fn inference_handler(
     // 记录 RPM (key + account 维度)
     state.metrics.observe_rpm(&used_key, &account_id);
 
-    // 多上游路由：根据模型前缀选择上游
-    let upstream_name =
-        if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") {
-            "openai"
-        } else {
-            "cursor"
-        };
+    // 多上游路由：所有模型统一走 Cursor (仅 kimi-k3 家族)
+    let upstream_name = "cursor";
 
     let upstream = match state.upstreams.get(upstream_name) {
         Some(u) => u,

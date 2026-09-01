@@ -102,6 +102,8 @@ pub async fn api_accounts_list(
         "filtered": stats.get("filtered").cloned().unwrap_or(json!(0)),
         "page": stats.get("page").cloned().unwrap_or(json!(1)),
         "pages": stats.get("pages").cloned().unwrap_or(json!(1)),
+        // 新增：状态分类汇总
+        "status_summary": stats.get("status_summary").cloned().unwrap_or(json!({})),
     }))
 }
 

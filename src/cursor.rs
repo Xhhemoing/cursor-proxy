@@ -25,12 +25,99 @@ pub const MAX_TOKENS_FLOOR: u32 = 1024;
 
 pub fn is_kimi_family(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    m == "kimi-k3" || m.starts_with("kimi-k3-") || m.starts_with("kimi-k2")
+    m == "kimi-k3" || m.starts_with("kimi-k3-")
 }
 
-pub fn is_gemini_3_family(model: &str) -> bool {
+/// 思考程度档位
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingLevel {
+    Low,
+    High,
+    Max,
+}
+
+/// 从模型名解析思考程度档位
+/// kimi-k3-max → Max, kimi-k3-high → High, kimi-k3-low → Low, kimi-k3 → Max (默认)
+pub fn thinking_level_from_model(model: &str) -> ThinkingLevel {
     let m = model.to_ascii_lowercase();
-    m.starts_with("gemini-3.")
+    if m == "kimi-k3-max" || m == "kimi-k3" {
+        ThinkingLevel::Max
+    } else if m == "kimi-k3-high" {
+        ThinkingLevel::High
+    } else if m == "kimi-k3-low" {
+        ThinkingLevel::Low
+    } else {
+        // 默认 Max
+        ThinkingLevel::Max
+    }
+}
+
+/// 根据思考程度自动映射到具体模型名
+/// 用于客户端传入 kimi-k3 时，根据请求特征自动选择 max/high/low
+pub fn model_for_thinking_level(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Max => "kimi-k3-max",
+        ThinkingLevel::High => "kimi-k3-high",
+        ThinkingLevel::Low => "kimi-k3-low",
+    }
+}
+
+/// 从请求体自动识别思考程度
+/// 规则：
+/// 1. 显式指定 max_mode=true → Max
+/// 2. 显式指定 thinking_level 字段 → 对应档位
+/// 3. 根据 messages 复杂度自动推断：
+///    - 有 tools 或 tool_choice → Max (需要强推理)
+///    - 消息数 > 10 或总长度 > 100k 字符 → Max
+///    - 消息数 > 5 或总长度 > 50k 字符 → High
+///    - 其他 → Low
+pub fn auto_detect_thinking_level(body: &Value) -> ThinkingLevel {
+    // 1. 显式 max_mode
+    if let Some(mm) = max_mode_from_request(body) {
+        if mm {
+            return ThinkingLevel::Max;
+        }
+    }
+    // 2. 显式 thinking_level 字段
+    if let Some(tl) = body.get("thinking_level").and_then(|v| v.as_str()) {
+        match tl.to_ascii_lowercase().as_str() {
+            "max" => return ThinkingLevel::Max,
+            "high" => return ThinkingLevel::High,
+            "low" => return ThinkingLevel::Low,
+            _ => {}
+        }
+    }
+    // 3. 根据 messages 复杂度推断
+    let messages = body.get("messages").and_then(|v| v.as_array());
+    let tools = body.get("tools");
+    let tool_choice = body.get("tool_choice");
+    
+    if let Some(msgs) = messages {
+        let msg_count = msgs.len();
+        let total_len: usize = msgs.iter()
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|s| s.len())
+            .sum();
+        
+        // 有工具调用 → Max
+        if tools.is_some() || tool_choice.is_some() {
+            return ThinkingLevel::Max;
+        }
+        // 长上下文 → Max
+        if msg_count > 10 || total_len > 100_000 {
+            return ThinkingLevel::Max;
+        }
+        // 中等上下文 → High
+        if msg_count > 5 || total_len > 50_000 {
+            return ThinkingLevel::High;
+        }
+    }
+    ThinkingLevel::Low
+}
+
+/// 根据请求体自动选择 kimi-k3 变体模型
+pub fn auto_select_kimi_model(body: &Value) -> &'static str {
+    model_for_thinking_level(auto_detect_thinking_level(body))
 }
 
 /// 客户端省略 max_tokens 时的默认输出预算; 所有模型统一 32k, 避免上游默认 8k 截断.
@@ -47,14 +134,8 @@ pub fn effective_max_tokens(client_value: Option<u32>, _model: &str) -> u32 {
 pub fn context_window_for(model: &str) -> u32 {
     if is_kimi_family(model) {
         KIMI_K3_CONTEXT_WINDOW
-    } else if is_gemini_3_family(model) {
-        1_000_000
-    } else if model.to_ascii_lowercase().starts_with("claude-") {
-        200_000
-    } else if model.to_ascii_lowercase().starts_with("gpt-") {
-        128_000
     } else {
-        200_000
+        KIMI_K3_CONTEXT_WINDOW
     }
 }
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -618,15 +699,92 @@ mod tests {
     }
 
     #[test]
-    fn gemini_3_family_gets_1m_context() {
-        assert!(is_gemini_3_family("gemini-3.5"));
-        assert!(is_gemini_3_family("gemini-3.6-pro"));
-        assert!(is_gemini_3_family("Gemini-3.7"));
-        assert!(!is_gemini_3_family("gemini-2.5"));
-        assert_eq!(context_window_for("gemini-3.5"), 1_000_000);
-        assert_eq!(context_window_for("gemini-3.6"), 1_000_000);
-        assert_eq!(context_window_for("claude-sonnet-4-6"), 200_000);
-        assert_eq!(context_window_for("gpt-4o"), 128_000);
+    fn thinking_level_from_model_test() {
+        assert_eq!(thinking_level_from_model("kimi-k3"), ThinkingLevel::Max);
+        assert_eq!(thinking_level_from_model("kimi-k3-max"), ThinkingLevel::Max);
+        assert_eq!(thinking_level_from_model("kimi-k3-high"), ThinkingLevel::High);
+        assert_eq!(thinking_level_from_model("kimi-k3-low"), ThinkingLevel::Low);
+        assert_eq!(thinking_level_from_model("kimi-k3-unknown"), ThinkingLevel::Max);
+    }
+
+    #[test]
+    fn model_for_thinking_level_test() {
+        assert_eq!(model_for_thinking_level(ThinkingLevel::Max), "kimi-k3-max");
+        assert_eq!(model_for_thinking_level(ThinkingLevel::High), "kimi-k3-high");
+        assert_eq!(model_for_thinking_level(ThinkingLevel::Low), "kimi-k3-low");
+    }
+
+    #[test]
+    fn auto_detect_thinking_level_explicit() {
+        // max_mode=true → Max
+        assert_eq!(
+            auto_detect_thinking_level(&json!({"max_mode": true, "messages": []})),
+            ThinkingLevel::Max
+        );
+        // thinking_level 字段
+        assert_eq!(
+            auto_detect_thinking_level(&json!({"thinking_level": "high", "messages": []})),
+            ThinkingLevel::High
+        );
+        assert_eq!(
+            auto_detect_thinking_level(&json!({"thinking_level": "low", "messages": []})),
+            ThinkingLevel::Low
+        );
+    }
+
+    #[test]
+    fn auto_detect_thinking_level_tools() {
+        // 有 tools → Max
+        assert_eq!(
+            auto_detect_thinking_level(&json!({
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "bash"}}]
+            })),
+            ThinkingLevel::Max
+        );
+    }
+
+    #[test]
+    fn auto_detect_thinking_level_long_context() {
+        // 长消息 → Max
+        let long_content = "x".repeat(100_001);
+        assert_eq!(
+            auto_detect_thinking_level(&json!({
+                "messages": [{"role": "user", "content": long_content}]
+            })),
+            ThinkingLevel::Max
+        );
+        // 多消息 → High
+        let msgs: Vec<Value> = (0..6).map(|i| json!({"role": "user", "content": format!("msg {}", i)})).collect();
+        assert_eq!(
+            auto_detect_thinking_level(&json!({"messages": msgs})),
+            ThinkingLevel::High
+        );
+        // 短消息 → Low
+        assert_eq!(
+            auto_detect_thinking_level(&json!({
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+            ThinkingLevel::Low
+        );
+    }
+
+    #[test]
+    fn auto_select_kimi_model_test() {
+        assert_eq!(
+            auto_select_kimi_model(&json!({"max_mode": true, "messages": []})),
+            "kimi-k3-max"
+        );
+        assert_eq!(
+            auto_select_kimi_model(&json!({"thinking_level": "high", "messages": []})),
+            "kimi-k3-high"
+        );
+        assert_eq!(
+            auto_select_kimi_model(&json!({
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+            "kimi-k3-low"
+        );
     }
 
     #[test]
