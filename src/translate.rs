@@ -267,6 +267,21 @@ where
                         if let Some(u) = extract_usage(&obj) {
                             usage = Some(u);
                         }
+                        // 检测上游错误帧: Cursor 返回 error/errorMessage/errorCode 时直接报错
+                        // 而非静默忽略导致空内容
+                        if let Some(err_msg) = obj.get("errorMessage").and_then(|v| v.as_str())
+                            .or_else(|| obj.get("error").and_then(|v| v.as_str()))
+                            .or_else(|| obj.get("errorCode").and_then(|v| v.as_str()))
+                        {
+                            return Some((
+                                Err(format!("upstream error: {err_msg}")),
+                                (
+                                    frames, id, model, first, usage, out,
+                                    started_tools, dialect, anthropic_text_open,
+                                    anthropic_started, String::with_capacity(16384),
+                                ),
+                            ));
+                        }
                         let mut sse = String::new();
                         if dialect == Dialect::Anthropic && !anthropic_started {
                             anthropic_started = true;
