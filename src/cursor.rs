@@ -23,6 +23,10 @@ pub const KIMI_K3_CONTEXT_WINDOW: u32 = 1_048_576;
 pub const DEFAULT_MAX_TOKENS: u32 = 131_072;
 /// maxTokens 下限保护: 客户端传 <1024 时自动提升到 1024, 防止上游报错.
 pub const MAX_TOKENS_FLOOR: u32 = 1024;
+/// 上游连接池: 直连每 host 最大空闲连接数 (高并发吞吐关键)
+pub const POOL_MAX_IDLE_DIRECT: usize = 1024;
+/// 上游连接池: 代理每 host 最大空闲连接数 (代理通常带宽有限, 不盲目扩)
+pub const POOL_MAX_IDLE_PROXY: usize = 128;
 
 pub fn is_kimi_family(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
@@ -409,7 +413,7 @@ impl CursorClient {
                 .wrap_connector(socks);
             ProxiedClient::Socks5(
                 Client::builder(TokioExecutor::new())
-                    .pool_max_idle_per_host(32)
+                    .pool_max_idle_per_host(POOL_MAX_IDLE_PROXY)
                     .pool_idle_timeout(std::time::Duration::from_secs(90))
                     .build(https),
             )
@@ -430,7 +434,7 @@ impl CursorClient {
                 .wrap_connector(tunnel);
             ProxiedClient::Http(
                 Client::builder(TokioExecutor::new())
-                    .pool_max_idle_per_host(32)
+                    .pool_max_idle_per_host(POOL_MAX_IDLE_PROXY)
                     .pool_idle_timeout(std::time::Duration::from_secs(90))
                     .build(https),
             )
@@ -505,7 +509,7 @@ impl CursorClient {
             BodyExt::into_data_stream(resp.into_body()).map(|r| r.map_err(|e| e.to_string()));
         Ok(Box::pin(FrameStream {
             body: Box::pin(byte_stream),
-            buf: BytesMut::with_capacity(8192),
+            buf: BytesMut::with_capacity(65536), // 64KB 初始缓冲, 减少大帧的 read 次数
         }))
     }
 
@@ -533,7 +537,7 @@ fn build_direct_client() -> anyhow::Result<HttpsClient> {
         .enable_all_versions()
         .wrap_connector(http);
     Ok(Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(256)
+        .pool_max_idle_per_host(POOL_MAX_IDLE_DIRECT)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build(https))
 }

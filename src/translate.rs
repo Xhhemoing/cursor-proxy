@@ -229,8 +229,8 @@ where
     let mut started_tools: Vec<String> = Vec::new();
     let mut anthropic_text_open = false;
     let mut anthropic_started = false;
-    // P0: 预分配 SSE 缓冲，减少高频小帧的重复分配
-    let mut sse_buf = String::with_capacity(4096);
+    // P0: 预分配 SSE 缓冲，减少高频小帧的重复分配 (16k 覆盖大多数帧批量)
+    let mut sse_buf = String::with_capacity(16384);
 
     futures_util::stream::unfold(
         (
@@ -529,7 +529,7 @@ where
                                     dialect,
                                     anthropic_text_open,
                                     anthropic_started,
-                                    String::with_capacity(4096), // 重置缓冲
+                                    String::with_capacity(16384), // 重置缓冲 (16k 预分配)
                                 ),
                             ));
                         }
@@ -549,7 +549,7 @@ where
                                 dialect,
                                 anthropic_text_open,
                                 anthropic_started,
-                                String::with_capacity(4096), // 重置缓冲
+                                String::with_capacity(16384), // 重置缓冲 (16k 预分配)
                             ),
                         ));
                     }
@@ -567,7 +567,7 @@ where
                                 dialect,
                                 anthropic_text_open,
                                 anthropic_started,
-                                String::with_capacity(4096), // 重置缓冲
+                                String::with_capacity(16384), // 重置缓冲 (16k 预分配)
                             ),
                         ));
                     }
