@@ -152,6 +152,8 @@ pub enum CursorError {
     Network(String),
     #[error("upstream decode: {0}")]
     Decode(String),
+    #[error("upstream rejected: {0}")]
+    Rejected(String),
 }
 
 /// Connect 帧: [flags:1][len:4 big-endian][payload]
@@ -268,6 +270,8 @@ pub fn build_cursor_body_with_tools(
     max_mode: Option<bool>,
 ) -> Value {
     let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
+    // P2: tool_choice 完整支持 — "none" 时剥掉 tools, 其他情况注入 hint
+    let omit_tools = crate::protocol::tool_choice_omits_tools(tool_choice);
     if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
         cursor_msgs.insert(
             0,
@@ -280,8 +284,10 @@ pub fn build_cursor_body_with_tools(
     }
 
     let mut requested_model = json!({"modelId": model});
-    // maxMode 默认开启: 确保 1M 上下文可用 (Cursor EM 模式)
-    let mm = max_mode.unwrap_or(true);
+    // maxMode 默认关闭。Cursor 对未付费号直接拒绝 Max mode
+    // ("Max mode is only available to paid users")，默认 true 会让整池空内容。
+    // 需要 1M 上下文时由客户端显式传 max_mode/maxMode=true。
+    let mm = max_mode.unwrap_or(false);
     requested_model["maxMode"] = json!(mm);
 
     let mut body = json!({
@@ -299,18 +305,96 @@ pub fn build_cursor_body_with_tools(
     if let Some(t) = temperature {
         body["temperature"] = json!(t);
     }
-    let cursor_tools = crate::protocol::cursor_tools_from_client(tools);
-    if !cursor_tools.is_empty() {
-        body["tools"] = json!(cursor_tools);
-        let mut cfg = json!({});
-        if let Some(p) = parallel_tool_calls {
-            cfg["parallelToolCalls"] = json!(p);
-        }
-        if !cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            body["modelConfig"] = cfg;
+    // P2: tool_choice="none" 时跳过 tools 字段
+    if !omit_tools {
+        let cursor_tools = crate::protocol::cursor_tools_from_client(tools);
+        if !cursor_tools.is_empty() {
+            body["tools"] = json!(cursor_tools);
+            let mut cfg = json!({});
+            if let Some(p) = parallel_tool_calls {
+                cfg["parallelToolCalls"] = json!(p);
+            }
+            if !cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                body["modelConfig"] = cfg;
+            }
         }
     }
     body
+}
+
+/// P2: 从完整客户端 body 构造 Cursor 请求 (含 response_format 提示注入).
+/// 与 Python `build_cursor_request` 等价.
+///
+/// 注意: `body` 只用于读取 response_format/include 等客户端字段, 不会原样透传到上游.
+pub fn build_cursor_body_full(
+    body: &Value,
+    messages: &[Value],
+    model: &str,
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    tools: Option<&Value>,
+    tool_choice: Option<&Value>,
+    parallel_tool_calls: Option<bool>,
+    conversation_id: Option<&str>,
+    max_mode: Option<bool>,
+) -> Value {
+    let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
+    // P2: tool_choice hint 注入到最前
+    let omit_tools = crate::protocol::tool_choice_omits_tools(tool_choice);
+    if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
+        cursor_msgs.insert(
+            0,
+            json!({
+                "role": "user",
+                "system": true,
+                "parts": {"parts": [{"text": {"text": hint}}]},
+            }),
+        );
+    }
+    // P2: response_format JSON schema 注入为 system 提示
+    if let Some(rf_hint) = crate::protocol::response_format_hint(body) {
+        cursor_msgs.insert(
+            0,
+            json!({
+                "role": "user",
+                "system": true,
+                "parts": {"parts": [{"text": {"text": rf_hint}}]},
+            }),
+        );
+    }
+
+    let mut requested_model = json!({"modelId": model});
+    let mm = max_mode.unwrap_or(false);
+    requested_model["maxMode"] = json!(mm);
+
+    let mut out = json!({
+        "requestedModel": requested_model,
+        "conversationId": conversation_id
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        "messages": cursor_msgs,
+        "stream": true,
+    });
+    let mt = effective_max_tokens(max_tokens, model);
+    out["maxTokens"] = json!(mt);
+    if let Some(t) = temperature {
+        out["temperature"] = json!(t);
+    }
+    if !omit_tools {
+        let cursor_tools = crate::protocol::cursor_tools_from_client(tools);
+        if !cursor_tools.is_empty() {
+            out["tools"] = json!(cursor_tools);
+            let mut cfg = json!({});
+            if let Some(p) = parallel_tool_calls {
+                cfg["parallelToolCalls"] = json!(p);
+            }
+            if !cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                out["modelConfig"] = cfg;
+            }
+        }
+    }
+    out
 }
 
 /// Cursor 异步客户端 (直连 / HTTP CONNECT / SOCKS5)
@@ -507,10 +591,24 @@ impl CursorClient {
         use http_body_util::BodyExt;
         let byte_stream =
             BodyExt::into_data_stream(resp.into_body()).map(|r| r.map_err(|e| e.to_string()));
-        Ok(Box::pin(FrameStream {
+        let mut frames = Box::pin(FrameStream {
             body: Box::pin(byte_stream),
             buf: BytesMut::with_capacity(65536), // 64KB 初始缓冲, 减少大帧的 read 次数
-        }))
+        });
+        // 业务错误常跟在 HTTP 200 后的首帧。偷看一帧，Max mode / 配额拒绝立刻变 Err，
+        // 让 handler 能同号降级重试，而不是 SSE 空内容。
+        match frames.as_mut().next().await {
+            Some(Err(e)) => Err(e),
+            None => Ok(Box::pin(futures_util::stream::empty())),
+            Some(Ok(first)) => {
+                if let Some(msg) = crate::translate::extract_cursor_error_message(&first) {
+                    return Err(CursorError::Rejected(msg));
+                }
+                Ok(Box::pin(
+                    futures_util::stream::once(async move { Ok(first) }).chain(frames),
+                ))
+            }
+        }
     }
 
     pub async fn request(
@@ -811,6 +909,19 @@ mod tests {
     }
 
     #[test]
+    fn max_mode_defaults_off() {
+        let msgs = vec![json!({"role": "user", "content": "hi"})];
+        let body = build_cursor_body_with_tools(
+            &msgs, "kimi-k3", Some(128), None, None, None, None, None, None,
+        );
+        assert_eq!(body["requestedModel"]["maxMode"], false);
+        let body_on = build_cursor_body_with_tools(
+            &msgs, "kimi-k3", Some(128), None, None, None, None, None, Some(true),
+        );
+        assert_eq!(body_on["requestedModel"]["maxMode"], true);
+    }
+
+    #[test]
     fn tools_go_into_cursor_body() {
         let msgs = vec![json!({"role": "user", "content": "ls"})];
         let tools = json!([{
@@ -847,5 +958,45 @@ mod tests {
         let body =
             build_cursor_body_with_tools(&msgs, "kimi-k3", None, None, None, None, None, Some(&a), None);
         assert_eq!(body["conversationId"], a);
+    }
+
+    #[test]
+    fn auto_select_kimi_model_real_scenarios() {
+        // 真实场景：hi + max_tokens=16 → 应该映射到 low（短消息）
+        assert_eq!(
+            auto_select_kimi_model(&json!({
+                "model": "kimi-k3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 16
+            })),
+            "kimi-k3-low"
+        );
+        // 真实场景：多轮对话 → 应该映射到 high
+        assert_eq!(
+            auto_select_kimi_model(&json!({
+                "model": "kimi-k3",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "a"},
+                    {"role": "user", "content": "b"},
+                    {"role": "assistant", "content": "c"},
+                    {"role": "user", "content": "d"},
+                    {"role": "assistant", "content": "e"},
+                    {"role": "user", "content": "f"}
+                ],
+                "max_tokens": 16
+            })),
+            "kimi-k3-high"
+        );
+        // 真实场景：max_mode → 应该映射到 max
+        assert_eq!(
+            auto_select_kimi_model(&json!({
+                "model": "kimi-k3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_mode": true,
+                "max_tokens": 16
+            })),
+            "kimi-k3-max"
+        );
     }
 }

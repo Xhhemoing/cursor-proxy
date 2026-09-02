@@ -42,6 +42,8 @@ impl UpstreamClient {
     }
 
     /// 流式调用
+    ///
+    /// `original_body`: 客户端原始请求体 — 用于 response_format JSON schema 提示注入 (P2)
     pub async fn stream(
         &self,
         model: &str,
@@ -55,6 +57,7 @@ impl UpstreamClient {
         conversation_id: Option<&str>,
         cursor_override: Option<&CursorClient>,
         max_mode: Option<bool>,
+        original_body: Option<&Value>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Value, UpstreamError>> + Send>>, UpstreamError>
     {
         match self {
@@ -62,17 +65,33 @@ impl UpstreamClient {
                 let client = cursor_override.unwrap_or(client);
                 let (token, mid) = cursor_auth
                     .ok_or_else(|| UpstreamError::Config("upstream auth required".into()))?;
-                let body = build_cursor_body_with_tools(
-                    messages,
-                    model,
-                    max_tokens,
-                    temperature,
-                    tools,
-                    tool_choice,
-                    parallel_tool_calls,
-                    conversation_id,
-                    max_mode,
-                );
+                // P2: 有原始 body 时用 build_cursor_body_full (注入 response_format hint)
+                let body = if let Some(ob) = original_body {
+                    crate::cursor::build_cursor_body_full(
+                        ob,
+                        messages,
+                        model,
+                        max_tokens,
+                        temperature,
+                        tools,
+                        tool_choice,
+                        parallel_tool_calls,
+                        conversation_id,
+                        max_mode,
+                    )
+                } else {
+                    build_cursor_body_with_tools(
+                        messages,
+                        model,
+                        max_tokens,
+                        temperature,
+                        tools,
+                        tool_choice,
+                        parallel_tool_calls,
+                        conversation_id,
+                        max_mode,
+                    )
+                };
                 let stream = client
                     .stream(token, mid, &body)
                     .await

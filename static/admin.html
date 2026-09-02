@@ -834,6 +834,7 @@
     let accQueryBusy = false;
     // 缓存状态
     let lastPoolVersion = 0;
+    let lastPoolFp = 0;
     let lastPoolData = null;
     let lastLogId = 0;
     let lastLogs = [];
@@ -1268,7 +1269,7 @@
       loadRpm();
       // 号池: 带版本号缓存验证
       const poolParams = poolQuery();
-      const poolUrl = '/admin/api/pool?' + poolParams + (lastPoolVersion > 0 ? '&version=' + lastPoolVersion : '');
+      const poolUrl = '/admin/api/pool?' + poolParams + (lastPoolVersion > 0 ? '&version=' + lastPoolVersion + '&fp=' + lastPoolFp : '');
       const [poolResp, settings, keys, logs, proxies] = await Promise.all([
         api(poolUrl).catch((e) => {
           if (e.message && e.message.includes('304')) return { __notModified: true };
@@ -1282,9 +1283,17 @@
       // 处理 304 Not Modified
       let pool = poolResp;
       if (poolResp.__notModified) {
-        pool = lastPoolData; // 复用上次数据
+        pool = lastPoolData; // 复用上次数据 (服务端已保证同指纹才 304)
+        if (!pool) { // 兜底: 没有缓存数据时强制全量拉取
+          lastPoolVersion = 0; lastPoolFp = 0;
+          pool = await api('/admin/api/pool?' + poolParams);
+          lastPoolVersion = pool.version || 0;
+          lastPoolFp = pool.fp || 0;
+          lastPoolData = pool;
+        }
       } else {
         lastPoolVersion = pool.version || 0;
+        lastPoolFp = pool.fp || 0;
         lastPoolData = pool;
       }
       // 日志增量合并

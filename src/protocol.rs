@@ -15,8 +15,73 @@ pub struct AssistantOut {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub thinking: String,
+    /// Anthropic 思考签名 (thinking signature), 上游 thinkingPart 可能附带
+    pub thinking_signature: Option<String>,
     /// 上游原始的 stop reason (responseInfo.stopReason), 用于判断输出是否被截断
     pub upstream_stop_reason: String,
+}
+
+/// 推理签名的代理标识前缀 — 与 Python 版 cursor-openai-proxy 保持一致.
+/// 我们永远不会把代理生成的 blob 当作 Anthropic 官方 signature 透传给客户端,
+/// 而是用此前缀 + base64 包装, 客户端需要时可解开.
+pub const REASONING_PREFIX: &str = "cursor-sand-v1:";
+pub const PROXY_SIGNATURE_MARK: &str = "proxygen:";
+
+/// 把 (text, signature) 编码成可嵌入 Responses/Chat 的 encrypted_content 字符串.
+/// 与 Python 版 `_encode_reasoning` 等价.
+pub fn encode_reasoning(text: &str, signature: Option<&str>) -> String {
+    use base64::Engine;
+    let sig = signature
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{}{}", PROXY_SIGNATURE_MARK, uuid::Uuid::new_v4().simple()));
+    let blob = json!({"text": text, "signature": sig});
+    let raw = serde_json::to_string(&blob).unwrap_or_else(|_| "{}".into());
+    let b64 = base64::engine::general_purpose::URL_SAFE.encode(raw.as_bytes());
+    format!("{}{}", REASONING_PREFIX, b64)
+}
+
+/// 从 encrypted_content 解码 (text, signature). 与 Python 版 `_decode_reasoning` 等价.
+pub fn decode_reasoning(encrypted: &str) -> Option<(String, Option<String>)> {
+    use base64::Engine;
+    let rest = encrypted.strip_prefix(REASONING_PREFIX)?;
+    // Python 端用 urlsafe_b64decode(... + \"==\"), 这里补 padding
+    let padded = format!("{}{}", rest, "=".repeat((4 - rest.len() % 4) % 4));
+    let raw = base64::engine::general_purpose::URL_SAFE
+        .decode(padded.as_bytes())
+        .ok()?;
+    let v: Value = serde_json::from_slice(&raw).ok()?;
+    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let sig = v.get("signature").and_then(|x| x.as_str()).map(String::from);
+    Some((text, sig))
+}
+
+/// 判断请求是否要加密 reasoning (Responses API `include` 字段).
+/// 与 Python 版 `_wants_encrypted_reasoning` 等价.
+pub fn wants_encrypted_reasoning(request: &Value) -> bool {
+    let Some(inc) = request.get("include") else { return false };
+    let items: Vec<&str> = match inc {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(a) => a.iter().filter_map(|v| v.as_str()).collect(),
+        _ => return false,
+    };
+    items.iter().any(|s| {
+        *s == "reasoning.encrypted_content" || *s == "reasoning.encrypted_content.streaming"
+    })
+}
+
+/// 模型展示名反向映射 — 把 Cursor 内部别名映射回客户端期待的官方 slug.
+/// 与 Python 版 `DISPLAY_MODEL_MAP` + `display_model_id` 等价.
+/// Claude/Grok 等敏感上游走反带时, 客户端会指纹检测 Anthropic slug.
+pub fn display_model_id(model: &str) -> String {
+    match model {
+        "claude-fable-5" | "claude-fable-5-thinking-max" | "claude-fable" => {
+            "claude-sonnet-4-6".into()
+        }
+        "grok-4.5" | "grok-4.6" | "cursor-grok-4.5" | "cursor-grok-4.6" => {
+            "claude-sonnet-4-6".into()
+        }
+        other => other.to_string(),
+    }
 }
 
 pub fn hosted_web_search(tools: Option<&Value>) -> bool {
@@ -93,6 +158,30 @@ fn args_to_string(v: &Value) -> String {
 
 fn args_to_object(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| json!({}))
+}
+
+/// 清洗 Cursor 的 toolCallId — 与 Python 版 `_normalize_call_id` 等价.
+/// Cursor 有时发送两行 toolCallId (call-... 加 fc_...), 取最后一行有效值.
+fn normalize_call_id(value: &Value) -> String {
+    let text = value.as_str().unwrap_or("").trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let owned = text.replace('\r', "\n");
+    let parts: Vec<&str> = owned
+        .split('\n')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    for part in parts.iter().rev() {
+        if part.starts_with("fc_") || part.starts_with("call_") {
+            return part.to_string();
+        }
+    }
+    parts.last().unwrap().to_string()
 }
 
 fn content_to_text(content: &Value) -> String {
@@ -177,6 +266,18 @@ pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
 
 pub fn tool_choice_hint(tool_choice: Option<&Value>) -> Option<String> {
     let v = tool_choice?;
+    // P2: forced tool name (单个具体工具)
+    if let Some(name) = forced_tool_name(Some(v)) {
+        return Some(format!(
+            "You must call the `{}` tool before answering in plain text.",
+            name
+        ));
+    }
+    // P2: required / any (必须调用工具)
+    if tool_choice_is_required(Some(v)) {
+        return Some("You must call a tool before answering in plain text.".into());
+    }
+    // 兼容旧逻辑: 简单字符串
     match v {
         Value::String(s) if s == "required" || s == "any" => {
             Some("You must call a tool. Do not answer with plain text.".into())
@@ -194,6 +295,243 @@ pub fn tool_choice_hint(tool_choice: Option<&Value>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// P2: tool_choice == "none" / {"type":"none"} / false → 上游请求应剥掉 tools
+/// 与 Python `tool_choice_omits_tools` 等价.
+pub fn tool_choice_omits_tools(tool_choice: Option<&Value>) -> bool {
+    match tool_choice {
+        Some(Value::String(s)) if s == "none" => true,
+        Some(Value::Bool(false)) => true,
+        Some(Value::Object(o)) => o.get("type").and_then(|v| v.as_str()) == Some("none"),
+        _ => false,
+    }
+}
+
+/// P2: 提取 tool_choice 中强制要求的工具名 ({"type":"function","function":{"name":"..."}})
+pub fn forced_tool_name(tool_choice: Option<&Value>) -> Option<String> {
+    let v = tool_choice?;
+    let obj = v.as_object()?;
+    let typ = obj.get("type").and_then(|v| v.as_str())?;
+    if !matches!(typ, "function" | "tool" | "custom") {
+        return None;
+    }
+    let fn_obj = obj.get("function").and_then(|v| v.as_object());
+    let name = fn_obj
+        .and_then(|f| f.get("name"))
+        .or_else(|| obj.get("name"))
+        .and_then(|v| v.as_str())?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// P2: tool_choice 是否强制必须调工具 (required/any/forced)
+pub fn tool_choice_is_required(tool_choice: Option<&Value>) -> bool {
+    match tool_choice {
+        Some(Value::String(s)) if s == "required" || s == "any" => true,
+        Some(Value::Object(o)) => {
+            let typ = o.get("type").and_then(|v| v.as_str());
+            if matches!(typ, Some("required") | Some("any")) {
+                return true;
+            }
+            forced_tool_name(tool_choice).is_some()
+        }
+        _ => false,
+    }
+}
+
+/// P2: 从 response_format 编译 JSON schema 为 system 提示词.
+/// 与 Python `response_format_schema` + `response_format_hint` 等价.
+pub fn response_format_schema(body: &Value) -> Option<Value> {
+    let rf = body.get("response_format")?.as_object()?;
+    let typ = rf.get("type").and_then(|v| v.as_str())?.to_lowercase();
+    match typ.as_str() {
+        "json_schema" => {
+            let js = rf.get("json_schema").and_then(|v| v.as_object());
+            let schema = js
+                .and_then(|j| j.get("schema").cloned())
+                .or_else(|| rf.get("json_schema").cloned())
+                .unwrap_or_else(|| json!({"type": "object"}));
+            Some(schema)
+        }
+        "json_object" | "json" => Some(json!({"type": "object"})),
+        _ => None,
+    }
+}
+
+pub fn response_format_hint(body: &Value) -> Option<String> {
+    let schema = response_format_schema(body)?;
+    let rf = body.get("response_format").and_then(|v| v.as_object());
+    let (name, strict) = rf
+        .map(|r| {
+            let js = r.get("json_schema").and_then(|v| v.as_object());
+            let n = js
+                .and_then(|j| j.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let s = js
+                .and_then(|j| j.get("strict"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            (n, s)
+        })
+        .unwrap_or_default();
+    let schema_text = serde_json::to_string(&schema).unwrap_or_else(|_| "{}".into());
+    let label = if name.is_empty() {
+        String::new()
+    } else {
+        format!(" named `{}`", name)
+    };
+    let strict_line = if strict {
+        " Follow the schema strictly; do not add extra keys."
+    } else {
+        ""
+    };
+    Some(format!(
+        "Respond with a single valid JSON object{} and nothing else — no prose, \
+         no markdown fences, no explanation. The JSON must conform to this schema: \
+         {}.{}",
+        label, schema_text, strict_line
+    ))
+}
+
+/// P2: 客户端会话/对话 ID 提取 — 按优先级多源回退.
+///
+/// 顺序 (与 Python 版 `conversation_id_from` 对齐):
+///   1. body.conversationId / body.conversation.id / body.conversation (str)
+///   2. body.metadata.conversation_id / metadata.session_id 等
+///   3. body.previous_response_id (查 RESPONSE_STORE — Rust 版暂不实现 ResponseStore, 跳过)
+///   4. Header: x-conversation-id / x-session-id / x-cursor-conversation-id / openai-conversation-id
+///   5. body.user → "user_" + sha1[:16]
+///   6. 基于 system + 首条 user 消息内容的 hash
+///   7. 全新 UUID
+pub fn conversation_id_from(body: &Value, headers: Option<&axum::http::HeaderMap>) -> String {
+    // 1. body.conversationId / body.conversation
+    let mut value: Option<String> = body
+        .get("conversationId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if value.is_none() {
+        if let Some(conv) = body.get("conversation") {
+            value = match conv {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(o) => o
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                _ => None,
+            };
+        }
+    }
+    // 2. body.metadata.{conversation_id, conversationId, session_id, sessionId}
+    if value.is_none() {
+        if let Some(meta) = body.get("metadata").and_then(|v| v.as_object()) {
+            for k in ["conversation_id", "conversationId", "session_id", "sessionId"] {
+                if let Some(v) = meta.get(k).and_then(|v| v.as_str()) {
+                    value = Some(v.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    // 3. headers
+    if value.is_none() {
+        if let Some(h) = headers {
+            for name in [
+                "x-conversation-id",
+                "x-session-id",
+                "x-cursor-conversation-id",
+                "openai-conversation-id",
+            ] {
+                if let Some(v) = h.get(name).and_then(|v| v.to_str().ok()) {
+                    let trimmed = v.trim();
+                    if !trimmed.is_empty() {
+                        value = Some(trimmed.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(v) = value {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    // 4. user 字段
+    let user = body
+        .get("user")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if !user.is_empty() {
+        use sha1::Digest;
+        let mut h = sha1::Sha1::new();
+        h.update(user.as_bytes());
+        let hex = format!("{:x}", h.finalize());
+        return format!("user_{}", &hex[..16]);
+    }
+    // 5. 基于 system + 首条 user 内容 hash (Cursor 前缀缓存命中)
+    let prefix = conversation_prefix(body);
+    if !prefix.is_empty() {
+        use sha1::Digest;
+        let mut h = sha1::Sha1::new();
+        h.update(prefix.as_bytes());
+        let hex = format!("{:x}", h.finalize());
+        // 与 Python 对齐: 如果 system 部分足够长, 用 sys_ 前缀
+        let sys_part = prefix
+            .split('\n')
+            .find_map(|p| p.strip_prefix("sys:"))
+            .unwrap_or("");
+        if sys_part.len() >= 80 {
+            return format!("sys_{}", &hex[..16]);
+        }
+        return format!("conv_{}", &hex[..16]);
+    }
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn conversation_prefix(body: &Value) -> String {
+    let mut chunks: Vec<String> = Vec::new();
+    let instructions = body.get("instructions").and_then(|v| v.as_str());
+    if let Some(ins) = instructions {
+        if !ins.is_empty() {
+            let truncated: String = ins.chars().take(400).collect();
+            chunks.push(format!("sys:{}", truncated));
+        }
+    }
+    let mut has_sys = !chunks.is_empty();
+    let mut has_user = false;
+    if let Some(msgs) = body.get("messages").and_then(|v| v.as_array()) {
+        for msg in msgs {
+            let role = msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let content_text = content_to_text(msg.get("content").unwrap_or(&Value::Null));
+            let truncated: String = content_text.chars().take(400).collect();
+            if (role == "system" || role == "developer") && !has_sys {
+                if !truncated.is_empty() {
+                    chunks.push(format!("sys:{}", truncated));
+                    has_sys = true;
+                }
+                continue;
+            }
+            if role == "user" && !has_user {
+                if !truncated.is_empty() {
+                    chunks.push(format!("user:{}", truncated));
+                    has_user = true;
+                }
+                break;
+            }
+        }
+    }
+    chunks.into_iter().filter(|s| s.len() > 4).collect::<Vec<_>>().join("\n")
 }
 
 /// Anthropic Messages body → OpenAI Chat 形态 (messages + tools + max_tokens).
@@ -397,11 +735,17 @@ pub fn responses_to_openai_chat(body: &Value) -> Result<Value, String> {
     if messages.is_empty() {
         return Err("input is required".into());
     }
+    // Responses API: 默认流式 (与 OpenAI 官方行为一致 — 客户端用 SSE 消费)
+    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(true);
     let mut out = json!({
         "model": model,
         "messages": messages,
-        "stream": body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+        "stream": stream,
     });
+    // P2: 保留原始 body 的 include 字段 (reasoning.encrypted_content 等), 供翻译层判定
+    if let Some(inc) = body.get("include") {
+        out["include"] = inc.clone();
+    }
     if let Some(mt) = body
         .get("max_output_tokens")
         .or_else(|| body.get("max_tokens"))
@@ -427,41 +771,113 @@ pub fn responses_to_openai_chat(body: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
-pub fn parse_tool_call_part(part: &Value) -> Option<(String, String, String, bool)> {
-    // returns (id, name, args_or_delta, is_delta)
-    let id = part
-        .get("toolCallId")
-        .or_else(|| part.get("callId"))
-        .or_else(|| part.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+pub fn parse_tool_call_part(part: &Value) -> Option<(String, String, String, bool, bool)> {
+    // returns (id, name, args_or_delta, is_delta, is_complete)
+    let id = normalize_call_id(
+        part.get("toolCallId")
+            .or_else(|| part.get("callId"))
+            .or_else(|| part.get("id"))
+            .unwrap_or(&Value::Null),
+    );
     let name = part
         .get("name")
         .or_else(|| part.get("toolName"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let is_complete = part
+        .get("isComplete")
+        .or_else(|| part.get("is_complete"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if let Some(d) = part
         .get("argumentsDelta")
         .or_else(|| part.get("delta"))
         .or_else(|| part.get("partialArguments"))
         .and_then(|v| v.as_str())
     {
-        return Some((id, name, d.to_string(), true));
+        return Some((id, name, d.to_string(), true, is_complete));
     }
     if let Some(a) = part.get("arguments").or_else(|| part.get("args")) {
-        return Some((id, name, args_to_string(a), false));
+        return Some((id, name, args_to_string(a), false, is_complete));
     }
     if name.is_empty() && id.is_empty() {
         return None;
     }
-    Some((id, name, String::new(), false))
+    Some((id, name, String::new(), false, is_complete))
 }
 
-pub fn apply_tool_call_part(out: &mut AssistantOut, part: &Value) {
-    let Some((id, name, payload, is_delta)) = parse_tool_call_part(part) else {
-        return;
+/// 增量合并 Cursor toolCallPart args — 与 Python 版 `merge_tool_arg_text` 等价.
+///
+/// Cursor 可能发送:
+///   1. 真字符串增量 (前缀增长)
+///   2. 同一对象的 pretty JSON 然后 compact JSON
+///   3. 增长的对象快照 (部分 dict 然后完整 Edit/PowerShell 参数)
+///   4. 以 [ 或引号开头的片段 (PowerShell `$lines[0..137]`, 路径)
+///
+/// 返回 (完整 arguments, 安全前缀 delta).
+pub fn merge_tool_arg_text(prev: &str, incoming: &str) -> (String, String) {
+    let prev = prev;
+    let incoming = incoming;
+    if incoming.is_empty() {
+        return (prev.to_string(), String::new());
+    }
+    if incoming == prev {
+        return (prev.to_string(), String::new());
+    }
+    if incoming.starts_with(prev) {
+        return (incoming.to_string(), incoming[prev.len()..].to_string());
+    }
+    if prev.starts_with(incoming) {
+        return (prev.to_string(), String::new());
+    }
+
+    let new_obj = complete_json(incoming);
+    let prev_obj = complete_json(prev);
+
+    match (new_obj, prev_obj) {
+        (Some(Value::Object(new_m)), Some(Value::Object(prev_m))) => {
+            if Value::Object(new_m.clone()) == Value::Object(prev_m.clone()) {
+                return (prev.to_string(), String::new());
+            }
+            // 新对象 payload 严格小于旧对象且所有键已存在 → 视为旧快照, 丢弃
+            let new_len = json_payload_len(&Value::Object(new_m.clone()));
+            let prev_len = json_payload_len(&Value::Object(prev_m.clone()));
+            if new_len < prev_len && new_m.keys().all(|k| prev_m.contains_key(k)) {
+                return (prev.to_string(), String::new());
+            }
+            // 新快照更丰富: 替换, delta 为空
+            (incoming.to_string(), String::new())
+        }
+        (Some(Value::Object(_)), None) => (incoming.to_string(), String::new()),
+        _ => {
+            // 字符串片段: 直接拼接
+            let mut full = String::with_capacity(prev.len() + incoming.len());
+            full.push_str(prev);
+            full.push_str(incoming);
+            let delta = incoming.to_string();
+            (full, delta)
+        }
+    }
+}
+
+/// 尝试把字符串解析为完整 JSON 值 (允许多种 dump 格式).
+fn complete_json(raw: &str) -> Option<Value> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+/// JSON payload 字符长度 (用于比较两个 dict 的"丰富程度").
+fn json_payload_len(v: &Value) -> usize {
+    serde_json::to_string(v).map(|s| s.len()).unwrap_or(0)
+}
+
+pub fn apply_tool_call_part(out: &mut AssistantOut, part: &Value) -> bool {
+    let Some((id, name, payload, is_delta, is_complete)) = parse_tool_call_part(part) else {
+        return false;
     };
     if let Some(existing) = out.tool_calls.iter_mut().rev().find(|c| {
         (!id.is_empty() && c.id == id) || (id.is_empty() && !name.is_empty() && c.name == name)
@@ -473,11 +889,14 @@ pub fn apply_tool_call_part(out: &mut AssistantOut, part: &Value) {
             existing.id = id;
         }
         if is_delta {
-            existing.arguments.push_str(&payload);
+            // P1: 使用智能合并而非裸拼接, 防止跨帧 JSON 边界产生无效 JSON
+            let (merged, _) = merge_tool_arg_text(&existing.arguments, &payload);
+            existing.arguments = merged;
         } else if !payload.is_empty() {
-            existing.arguments = payload;
+            let (merged, _) = merge_tool_arg_text(&existing.arguments, &payload);
+            existing.arguments = merged;
         }
-        return;
+        return is_complete;
     }
     let id = if id.is_empty() {
         format!("call_{}", out.tool_calls.len() + 1)
@@ -489,6 +908,7 @@ pub fn apply_tool_call_part(out: &mut AssistantOut, part: &Value) {
         name,
         arguments: payload,
     });
+    is_complete
 }
 
 /// 判断 AssistantOut 是否被上游截断 (max_tokens / length limit)
@@ -507,6 +927,18 @@ pub fn anthropic_message(
     usage: &crate::translate::Usage,
 ) -> Value {
     let mut content: Vec<Value> = Vec::new();
+    // P0: Anthropic 规范要求 thinking block 在 text 之前, 且必须携带 signature
+    if !out.thinking.is_empty() {
+        let sig = out
+            .thinking_signature
+            .clone()
+            .unwrap_or_else(|| format!("{}{}", PROXY_SIGNATURE_MARK, uuid::Uuid::new_v4().simple()));
+        content.push(json!({
+            "type": "thinking",
+            "thinking": out.thinking,
+            "signature": sig,
+        }));
+    }
     if !out.text.is_empty() {
         content.push(json!({"type": "text", "text": out.text}));
     }
@@ -545,14 +977,32 @@ pub fn anthropic_message(
     })
 }
 
-pub fn responses_message(
+/// 构造 Responses API 完整 message, 可选携带 encrypted reasoning.
+/// `request` 用于判定是否要 include encrypted_content.
+pub fn responses_message_with_request(
     id: &str,
     model: &str,
     out: &AssistantOut,
     usage: &crate::translate::Usage,
+    request: Option<&Value>,
 ) -> Value {
     let mut output: Vec<Value> = Vec::new();
-    if !out.text.is_empty() || out.tool_calls.is_empty() {
+    let wants_encrypted = request.map(wants_encrypted_reasoning).unwrap_or(false);
+    // P0: 思考作为独立 reasoning item 放在最前 (Responses 规范)
+    if !out.thinking.is_empty() {
+        let mut item = json!({
+            "id": format!("rs_{}", uuid::Uuid::new_v4().simple()),
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": out.thinking}],
+        });
+        if wants_encrypted {
+            item["encrypted_content"] =
+                json!(encode_reasoning(&out.thinking, out.thinking_signature.as_deref()));
+        }
+        output.push(item);
+    }
+    if !out.text.is_empty() || (out.tool_calls.is_empty() && out.thinking.is_empty()) {
         output.push(json!({
             "id": format!("msg_{}", id),
             "type": "message",
@@ -587,6 +1037,15 @@ pub fn responses_message(
     })
 }
 
+pub fn responses_message(
+    id: &str,
+    model: &str,
+    out: &AssistantOut,
+    usage: &crate::translate::Usage,
+) -> Value {
+    responses_message_with_request(id, model, out, usage, None)
+}
+
 pub fn openai_message_with_tools(
     id: &str,
     model: &str,
@@ -604,6 +1063,13 @@ pub fn openai_message_with_tools(
         "role": "assistant",
         "content": if out.text.is_empty() { Value::Null } else { json!(out.text) },
     });
+    // P0: 思考内容在 OpenAI 规范中以 reasoning_content 字段呈现 (DeepSeek-R1/Kimi-Thinking 标准)
+    if !out.thinking.is_empty() {
+        message["reasoning_content"] = json!(out.thinking);
+        if let Some(sig) = &out.thinking_signature {
+            message["reasoning_signature"] = json!(sig);
+        }
+    }
     if !out.tool_calls.is_empty() {
         let calls: Vec<Value> = out
             .tool_calls

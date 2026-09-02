@@ -978,7 +978,7 @@ async fn inference_handler(
         .unwrap_or(&config.default_model)
         .to_string();
     // 自动识别思考程度：kimi-k3 → 根据请求特征映射到 max/high/low
-    let model = if model == "kimi-k3" {
+    let mut model = if model == "kimi-k3" {
         crate::cursor::auto_select_kimi_model(&body).to_string()
     } else {
         model
@@ -1061,8 +1061,31 @@ async fn inference_handler(
         }
     };
     let mut account_id = account.id.clone();
-    let mut conv_id =
-        crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id));
+    // P2: 多源 conversationId 提取 — 客户端显式 conversationId/metadata/header/user/sys-hash 优先,
+    // 全部缺失时回退到 session+account 的 UUID v5 (保证同一 session 在同一号上, 前缀缓存命中)
+    let mut conv_id = {
+        let from_client = crate::protocol::conversation_id_from(&body, Some(&headers));
+        // conversation_id_from 在所有源都缺失时返回 UUID v4 (非稳定),
+        // 这种情况下应该回退到 account 亲和的 v5 以保持号池缓存命中.
+        // 启发式: 如果客户端显式传了 conversation/session 信息, 尊重客户端;
+        // 否则用 account 亲和 v5.
+        let has_explicit = body.get("conversationId").is_some()
+            || body.get("conversation").is_some()
+            || body.get("metadata").and_then(|m| m.as_object()).map(|o| {
+                o.contains_key("conversation_id")
+                    || o.contains_key("conversationId")
+                    || o.contains_key("session_id")
+                    || o.contains_key("sessionId")
+            }).unwrap_or(false)
+            || headers.get("x-conversation-id").is_some()
+            || headers.get("x-cursor-conversation-id").is_some()
+            || headers.get("openai-conversation-id").is_some();
+        if has_explicit {
+            from_client
+        } else {
+            crate::cursor::conversation_id_for(session_owned.as_deref(), Some(&account_id))
+        }
+    };
 
     // 记录 RPM (key + account 维度)
     state.metrics.observe_rpm(&used_key, &account_id);
@@ -1099,9 +1122,11 @@ async fn inference_handler(
     let mut frames_opt = None;
     let mut current_permit = Some(permit);
     let mut current_max_tokens = max_tokens;
+    let mut current_max_mode = max_mode;
+    let mut skip_account_switch = false;
 
     for attempt in 0..MAX_RETRIES {
-        if attempt > 0 {
+        if attempt > 0 && !skip_account_switch {
             // 重新获取账号（失败账号已进入冷却, 轮询会自动跳过）;
             // 新 permit 替换旧 permit: 旧账号槽位立即归还, 新账号并发受控
             let retry_account = match state.pool.acquire().await {
@@ -1161,7 +1186,8 @@ async fn inference_handler(
                 parallel_tool_calls,
                 Some(conv_id.as_str()),
                 cursor_override.as_ref(),
-                max_mode,
+                current_max_mode,
+                Some(&body),
             )
             .await
         {
@@ -1174,6 +1200,25 @@ async fn inference_handler(
             }
             Err(e) => {
                 last_error = e.to_string();
+                // Max mode 被拒: 关 maxMode，kimi-k3-max 降到 kimi-k3，同号重试，不记账号错误
+                let still_on_max = current_max_mode != Some(false)
+                    || model.eq_ignore_ascii_case("kimi-k3-max");
+                if translate::is_max_mode_restricted(&last_error) && still_on_max {
+                    info!(
+                        event = "max_mode_fallback",
+                        req_id = %request_id,
+                        account = %account_id,
+                        model = %model,
+                        "upstream rejected max mode; retrying without maxMode"
+                    );
+                    current_max_mode = Some(false);
+                    if model.eq_ignore_ascii_case("kimi-k3-max") {
+                        model = "kimi-k3".to_string();
+                    }
+                    skip_account_switch = true;
+                    continue;
+                }
+                skip_account_switch = false;
                 state.pool.release(&account_id, true, 30);
                 state.metrics.observe_err();
 
@@ -1270,12 +1315,19 @@ async fn inference_handler(
         let metrics = state.metrics.clone();
         let ledger = state.ledger.clone();
         let bctx_s = bctx.clone();
+        // P1: 克隆请求体供 translate 层判定 Responses include/encrypted reasoning
+        let request_body_for_translate = body.clone();
 
         tokio::spawn(async move {
             // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
             let _permit = current_permit.take().expect("permit must exist");
             let mut usage = translate::Usage::default();
-            let mut stream = Box::pin(upstream_to_dialect_stream(frames, &model_clone, dialect));
+            let mut stream = Box::pin(upstream_to_dialect_stream(
+                frames,
+                &model_clone,
+                dialect,
+                Some(request_body_for_translate),
+            ));
             // 断流兜底: 记录是否已发出该方言的正常收尾标记, 未发则在结束时补发,
             // 否则客户端收到没收尾的半截流会卡住并显示"继续"。
             let terminal_marker = match dialect {
@@ -1434,7 +1486,7 @@ async fn inference_handler(
         let _permit = current_permit.take().expect("permit must exist");
         let full = match tokio::time::timeout(
             upstream_timeout,
-            upstream_to_dialect_full(frames, &model, dialect),
+            upstream_to_dialect_full(frames, &model, dialect, Some(body.clone())),
         )
         .await
         {
@@ -1471,18 +1523,67 @@ async fn inference_handler(
             Ok((result, usage)) => {
                 // P0: 空内容检测 — 上游返回 200 但 content 为空时自动重试一次
                 // 注意: 此处不在 for 循环内, 不能 continue; 空内容直接返回错误让客户端重试
-                let is_empty = result
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("message"))
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.is_empty())
-                    .unwrap_or(true);
+                // 空内容检测: OpenAI 用 choices[0].message.content, Anthropic 用 content 数组,
+                // Responses 用 output 数组. 任一有内容即非空.
+                let is_empty = match dialect {
+                    Dialect::Chat => result
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("message"))
+                        .and_then(|m| {
+                            // 有 reasoning_content 或 tool_calls 也算非空
+                            let has_text = m.get("content")
+                                .and_then(|c| c.as_str())
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false);
+                            let has_reasoning = m.get("reasoning_content")
+                                .and_then(|c| c.as_str())
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false);
+                            let has_tools = m.get("tool_calls")
+                                .and_then(|c| c.as_array())
+                                .map(|a| !a.is_empty())
+                                .unwrap_or(false);
+                            if has_text || has_reasoning || has_tools {
+                                Some(())
+                            } else {
+                                None
+                            }
+                        })
+                        .is_none(),
+                    Dialect::Anthropic => result
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|blocks| {
+                            // 任何 thinking/text/tool_use block 都算非空
+                            !blocks.iter().any(|b| {
+                                let ty = b.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                match ty {
+                                    "thinking" => b.get("thinking")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| !s.is_empty())
+                                        .unwrap_or(false),
+                                    "text" => b.get("text")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| !s.is_empty())
+                                        .unwrap_or(false),
+                                    "tool_use" => true,
+                                    _ => false,
+                                }
+                            })
+                        })
+                        .unwrap_or(true),
+                    Dialect::Responses => result
+                        .get("output")
+                        .and_then(|c| c.as_array())
+                        .map(|items| items.is_empty())
+                        .unwrap_or(true),
+                };
                 if is_empty {
                     warn!(
                         event = "empty_content",
                         req_id = %request_id,
+                        result = %result,
                         "upstream returned empty content"
                     );
                     state.pool.release(&account_id, true, 5);

@@ -48,6 +48,7 @@ subtle = "2"  # 恒定时间比较 (API key 防时序攻击)
 parking_lot = "0.12"  # 无 poison 的 Mutex/RwLock
 rusqlite = { version = "0.32", features = ["bundled"] }  # 计费账本 (SQLite WAL)
 notify = { version = "6", default-features = false, features = ["macos_kqueue"] }  # 配置热重载
+sha1 = "0.10"  # conversation_id 的 user/sys hash (与 Python hashlib.sha1 对齐)
 
 [profile.release]
 opt-level = 3

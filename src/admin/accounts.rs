@@ -24,8 +24,10 @@ pub struct PoolQuery {
     pub proxy_id: Option<String>,
     /// 1 = 兼容旧面板，返回全部账号
     pub all: Option<u8>,
-    /// 客户端已知数据版本号; 匹配时返回 304
+    /// 客户端已知数据版本号; 与 fp 同时匹配时返回 304
     pub version: Option<u64>,
+    /// 客户端查询指纹 (由上一次响应下发); 防止「同版本换筛选」错误命中 304
+    pub fp: Option<u64>,
 }
 
 pub async fn api_pool_stats(
@@ -35,22 +37,41 @@ pub async fn api_pool_stats(
     if q.all == Some(1) && q.page.is_none() {
         return Json(state.pool.stats()).into_response();
     }
+    let filter = q.filter.as_deref().unwrap_or("all");
+    // 非法 filter 显式拒绝, 不再静默返回全部 (旧行为让筛选问题难以察觉)
+    if !crate::pool::AccountPool::is_valid_filter(filter) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("unknown filter: {filter}"),
+                "valid_filters": crate::pool::AccountPool::VALID_FILTERS,
+            })),
+        )
+            .into_response();
+    }
     let client_version = q.version.unwrap_or(0);
-    let (version, result) = state.pool.query_accounts_cached(
+    let client_fp = q.fp.unwrap_or(0);
+    let (version, fp, result) = state.pool.query_accounts_cached(
         q.q.as_deref().unwrap_or(""),
-        q.filter.as_deref().unwrap_or("all"),
+        filter,
         q.sort.as_deref().unwrap_or("attention"),
         q.page.unwrap_or(1),
         q.page_size.unwrap_or(50),
         q.proxy_id.as_deref().unwrap_or(""),
         client_version,
+        client_fp,
     );
     match result {
-        None => (StatusCode::NOT_MODIFIED, Json(json!({"version": version}))).into_response(),
+        None => (
+            StatusCode::NOT_MODIFIED,
+            Json(json!({"version": version, "fp": fp})),
+        )
+            .into_response(),
         Some(mut stats) => {
             enrich_proxy_bindings(&state, &mut stats);
             if let Some(obj) = stats.as_object_mut() {
                 obj.insert("version".into(), json!(version));
+                obj.insert("fp".into(), json!(fp));
             }
             Json(stats).into_response()
         }

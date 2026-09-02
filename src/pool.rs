@@ -105,8 +105,10 @@ pub struct AccountPool {
     acquire_wait: Duration,
     /// 数据版本号: 任何账号状态变更时递增, 用于缓存有效性判断
     version: Arc<AtomicU64>,
-    /// 缓存的查询结果 (version, json)
-    query_cache: Arc<parking_lot::RwLock<Option<(u64, serde_json::Value)>>>,
+    /// 缓存的查询结果: (version, 查询指纹, json).
+    /// 指纹必须参与比较 — 否则「同版本号换筛选条件」会错误命中旧缓存,
+    /// 表现为前端切换筛选/排序/搜索后表格内容不变 (号池查看异常的根因).
+    query_cache: Arc<parking_lot::RwLock<Option<(u64, u64, serde_json::Value)>>>,
     /// 运行时状态落盘路径 (冷却/错误计数). None = 不持久化
     state_path: Arc<parking_lot::RwLock<Option<PathBuf>>>,
 }
@@ -708,7 +710,11 @@ impl AccountPool {
         self.version.load(Ordering::Relaxed)
     }
 
-    /// 带缓存的账号查询: 版本号未变时直接返回缓存
+    /// 带缓存的账号查询.
+    ///
+    /// 缓存键 = (数据版本号, 查询参数指纹). 只有二者同时命中才复用缓存/返回 304.
+    /// 旧实现只看版本号: 前端从「需关注」切到「已禁用」时版本未变 → 直接 304
+    /// 复用旧筛选结果, 面板看起来像「筛选坏了」. 这是号池查看异常的根因.
     pub fn query_accounts_cached(
         &self,
         q: &str,
@@ -718,34 +724,52 @@ impl AccountPool {
         page_size: usize,
         proxy_id: &str,
         client_version: u64,
-    ) -> (u64, Option<serde_json::Value>) {
+        client_fingerprint: u64,
+    ) -> (u64, u64, Option<serde_json::Value>) {
         let current_version = self.version();
-        // 客户端版本已是最新 → 304 Not Modified
-        if client_version == current_version && client_version > 0 {
-            return (current_version, None);
+        let fp = Self::query_fingerprint(q, filter, sort, page, page_size, proxy_id);
+        // 同指纹 + 同版本 → 304 Not Modified
+        if client_version == current_version
+            && client_version > 0
+            && client_fingerprint == fp
+        {
+            return (current_version, fp, None);
         }
-        // 检查缓存
+        // 缓存命中也必须指纹一致
         {
             let cache = self.query_cache.read();
-            if let Some((v, ref json)) = *cache {
-                if v == current_version {
-                    return (current_version, Some(json.clone()));
+            if let Some((v, cached_fp, ref json)) = *cache {
+                if v == current_version && cached_fp == fp {
+                    return (current_version, fp, Some(json.clone()));
                 }
             }
         }
-        // 重新构建
+        // 重新构建并写缓存 (单槽: 只保留最近一次查询, 足够面板高频刷新场景)
         let result = self.query_accounts(q, filter, sort, page, page_size, proxy_id);
-        // 只缓存无搜索/过滤的默认视图 (最常见场景)
-        if q.is_empty()
-            && filter == "all"
-            && sort == "attention"
-            && page == 1
-            && proxy_id.is_empty()
         {
             let mut cache = self.query_cache.write();
-            *cache = Some((current_version, result.clone()));
+            *cache = Some((current_version, fp, result.clone()));
         }
-        (current_version, Some(result))
+        (current_version, fp, Some(result))
+    }
+
+    /// 查询参数指纹: 与版本号共同构成缓存键
+    fn query_fingerprint(
+        q: &str,
+        filter: &str,
+        sort: &str,
+        page: usize,
+        page_size: usize,
+        proxy_id: &str,
+    ) -> u64 {
+        let mut h = DefaultHasher::new();
+        q.trim().to_ascii_lowercase().hash(&mut h);
+        filter.hash(&mut h);
+        sort.hash(&mut h);
+        page.hash(&mut h);
+        page_size.hash(&mut h);
+        proxy_id.hash(&mut h);
+        h.finish()
     }
 
     /// 账号健康评分
@@ -1092,6 +1116,27 @@ impl AccountPool {
     }
 
     /// 服务端分页/过滤，避免超大号池把整表塞给浏览器。
+    /// 合法的 filter 取值（与前端下拉框一一对应）
+    pub const VALID_FILTERS: &'static [&'static str] = &[
+        "all",
+        "attention",
+        "enabled",
+        "available",
+        "disabled",
+        "cooling",
+        "cooldown",
+        "error",
+        "quota",
+        "quota_exhausted",
+        "unhealthy",
+        "healthy",
+        "degraded",
+    ];
+
+    pub fn is_valid_filter(filter: &str) -> bool {
+        Self::VALID_FILTERS.contains(&filter)
+    }
+
     pub fn query_accounts(
         &self,
         q: &str,
@@ -1139,9 +1184,10 @@ impl AccountPool {
                 }
             }
             match filter {
+                "all" => true,
                 "enabled" | "available" => acc["available"].as_bool().unwrap_or(false),
                 "disabled" => !acc["enabled"].as_bool().unwrap_or(false),
-                "cooling" => acc["cooldown"].as_bool().unwrap_or(false),
+                "cooling" | "cooldown" => acc["cooldown"].as_bool().unwrap_or(false),
                 "error" => {
                     acc["errors"].as_u64().unwrap_or(0) > 0
                         || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) > 0
@@ -1157,6 +1203,7 @@ impl AccountPool {
                         || acc["health_score"].as_u64().unwrap_or(100) < 50
                         || acc["stats"]["consecutive_errors"].as_u64().unwrap_or(0) >= 3
                 }
+                // 未知 filter 已在 admin 层校验拒绝 (400); 到这里视为 all
                 _ => true,
             }
         });
@@ -1490,5 +1537,34 @@ mod tests {
         assert_eq!(p1["page_size"], 2);
         assert_eq!(p1["pages"], 2);
         assert_eq!(p1["accounts"].as_array().unwrap().len(), 2);
+    }
+
+    /// 回归: 号池查看异常 — 换筛选条件但版本号未变时不得 304 复用旧数据
+    #[test]
+    fn cached_query_respects_fingerprint() {
+        let pool = AccountPool::new(vec![acc("a", true), acc("b", false)], 1);
+        pool.bump_version(); // 模拟一次状态变更, 使版本号 > 0 (304 要求 version > 0)
+        // 第一次查询 filter=all, 拿到 (v1, fp1)
+        let (v1, fp1, r1) = pool.query_accounts_cached("", "all", "attention", 1, 50, "", 0, 0);
+        assert!(r1.is_some());
+        assert_eq!(r1.unwrap()["filtered"], 2);
+        // 同指纹同版本 → 304
+        let (v2, fp2, r2) = pool.query_accounts_cached("", "all", "attention", 1, 50, "", v1, fp1);
+        assert_eq!((v2, fp2), (v1, fp1));
+        assert!(r2.is_none());
+        // 同版本换 filter=disabled → 必须返回新数据而非 304
+        let (v3, fp3, r3) =
+            pool.query_accounts_cached("", "disabled", "attention", 1, 50, "", v1, fp1);
+        assert_eq!(v3, v1);
+        assert_ne!(fp3, fp1);
+        let r3 = r3.expect("filter change must bypass 304");
+        assert_eq!(r3["filtered"], 1);
+        // 换筛选后再用旧指纹请求 → 不得命中缓存内容 (会重建, 且与直接查询一致)
+        let direct = pool.query_accounts("", "enabled", "attention", 1, 50, "");
+        let (_, _, r4) = pool.query_accounts_cached("", "enabled", "attention", 1, 50, "", v1, fp1);
+        assert_eq!(r4.unwrap()["filtered"], direct["filtered"]);
+        // 非法 filter 检测
+        assert!(!AccountPool::is_valid_filter("invalid"));
+        assert!(AccountPool::is_valid_filter("disabled"));
     }
 }
