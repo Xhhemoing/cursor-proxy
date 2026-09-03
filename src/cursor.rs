@@ -23,6 +23,9 @@ pub const KIMI_K3_CONTEXT_WINDOW: u32 = 1_048_576;
 pub const DEFAULT_MAX_TOKENS: u32 = 131_072;
 /// maxTokens 下限保护: 客户端传 <1024 时自动提升到 1024, 防止上游报错.
 pub const MAX_TOKENS_FLOOR: u32 = 1024;
+/// 客户端未显式传 max_mode 时的默认值。免费/未付费 Cursor 账号请求 maxMode=true 会被上游
+/// 直接以 "Max mode is only available to paid users" 拒绝 (HTTP 200 + error 帧), 所以默认 false。
+pub const DEFAULT_MAX_MODE: bool = false;
 /// 上游连接池: 直连每 host 最大空闲连接数 (高并发吞吐关键)
 pub const POOL_MAX_IDLE_DIRECT: usize = 1024;
 /// 上游连接池: 代理每 host 最大空闲连接数 (代理通常带宽有限, 不盲目扩)
@@ -284,10 +287,11 @@ pub fn build_cursor_body_with_tools(
     }
 
     let mut requested_model = json!({"modelId": model});
-    // maxMode 默认关闭。Cursor 对未付费号直接拒绝 Max mode
-    // ("Max mode is only available to paid users")，默认 true 会让整池空内容。
-    // 需要 1M 上下文时由客户端显式传 max_mode/maxMode=true。
-    let mm = max_mode.unwrap_or(false);
+    // maxMode 默认关闭。2026-09-02 SM95 实测: 号池内全部账号 (含 kimi-k3-max / kimi-k3-low)
+    // 都被上游以 "Max mode is only available to paid users" (resource_exhausted) 拒绝,
+    // 默认 true 只会让每个请求多一次 max_mode_fallback 往返 (+1~3s) 且首帧空内容。
+    // 需要 1M 上下文时由客户端显式传 max_mode / maxMode = true (付费号才有效)。
+    let mm = max_mode.unwrap_or(DEFAULT_MAX_MODE);
     requested_model["maxMode"] = json!(mm);
 
     let mut body = json!({
@@ -364,7 +368,8 @@ pub fn build_cursor_body_full(
     }
 
     let mut requested_model = json!({"modelId": model});
-    let mm = max_mode.unwrap_or(false);
+    // maxMode 默认关闭, 理由见 build_cursor_body_with_tools
+    let mm = max_mode.unwrap_or(DEFAULT_MAX_MODE);
     requested_model["maxMode"] = json!(mm);
 
     let mut out = json!({

@@ -829,6 +829,57 @@ async fn responses_handler(
     inference_handler(state, headers, addr, chat, Dialect::Responses).await
 }
 
+/// 流中途上游错误时发给客户端的方言 error 帧 (含收尾).
+///
+/// - Chat: `data: {"error":{...}}` + `data: [DONE]` — openai SDK 流式解析到 `error` 键会抛 APIError
+/// - Anthropic: `event: error` — 官方 SDK 抛 APIError; 不再发 message_stop
+/// - Responses: `event: error` + `response.failed`
+fn dialect_error_frame(dialect: Dialect, message: &str) -> String {
+    let code = if translate::is_output_token_limit_error_str(message) {
+        "upstream_output_limit"
+    } else {
+        "upstream_stream_error"
+    };
+    let msg = format!("upstream stream error: {message}");
+    match dialect {
+        Dialect::Chat => {
+            let err = translate::openai_error(&msg, code, 502);
+            format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&err).unwrap())
+        }
+        Dialect::Anthropic => crate::protocol::sse_event(
+            "error",
+            &serde_json::json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": msg}
+            }),
+        ),
+        Dialect::Responses => {
+            let mut s = crate::protocol::sse_event(
+                "error",
+                &serde_json::json!({
+                    "type": "error",
+                    "code": code,
+                    "message": msg,
+                    "param": serde_json::Value::Null,
+                }),
+            );
+            s.push_str(&crate::protocol::sse_event(
+                "response.failed",
+                &serde_json::json!({
+                    "type": "response.failed",
+                    "response": {
+                        "object": "response",
+                        "status": "failed",
+                        "error": {"code": code, "message": msg},
+                        "output": []
+                    }
+                }),
+            ));
+            s
+        }
+    }
+}
+
 /// 按方言构造一组"正常收尾"SSE 帧, 用于流被上游中断/无收尾时兜底,
 /// 使客户端干净结束而不是卡在半截 (显示"继续")。
 fn dialect_terminal(dialect: Dialect, model: &str) -> String {
@@ -1345,6 +1396,10 @@ async fn inference_handler(
             let mut sent_terminal = false;
             // 空内容追踪: 上游返回 200 但无实际内容时, 流式也要返回错误而非静默 200
             let mut has_content = false;
+            // 流中途上游错误 (error 帧 / 解码失败 / 连接被掐): 记下来, 收尾时向客户端发 error 帧
+            // 而不是伪装成 finish_reason:"stop" 的正常结束 —— 否则上游错误被吞掉, 客户端只看到
+            // "模型自己停了" (静默截断)。
+            let mut stream_error: Option<String> = None;
             // 心跳保活: 思考间隔较长时定期发注释帧, 防中间层 (nginx/CF/客户端) 掐空闲连接。
             let heartbeat = Duration::from_secs(15);
             let mut last_frame = std::time::Instant::now();
@@ -1409,9 +1464,19 @@ async fn inference_handler(
                     }
                     Err(e) => {
                         error!(event = "stream_error", req_id = %rid, error = %e, "stream translate error");
+                        stream_error = Some(e);
                         break;
                     }
                 }
+            }
+            // 流中途上游错误: 发方言对应的 error 帧 + 收尾, 让客户端 (openai SDK 会抛 APIError,
+            // Anthropic SDK 处理 event: error) 明确知道这是上游故障, 而不是正常 stop。
+            if let Some(err_msg) = stream_error.take() {
+                metrics.observe_err();
+                let frame = dialect_error_frame(dialect, &err_msg);
+                let _ = tx.send(Ok(Bytes::from(frame))).await;
+                sent_terminal = true; // 已发错误终止帧, 不再补发正常收尾/空内容错误
+                has_content = true; // 避免再叠加 empty_content 错误帧
             }
             // 空内容检测: 上游返回 200 但无任何实际内容时, 发错误帧而非静默 [DONE]
             // 这样客户端能区分 "正常结束" 和 "上游返回空" 两种情况
@@ -1683,5 +1748,47 @@ async fn inference_handler(
                     .into_response())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_error_frame_tests {
+    use super::*;
+
+    #[test]
+    fn chat_error_frame_is_sdk_visible_and_terminated() {
+        let s = dialect_error_frame(Dialect::Chat, "upstream error: Provider Error");
+        let first = s.split("\n\n").next().unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(first.trim_start_matches("data: ")).unwrap();
+        // openai SDK: 顶层 `error` 键 → APIError, 不会被当成正常 stop
+        assert_eq!(v["error"]["code"], "upstream_stream_error");
+        assert!(v["error"]["message"].as_str().unwrap().contains("Provider Error"));
+        assert!(s.ends_with("data: [DONE]\n\n"));
+        assert!(!s.contains("finish_reason"));
+    }
+
+    #[test]
+    fn chat_error_frame_classifies_output_limit() {
+        let s = dialect_error_frame(Dialect::Chat, "isOutputTokenLimitError");
+        assert!(s.contains("\"code\":\"upstream_output_limit\""));
+    }
+
+    #[test]
+    fn anthropic_error_frame_uses_error_event_without_message_stop() {
+        let s = dialect_error_frame(Dialect::Anthropic, "boom");
+        assert!(s.starts_with("event: error\n"));
+        assert!(s.contains("\"type\":\"api_error\""));
+        assert!(!s.contains("message_stop"));
+    }
+
+    #[test]
+    fn responses_error_frame_emits_error_then_failed() {
+        let s = dialect_error_frame(Dialect::Responses, "boom");
+        let idx_err = s.find("event: error").unwrap();
+        let idx_failed = s.find("event: response.failed").unwrap();
+        assert!(idx_err < idx_failed);
+        assert!(s.contains("\"status\":\"failed\""));
+        assert!(!s.contains("response.completed"));
     }
 }
