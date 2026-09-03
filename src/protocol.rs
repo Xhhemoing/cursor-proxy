@@ -105,7 +105,20 @@ fn schema_of_fn(f: &Value) -> Value {
     f.get("parameters")
         .cloned()
         .or_else(|| f.get("input_schema").cloned())
+        .or_else(|| f.get("inputSchema").cloned())
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}))
+}
+
+/// Cursor Connect 侧工具参数必须包一层 `{jsonSchema: ...}`。
+/// 裸 JSON Schema 时上游常只调工具名、arguments 永远是 `{}`，
+/// Claude Code / Codex 就会报 Invalid tool parameters。
+fn wrap_tool_parameters(schema: Value) -> Value {
+    if let Some(obj) = schema.as_object() {
+        if obj.len() == 1 && obj.contains_key("jsonSchema") {
+            return schema;
+        }
+    }
+    json!({"jsonSchema": schema})
 }
 
 /// OpenAI tools / Anthropic tools / Responses tools → Cursor tools 数组.
@@ -132,7 +145,7 @@ pub fn cursor_tools_from_client(tools: Option<&Value>) -> Vec<Value> {
             out.push(json!({
                 "name": name,
                 "description": f.get("description").or_else(|| t.get("description")).and_then(|v| v.as_str()).unwrap_or(""),
-                "parameters": schema_of_fn(f),
+                "parameters": wrap_tool_parameters(schema_of_fn(f)),
             }));
             continue;
         }
@@ -141,7 +154,7 @@ pub fn cursor_tools_from_client(tools: Option<&Value>) -> Vec<Value> {
                 out.push(json!({
                     "name": name,
                     "description": t.get("description").and_then(|v| v.as_str()).unwrap_or(""),
-                    "parameters": schema_of_fn(t),
+                    "parameters": wrap_tool_parameters(schema_of_fn(t)),
                 }));
             }
         }
@@ -306,6 +319,24 @@ pub fn tool_choice_omits_tools(tool_choice: Option<&Value>) -> bool {
         Some(Value::Object(o)) => o.get("type").and_then(|v| v.as_str()) == Some("none"),
         _ => false,
     }
+}
+
+/// Kimi K3 上游不接受 named-function tool_choice 对象。
+/// Claude Code / Codex 原生会发 `{\"type\":\"function\",\"function\":{\"name\":\"...\"}}` 或
+/// Anthropic `{\"type\":\"tool\",\"name\":\"...\"}`。改写成 `required`，强制名走 hint。
+pub fn normalize_tool_choice_for_kimi(tc: &Value) -> Value {
+    if forced_tool_name(Some(tc)).is_some() {
+        return json!("required");
+    }
+    if let Some(obj) = tc.as_object() {
+        match obj.get("type").and_then(|v| v.as_str()) {
+            Some("auto") => return json!("auto"),
+            Some("none") => return json!("none"),
+            Some("any") | Some("required") => return json!("required"),
+            _ => {}
+        }
+    }
+    tc.clone()
 }
 
 /// P2: 提取 tool_choice 中强制要求的工具名 ({"type":"function","function":{"name":"..."}})
@@ -647,7 +678,7 @@ pub fn anthropic_to_openai_chat(body: &Value) -> Result<Value, String> {
         out["tools"] = json!(mapped);
     }
     if let Some(tc) = body.get("tool_choice") {
-        out["tool_choice"] = tc.clone();
+        out["tool_choice"] = normalize_tool_choice_for_kimi(tc);
     }
     Ok(out)
 }
@@ -763,7 +794,7 @@ pub fn responses_to_openai_chat(body: &Value) -> Result<Value, String> {
         out["tools"] = tools.clone();
     }
     if let Some(tc) = body.get("tool_choice") {
-        out["tool_choice"] = tc.clone();
+        out["tool_choice"] = normalize_tool_choice_for_kimi(tc);
     }
     if let Some(p) = body.get("parallel_tool_calls") {
         out["parallel_tool_calls"] = p.clone();
@@ -1139,7 +1170,7 @@ mod tests {
         assert_eq!(msgs[2]["tool_call_id"], "toolu_1");
         let tools = cursor_tools_from_client(chat.get("tools"));
         assert_eq!(tools[0]["name"], "bash");
-        assert_eq!(tools[0]["parameters"]["required"][0], "command");
+        assert_eq!(tools[0]["parameters"]["jsonSchema"]["required"][0], "command");
         let cursor_msgs = openai_messages_to_cursor(msgs);
         assert_eq!(
             cursor_msgs[1]["parts"]["parts"][0]["functionCall"]["callId"],
@@ -1208,5 +1239,56 @@ mod tests {
         assert!(!hosted_web_search(Some(
             &json!([{"type": "function", "function": {"name": "bash"}}])
         )));
+    }
+
+    #[test]
+    fn cursor_tools_wrap_json_schema_for_claude_and_codex() {
+        let openai = json!([{
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        }]);
+        let tools = cursor_tools_from_client(Some(&openai));
+        assert_eq!(tools[0]["name"], "Read");
+        assert_eq!(tools[0]["parameters"]["jsonSchema"]["required"][0], "path");
+
+        let anthropic = json!([{
+            "name": "Bash",
+            "description": "run",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }
+        }]);
+        let tools = cursor_tools_from_client(Some(&anthropic));
+        assert_eq!(tools[0]["parameters"]["jsonSchema"]["required"][0], "command");
+    }
+
+    #[test]
+    fn named_tool_choice_normalizes_for_kimi() {
+        let openai = json!({"type": "function", "function": {"name": "Read"}});
+        assert_eq!(normalize_tool_choice_for_kimi(&openai), json!("required"));
+        let claude = json!({"type": "tool", "name": "Bash"});
+        assert_eq!(normalize_tool_choice_for_kimi(&claude), json!("required"));
+        assert_eq!(normalize_tool_choice_for_kimi(&json!("auto")), json!("auto"));
+        let hint = tool_choice_hint(Some(&openai)).unwrap();
+        assert!(hint.contains("`Read`"));
+        let chat = anthropic_to_openai_chat(&json!({
+            "model": "kimi-k3",
+            "max_tokens": 64,
+            "tool_choice": {"type": "tool", "name": "Bash"},
+            "tools": [{"name": "Bash", "input_schema": {"type": "object", "properties": {}}}],
+            "messages": [{"role": "user", "content": "ls"}]
+        }))
+        .unwrap();
+        assert_eq!(chat["tool_choice"], "required");
     }
 }

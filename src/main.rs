@@ -939,6 +939,13 @@ async fn inference_handler(
     let request_id = format!("req-{}", uuid::Uuid::new_v4().simple());
     let start = Instant::now();
 
+    // Claude Code / Codex 的 named tool_choice 对象对 Kimi K3 非法。
+    // 归一成 required，强制工具名改走 hint（见 protocol::tool_choice_hint）。
+    let mut body = body;
+    if let Some(tc) = body.get("tool_choice").cloned() {
+        body["tool_choice"] = crate::protocol::normalize_tool_choice_for_kimi(&tc);
+    }
+
     // ---- KVV (Kimi Vendor Verifier) 合规检查 ----
     // 对应 Python 版 server.py 的 _kimi_vendor_param_check + _kimi_vendor_request_validate
     // 在解析 messages 之前执行，因为 KVV 需要检查 body 结构（response_format/tool_choice/dynamic_tools）
