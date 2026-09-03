@@ -265,6 +265,25 @@ pub fn is_max_mode_restricted(err: &str) -> bool {
         || e.contains("membershiptoupgradeto")
 }
 
+/// Cursor 对 Kimi K3 的全局限流 / 上游过载。不是账号故障。
+/// 记 consecutive_errors + 30s 冷却会在一次 High Load 里把整池打成 erroring，
+/// 三次立刻换号重试也会在 ~2s 内打出客户端看到的
+/// `HTTP 502: upstream error after 3 retries`。
+pub fn is_upstream_capacity_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    if is_max_mode_restricted(&e) {
+        return false;
+    }
+    e.contains("high load")
+        || e.contains("high demand")
+        || e.contains("try again in a few moments")
+        || e.contains("error_rate_limited")
+        || e.contains("trouble connecting to the model provider")
+        || e.contains("we're having trouble connecting")
+        || e.contains("upstream http 502")
+        || e.contains("502 bad gateway")
+}
+
 /// 计算重试时的降低后 maxTokens: 当前值减半, 但不低于 floor.
 pub fn lower_output_budget(current: u32) -> u32 {
     let halved = current / 2;
@@ -1557,6 +1576,21 @@ mod tests {
         let msg = extract_cursor_error_message(&frame).unwrap();
         assert!(msg.contains("Max mode is only available to paid users"));
         assert!(is_max_mode_restricted(&msg));
+        assert!(!is_upstream_capacity_error(&msg));
+    }
+
+    #[test]
+    fn capacity_error_detects_kimi_high_load_not_max_mode() {
+        let load = "upstream rejected: High Load: We're experiencing high demand for Kimi K3 right now. Please upgrade to Pro, switch to Auto, another model, or try again in a few moments.";
+        assert!(is_upstream_capacity_error(load));
+        assert!(!is_max_mode_restricted(load));
+        assert!(is_upstream_capacity_error(
+            "Provider Error: We're having trouble connecting to the model provider"
+        ));
+        assert!(is_upstream_capacity_error("upstream HTTP 502 Bad Gateway"));
+        assert!(!is_upstream_capacity_error(
+            "Max mode is only available to paid users"
+        ));
     }
 
     #[tokio::test]

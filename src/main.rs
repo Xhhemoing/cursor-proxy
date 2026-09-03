@@ -1276,6 +1276,47 @@ async fn inference_handler(
                     skip_account_switch = true;
                     continue;
                 }
+                // High Load / provider 过载: 同号退避，不记账号错误、不冷却。
+                // 立刻换号 3 次会在 2s 内把 7 个号都打成 erroring，客户端只看到
+                // 无信息的 HTTP 502 "upstream error after 3 retries"。
+                if translate::is_upstream_capacity_error(&last_error) {
+                    let backoff_ms = 700u64.saturating_mul(1u64 << attempt.min(3));
+                    warn!(
+                        event = "capacity_backoff",
+                        req_id = %request_id,
+                        account = %account_id,
+                        attempt = attempt + 1,
+                        backoff_ms,
+                        error = %last_error,
+                        "upstream capacity/high-load; backing off without penalizing account"
+                    );
+                    state.metrics.observe_err();
+                    if attempt == MAX_RETRIES - 1 {
+                        state.ledger.record(billing::BillingRecord::build(
+                            &bctx,
+                            &request_id,
+                            &model,
+                            &account_id,
+                            translate::Usage::default(),
+                            stream,
+                            503,
+                            start.elapsed().as_millis() as u64,
+                            &client_ip,
+                        ));
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(openai_error(
+                                &last_error,
+                                "upstream_overloaded",
+                                503,
+                            )),
+                        )
+                            .into_response());
+                    }
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    skip_account_switch = true;
+                    continue;
+                }
                 skip_account_switch = false;
                 state.pool.release(&account_id, true, 30);
                 state.metrics.observe_err();
@@ -1334,7 +1375,10 @@ async fn inference_handler(
                     return Err((
                         StatusCode::BAD_GATEWAY,
                         Json(openai_error(
-                            &format!("upstream error after {} retries", MAX_RETRIES),
+                            &format!(
+                                "upstream error after {} retries: {}",
+                                MAX_RETRIES, last_error
+                            ),
                             "upstream_error",
                             502,
                         )),
