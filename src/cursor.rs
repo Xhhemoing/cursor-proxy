@@ -278,11 +278,7 @@ pub fn build_cursor_body_with_tools(
     if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
         cursor_msgs.insert(
             0,
-            json!({
-                "role": "user",
-                "system": true,
-                "parts": {"parts": [{"text": {"text": hint}}]},
-            }),
+            json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": hint}),
         );
     }
 
@@ -348,22 +344,14 @@ pub fn build_cursor_body_full(
     if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
         cursor_msgs.insert(
             0,
-            json!({
-                "role": "user",
-                "system": true,
-                "parts": {"parts": [{"text": {"text": hint}}]},
-            }),
+            json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": hint}),
         );
     }
     // P2: response_format JSON schema 注入为 system 提示
     if let Some(rf_hint) = crate::protocol::response_format_hint(body) {
         cursor_msgs.insert(
             0,
-            json!({
-                "role": "user",
-                "system": true,
-                "parts": {"parts": [{"text": {"text": rf_hint}}]},
-            }),
+            json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": rf_hint}),
         );
     }
 
@@ -946,7 +934,8 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["modelConfig"]["parallelToolCalls"], false);
-        assert!(body["messages"][0]["parts"]["parts"][0]["text"]["text"]
+        assert_eq!(body["messages"][0]["role"], "INFERENCE_MESSAGE_ROLE_SYSTEM");
+        assert!(body["messages"][0]["text"]
             .as_str()
             .unwrap()
             .contains("must call a tool"));

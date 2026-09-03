@@ -219,62 +219,125 @@ fn content_to_text(content: &Value) -> String {
     }
 }
 
-/// OpenAI Chat 消息 → Cursor messages[].parts
+/// OpenAI Chat 消息 → Cursor `aiserver.v1.InferenceMessage[]`
+///
+/// 线格式与 Python 参考实现 `responses_input_to_cursor` **逐字段对齐**:
+///
+/// ```text
+/// {"role":"INFERENCE_MESSAGE_ROLE_SYSTEM",    "text": "..."}
+/// {"role":"INFERENCE_MESSAGE_ROLE_USER",      "text": "..."}
+/// {"role":"INFERENCE_MESSAGE_ROLE_ASSISTANT", "text": "...", "toolCalls":[{"toolCallId","toolName","args"|"rawToolCallArgs"}]}
+/// {"role":"INFERENCE_MESSAGE_ROLE_TOOL",      "toolContent":{"parts":[{"toolCallId","toolName","result"}]}}
+/// ```
+///
+/// 历史教训 (2026-09-03): 此前用的是自造的 `parts.parts[].functionCall / functionResult` 形状 +
+/// `role:"user", system:true`。Cursor 的 protobuf-JSON 解析对未知字段**静默丢弃**, 所以请求 200 正常,
+/// 但模型完全看不到历史工具调用参数和工具返回结果 (input_tokens 只随 assistant 文本增长,
+/// 十几 KB 的工具结果贡献 0 token)。Hermes 表现为: 模型每轮"重新开始取证"、
+/// 反复调用同一个工具、声称"没有工具输出支撑", 直到迭代上限 → 用户看到"对话中途停止"。
 pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
-    let mut out = Vec::new();
+    const ROLE_USER: &str = "INFERENCE_MESSAGE_ROLE_USER";
+    const ROLE_ASSISTANT: &str = "INFERENCE_MESSAGE_ROLE_ASSISTANT";
+    const ROLE_TOOL: &str = "INFERENCE_MESSAGE_ROLE_TOOL";
+    const ROLE_SYSTEM: &str = "INFERENCE_MESSAGE_ROLE_SYSTEM";
+
+    let mut out: Vec<Value> = Vec::new();
+    // callId → toolName, 让 TOOL 消息能带上 toolName (Python: pending_calls)
+    let mut call_names: std::collections::HashMap<String, String> = Default::default();
+    // 连续的 tool 结果合并进同一条 TOOL 消息 (Python: pending_results / flush_results)
+    let mut pending_results: Vec<Value> = Vec::new();
+
+    fn flush_results(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
+        if !pending.is_empty() {
+            out.push(json!({
+                "role": ROLE_TOOL,
+                "toolContent": {"parts": std::mem::take(pending)},
+            }));
+        }
+    }
+
     for m in messages {
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         if role == "tool" {
-            let call_id = m.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
+            let call_id = m
+                .get("tool_call_id")
+                .or_else(|| m.get("call_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let text = content_to_text(m.get("content").unwrap_or(&Value::Null));
-            out.push(json!({
-                "role": "user",
-                "parts": {"parts": [{
-                    "functionResult": {
-                        "callId": call_id,
-                        "result": text,
-                    }
-                }]},
+            let tool_name = m
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| call_names.get(&call_id).cloned())
+                .unwrap_or_default();
+            pending_results.push(json!({
+                "toolCallId": call_id,
+                "toolName": tool_name,
+                "result": tool_result_value(&text),
             }));
             continue;
         }
-        let mut parts: Vec<Value> = Vec::new();
+        flush_results(&mut out, &mut pending_results);
+
         let text = content_to_text(m.get("content").unwrap_or(&Value::Null));
-        if !text.is_empty() {
-            parts.push(json!({"text": {"text": text}}));
-        }
-        if let Some(calls) = m.get("tool_calls").and_then(|v| v.as_array()) {
-            for c in calls {
-                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let f = c.get("function").unwrap_or(c);
-                let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = f
-                    .get("arguments")
-                    .map(args_to_string)
-                    .unwrap_or_else(|| "{}".into());
-                parts.push(json!({
-                    "functionCall": {
-                        "name": name,
-                        "arguments": args_to_object(&args),
-                        "callId": id,
+        match role {
+            "assistant" => {
+                let mut msg = json!({"role": ROLE_ASSISTANT});
+                let mut tool_calls: Vec<Value> = Vec::new();
+                if let Some(calls) = m.get("tool_calls").and_then(|v| v.as_array()) {
+                    for c in calls {
+                        let id = c
+                            .get("id")
+                            .or_else(|| c.get("call_id"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+                        let f = c.get("function").unwrap_or(c);
+                        let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        call_names.insert(id.clone(), name.to_string());
+                        let mut tc = json!({"toolCallId": id, "toolName": name});
+                        match f.get("arguments") {
+                            Some(Value::Object(o)) => tc["args"] = Value::Object(o.clone()),
+                            Some(Value::String(s)) => match serde_json::from_str::<Value>(s.trim()) {
+                                Ok(Value::Object(o)) => tc["args"] = Value::Object(o),
+                                _ => tc["rawToolCallArgs"] = json!(s),
+                            },
+                            Some(other) if !other.is_null() => {
+                                tc["rawToolCallArgs"] = json!(other.to_string())
+                            }
+                            _ => tc["rawToolCallArgs"] = json!("{}"),
+                        }
+                        tool_calls.push(tc);
                     }
-                }));
+                }
+                if !text.is_empty() || tool_calls.is_empty() {
+                    msg["text"] = json!(text);
+                }
+                if !tool_calls.is_empty() {
+                    msg["toolCalls"] = json!(tool_calls);
+                }
+                out.push(msg);
             }
+            "system" | "developer" => out.push(json!({"role": ROLE_SYSTEM, "text": text})),
+            _ => out.push(json!({"role": ROLE_USER, "text": text})),
         }
-        if parts.is_empty() {
-            parts.push(json!({"text": {"text": ""}}));
-        }
-        let cursor_role = if role == "system" { "user" } else { role };
-        let mut msg = json!({
-            "role": cursor_role,
-            "parts": {"parts": parts},
-        });
-        if role == "system" {
-            msg["system"] = json!(true);
-        }
-        out.push(msg);
     }
+    flush_results(&mut out, &mut pending_results);
     out
+}
+
+/// 工具结果: JSON 文本解析成结构化值, 否则原样字符串 (Python `_tool_result_value`).
+fn tool_result_value(text: &str) -> Value {
+    let stripped = text.trim();
+    if stripped.starts_with('{') || stripped.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<Value>(stripped) {
+            return v;
+        }
+    }
+    json!(text)
 }
 
 pub fn tool_choice_hint(tool_choice: Option<&Value>) -> Option<String> {
@@ -1172,14 +1235,14 @@ mod tests {
         assert_eq!(tools[0]["name"], "bash");
         assert_eq!(tools[0]["parameters"]["jsonSchema"]["required"][0], "command");
         let cursor_msgs = openai_messages_to_cursor(msgs);
-        assert_eq!(
-            cursor_msgs[1]["parts"]["parts"][0]["functionCall"]["callId"],
-            "toolu_1"
-        );
-        assert_eq!(
-            cursor_msgs[2]["parts"]["parts"][0]["functionResult"]["result"],
-            "a.txt"
-        );
+        assert_eq!(cursor_msgs[1]["role"], "INFERENCE_MESSAGE_ROLE_ASSISTANT");
+        assert_eq!(cursor_msgs[1]["toolCalls"][0]["toolCallId"], "toolu_1");
+        assert_eq!(cursor_msgs[1]["toolCalls"][0]["toolName"], "bash");
+        assert_eq!(cursor_msgs[1]["toolCalls"][0]["args"]["command"], "ls");
+        assert_eq!(cursor_msgs[2]["role"], "INFERENCE_MESSAGE_ROLE_TOOL");
+        assert_eq!(cursor_msgs[2]["toolContent"]["parts"][0]["toolCallId"], "toolu_1");
+        assert_eq!(cursor_msgs[2]["toolContent"]["parts"][0]["toolName"], "bash");
+        assert_eq!(cursor_msgs[2]["toolContent"]["parts"][0]["result"], "a.txt");
     }
 
     #[test]
@@ -1201,10 +1264,64 @@ mod tests {
         assert_eq!(chat["messages"][2]["tool_calls"][0]["id"], "call_9");
         assert_eq!(chat["messages"][3]["role"], "tool");
         let cursor_msgs = openai_messages_to_cursor(chat["messages"].as_array().unwrap());
-        assert_eq!(
-            cursor_msgs.last().unwrap()["parts"]["parts"][0]["functionResult"]["callId"],
-            "call_9"
-        );
+        assert_eq!(cursor_msgs[0]["role"], "INFERENCE_MESSAGE_ROLE_SYSTEM");
+        let last = cursor_msgs.last().unwrap();
+        assert_eq!(last["role"], "INFERENCE_MESSAGE_ROLE_TOOL");
+        assert_eq!(last["toolContent"]["parts"][0]["toolCallId"], "call_9");
+        assert_eq!(last["toolContent"]["parts"][0]["toolName"], "read_file");
+        assert_eq!(last["toolContent"]["parts"][0]["result"], "fn main(){}");
+    }
+
+    /// 线格式回归: 与 Python 参考实现 `chat_messages_to_cursor` 的输出逐字段一致.
+    /// 2026-09-03 之前用的自造 parts.functionCall/functionResult 形状被 Cursor 静默丢弃,
+    /// 模型看不到任何工具历史 → Hermes 反复重跑同一工具直到迭代上限.
+    #[test]
+    fn chat_tool_round_trip_matches_python_wire_format() {
+        let msgs = vec![
+            json!({"role": "system", "content": "SYS"}),
+            json!({"role": "user", "content": "read it"}),
+            json!({"role": "assistant", "content": "ok, reading", "tool_calls": [
+                {"id": "read_file_0-abc12", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/x\"}"}},
+                {"id": "terminal_1-ffff1", "type": "function",
+                 "function": {"name": "terminal", "arguments": "not json"}}
+            ]}),
+            json!({"role": "tool", "tool_call_id": "read_file_0-abc12", "content": "FILE CONTENT HERE"}),
+            json!({"role": "tool", "tool_call_id": "terminal_1-ffff1", "content": "{\"status\":\"ok\"}"}),
+            json!({"role": "user", "content": "and now?"}),
+        ];
+        let out = openai_messages_to_cursor(&msgs);
+        let expected = json!([
+            {"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": "SYS"},
+            {"role": "INFERENCE_MESSAGE_ROLE_USER", "text": "read it"},
+            {"role": "INFERENCE_MESSAGE_ROLE_ASSISTANT", "text": "ok, reading", "toolCalls": [
+                {"toolCallId": "read_file_0-abc12", "toolName": "read_file", "args": {"path": "/tmp/x"}},
+                {"toolCallId": "terminal_1-ffff1", "toolName": "terminal", "rawToolCallArgs": "not json"}
+            ]},
+            // 连续两个 tool 结果合并进一条 TOOL 消息; JSON 文本结果被解析成对象
+            {"role": "INFERENCE_MESSAGE_ROLE_TOOL", "toolContent": {"parts": [
+                {"toolCallId": "read_file_0-abc12", "toolName": "read_file", "result": "FILE CONTENT HERE"},
+                {"toolCallId": "terminal_1-ffff1", "toolName": "terminal", "result": {"status": "ok"}}
+            ]}},
+            {"role": "INFERENCE_MESSAGE_ROLE_USER", "text": "and now?"},
+        ]);
+        assert_eq!(out, expected.as_array().unwrap().clone());
+        // 旧的错误形状必须彻底消失
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("functionResult") && !s.contains("functionCall") && !s.contains("\"system\":true"));
+    }
+
+    #[test]
+    fn assistant_tool_call_only_has_no_empty_text_field() {
+        let msgs = vec![json!({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+        ]})];
+        let out = openai_messages_to_cursor(&msgs);
+        assert!(out[0].get("text").is_none(), "Python 版: 有 toolCalls 且无文本时不带 text 字段");
+        assert_eq!(out[0]["toolCalls"][0]["args"], json!({}));
+        // 纯文本 assistant 消息保留 text (即使为空串)
+        let out2 = openai_messages_to_cursor(&[json!({"role": "assistant", "content": ""})]);
+        assert_eq!(out2[0]["text"], "");
     }
 
     #[test]
