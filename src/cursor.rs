@@ -261,6 +261,58 @@ pub fn max_mode_from_request(body: &Value) -> Option<bool> {
     None
 }
 
+/// 从请求 body 提取客户端传入的 maxTokens (各 API 形态的字段名). 纯读取, 无 floor 提升.
+pub fn client_max_tokens(body: &Value) -> Option<u32> {
+    body.get("max_output_tokens")
+        .or_else(|| body.get("max_tokens"))
+        .or_else(|| body.get("text").and_then(|t| t.get("max_output_tokens")))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+}
+
+/// Cursor Connect `modelConfig` — 与 Python 参考 `model_config_from_request` **逐项对齐**:
+/// `maxTokens`(客户端值, <1024 提升) / `temperature` / `topP` / `stopSequences` / `parallelToolCalls`.
+/// 返回 None 表示没有任何配置项 (上游请求不带 modelConfig 字段).
+///
+/// 历史教训 (2026-09-03): Rust 版此前把 maxTokens/temperature 塞在 Cursor 请求体**顶层**。
+/// `InferenceService/Stream` 是 protobuf-JSON, 顶层未知字段被静默丢弃 —— 温度/采样参数从未生效
+/// (\"无法设置模型温度\")。上游只认 `modelConfig`。
+pub fn model_config_from_request(body: &Value) -> Option<Value> {
+    let mut cfg = json!({});
+    if let Some(mt) = client_max_tokens(body) {
+        cfg["maxTokens"] = json!(mt.max(1024));
+    }
+    if let Some(t) = body.get("temperature").and_then(|v| v.as_f64()) {
+        cfg["temperature"] = json!(t);
+    }
+    if let Some(tp) = body.get("top_p").and_then(|v| v.as_f64()) {
+        cfg["topP"] = json!(tp);
+    }
+    match body.get("stop").or_else(|| body.get("stop_sequences")) {
+        Some(Value::String(s)) if !s.is_empty() => cfg["stopSequences"] = json!([s]),
+        Some(Value::Array(a)) => {
+            let v: Vec<Value> = a
+                .iter()
+                .filter_map(|x| x.as_str())
+                .filter(|x| !x.is_empty())
+                .map(|x| json!(x))
+                .collect();
+            if !v.is_empty() {
+                cfg["stopSequences"] = json!(v);
+            }
+        }
+        _ => {}
+    }
+    if body.get("parallel_tool_calls").and_then(|v| v.as_bool()) == Some(false) {
+        cfg["parallelToolCalls"] = json!(false);
+    }
+    if cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+        None
+    } else {
+        Some(cfg)
+    }
+}
+
 pub fn build_cursor_body_with_tools(
     messages: &[Value],
     model: &str,
@@ -272,54 +324,24 @@ pub fn build_cursor_body_with_tools(
     conversation_id: Option<&str>,
     max_mode: Option<bool>,
 ) -> Value {
-    let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
-    // P2: tool_choice 完整支持 — "none" 时剥掉 tools, 其他情况注入 hint
-    let omit_tools = crate::protocol::tool_choice_omits_tools(tool_choice);
-    if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
-        cursor_msgs.insert(
-            0,
-            json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": hint}),
-        );
-    }
-
-    let mut requested_model = json!({"modelId": model});
-    // maxMode 默认关闭。2026-09-02 SM95 实测: 号池内全部账号 (含 kimi-k3-max / kimi-k3-low)
-    // 都被上游以 "Max mode is only available to paid users" (resource_exhausted) 拒绝,
-    // 默认 true 只会让每个请求多一次 max_mode_fallback 往返 (+1~3s) 且首帧空内容。
-    // 需要 1M 上下文时由客户端显式传 max_mode / maxMode = true (付费号才有效)。
-    let mm = max_mode.unwrap_or(DEFAULT_MAX_MODE);
-    requested_model["maxMode"] = json!(mm);
-
-    let mut body = json!({
-        "requestedModel": requested_model,
-        "conversationId": conversation_id
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        "messages": cursor_msgs,
-        "stream": true,
+    // 单一实现: 用散参数合成一个最小客户端 body, 走 build_cursor_body_full.
+    let synthetic = json!({
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "parallel_tool_calls": parallel_tool_calls,
     });
-    // maxTokens: 客户端值优先, 无则默认 32k, 低于 floor 则提升到 floor
-    let mt = effective_max_tokens(max_tokens, model);
-    body["maxTokens"] = json!(mt);
-    if let Some(t) = temperature {
-        body["temperature"] = json!(t);
-    }
-    // P2: tool_choice="none" 时跳过 tools 字段
-    if !omit_tools {
-        let cursor_tools = crate::protocol::cursor_tools_from_client(tools);
-        if !cursor_tools.is_empty() {
-            body["tools"] = json!(cursor_tools);
-            let mut cfg = json!({});
-            if let Some(p) = parallel_tool_calls {
-                cfg["parallelToolCalls"] = json!(p);
-            }
-            if !cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                body["modelConfig"] = cfg;
-            }
-        }
-    }
-    body
+    build_cursor_body_full(
+        &synthetic,
+        messages,
+        model,
+        max_tokens,
+        temperature,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        conversation_id,
+        max_mode,
+    )
 }
 
 /// P2: 从完整客户端 body 构造 Cursor 请求 (含 response_format 提示注入).
@@ -369,22 +391,23 @@ pub fn build_cursor_body_full(
         "messages": cursor_msgs,
         "stream": true,
     });
-    let mt = effective_max_tokens(max_tokens, model);
-    out["maxTokens"] = json!(mt);
+    // 采样/预算参数统一进 modelConfig (Python `model_config_from_request` 对齐).
+    // 顶层 maxTokens/temperature 是 protobuf-JSON 未知字段, 会被上游静默丢弃.
+    let mut cfg = model_config_from_request(body).unwrap_or_else(|| json!({}));
+    // maxTokens: 调用方显式值 (含 output_budget_retry 降档) 优先, 无则默认 32k, 低于 floor 提升
+    let mt = effective_max_tokens(max_tokens.or_else(|| client_max_tokens(body)), model);
+    cfg["maxTokens"] = json!(mt);
     if let Some(t) = temperature {
-        out["temperature"] = json!(t);
+        cfg["temperature"] = json!(t);
     }
+    if let Some(p) = parallel_tool_calls {
+        cfg["parallelToolCalls"] = json!(p);
+    }
+    out["modelConfig"] = cfg;
     if !omit_tools {
         let cursor_tools = crate::protocol::cursor_tools_from_client(tools);
         if !cursor_tools.is_empty() {
             out["tools"] = json!(cursor_tools);
-            let mut cfg = json!({});
-            if let Some(p) = parallel_tool_calls {
-                cfg["parallelToolCalls"] = json!(p);
-            }
-            if !cfg.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                out["modelConfig"] = cfg;
-            }
         }
     }
     out
@@ -939,6 +962,60 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("must call a tool"));
+    }
+
+    /// 线格式回归 (2026-09-03): 采样/预算参数必须在 `modelConfig` 里, 顶层 maxTokens/temperature
+    /// 是 protobuf-JSON 未知字段, 会被 Cursor 静默丢弃 → "无法设置模型温度".
+    /// 与 Python 参考 `model_config_from_request` 逐项对齐.
+    #[test]
+    fn sampling_params_live_in_model_config_not_top_level() {
+        let msgs = vec![json!({"role": "user", "content": "hi"})];
+        let client = json!({
+            "model": "kimi-k3",
+            "messages": msgs,
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "stop": ["END", ""],
+        });
+        let body = build_cursor_body_full(
+            &client, &msgs, "kimi-k3", Some(4096), Some(0.7), None, None, None, None, None,
+        );
+        let cfg = &body["modelConfig"];
+        assert_eq!(cfg["maxTokens"], 4096);
+        assert_eq!(cfg["temperature"], 0.7);
+        assert_eq!(cfg["topP"], 0.9);
+        assert_eq!(cfg["stopSequences"], json!(["END"]));
+        assert!(cfg.get("parallelToolCalls").is_none(), "未传 parallel_tool_calls 不应出现");
+        // 顶层不得再出现这些字段
+        assert!(body.get("maxTokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("topP").is_none());
+    }
+
+    #[test]
+    fn model_config_floor_and_default_budget() {
+        let msgs = vec![json!({"role": "user", "content": "hi"})];
+        // 客户端 max_tokens=16 → 提升到 floor 1024
+        let body = build_cursor_body_full(
+            &json!({"max_tokens": 16}), &msgs, "kimi-k3", Some(16), None, None, None, None, None, None,
+        );
+        assert_eq!(body["modelConfig"]["maxTokens"], MAX_TOKENS_FLOOR);
+        // 无 max_tokens → 默认预算
+        let body = build_cursor_body_full(
+            &json!({}), &msgs, "kimi-k3", None, None, None, None, None, None, None,
+        );
+        assert_eq!(body["modelConfig"]["maxTokens"], DEFAULT_MAX_TOKENS);
+        assert!(body["modelConfig"].get("temperature").is_none());
+        // output_budget_retry 降档: 调用方显式 max_tokens 覆盖客户端 body 里的值
+        let body = build_cursor_body_full(
+            &json!({"max_tokens": 131072}), &msgs, "kimi-k3", Some(65536), None, None, None, None, None, None,
+        );
+        assert_eq!(body["modelConfig"]["maxTokens"], 65536);
+        // Responses 形态 max_output_tokens
+        assert_eq!(model_config_from_request(&json!({"max_output_tokens": 2048}))
+            .unwrap()["maxTokens"], 2048);
+        assert!(model_config_from_request(&json!({})).is_none());
     }
 
     #[test]

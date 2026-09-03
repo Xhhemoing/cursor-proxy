@@ -997,22 +997,19 @@ async fn inference_handler(
         body["tool_choice"] = crate::protocol::normalize_tool_choice_for_kimi(&tc);
     }
 
-    // ---- KVV (Kimi Vendor Verifier) 合规检查 ----
-    // 对应 Python 版 server.py 的 _kimi_vendor_param_check + _kimi_vendor_request_validate
-    // 在解析 messages 之前执行，因为 KVV 需要检查 body 结构（response_format/tool_choice/dynamic_tools）
-    if let Some(kvv_err) = kvv::kimi_vendor_param_check(&body) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(kvv_err),
-        )
-            .into_response());
-    }
-    if let Some(kvv_err) = kvv::kimi_vendor_request_validate(&body) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(kvv_err),
-        )
-            .into_response());
+    // ---- 采样参数规范化 (默认) / KVV 严格校验 (KVV_STRICT=1) ----
+    // 2026-09-03: 旧逻辑对 temperature≠0.6 / top_p≠0.95 一律 400, 导致 Claude Code (固定 temperature=1)、
+    // Codex / OpenAI SDK (默认 temperature=1)、Hermes (0~0.7) 全部被拒 —— 用户看到的"无法设置模型温度"、
+    // "cc/codex 工具调用报错" 有相当一部分就是这个 400. 网关默认放行并透传, 由上游钳制.
+    if kvv::kvv_strict_enabled() {
+        if let Some(kvv_err) = kvv::kimi_vendor_param_check(&body) {
+            return Err((StatusCode::BAD_REQUEST, Json(kvv_err)).into_response());
+        }
+        if let Some(kvv_err) = kvv::kimi_vendor_request_validate(&body) {
+            return Err((StatusCode::BAD_REQUEST, Json(kvv_err)).into_response());
+        }
+    } else {
+        kvv::kimi_vendor_param_normalize(&mut body);
     }
 
     // 解析请求

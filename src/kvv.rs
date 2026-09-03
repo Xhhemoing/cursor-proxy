@@ -61,6 +61,52 @@ pub fn kimi_err(message: &str, param: Option<&str>, code: &str) -> Value {
     json!({ "error": err })
 }
 
+/// 采样参数**规范化** (取代旧的 400 拒绝).
+///
+/// 背景: KVV (Kimi Vendor Verifier) 合规检查曾把 temperature≠0.6 / top_p≠0.95 等直接 400。
+/// 但真实客户端天然不服从这张表:
+/// - Claude Code 固定发 `temperature: 1`
+/// - Codex / OpenAI SDK 默认 `temperature: 1`
+/// - Hermes / 各类 Agent 常发 0 / 0.2 / 0.7
+///
+/// 网关的职责是让这些客户端**能用**, 不是替上游做 vendor 认证。因此:
+/// 1. 数值型 temperature/top_p 直接透传 (上游 Kimi 会自己钳制到允许集合)
+/// 2. 非数值 / 超范围 (temperature ∉ [0,2], top_p ∉ (0,1]) → 剔除该字段, 交由上游默认值
+/// 3. presence_penalty / frequency_penalty / n 上游不支持 → 剔除, 不报错
+///
+/// 严格 vendor 模式 (`KVV_STRICT=1` 环境变量) 保留旧行为, 供合规测试使用。
+pub fn kimi_vendor_param_normalize(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(t) = obj.get("temperature") {
+        match t.as_f64() {
+            Some(v) if (0.0..=2.0).contains(&v) => {}
+            _ => {
+                obj.remove("temperature");
+            }
+        }
+    }
+    if let Some(p) = obj.get("top_p") {
+        match p.as_f64() {
+            Some(v) if v > 0.0 && v <= 1.0 => {}
+            _ => {
+                obj.remove("top_p");
+            }
+        }
+    }
+    for k in ["presence_penalty", "frequency_penalty", "n"] {
+        obj.remove(k);
+    }
+}
+
+/// 是否启用严格 vendor 校验 (默认关闭). `KVV_STRICT=1|true|yes` 开启.
+pub fn kvv_strict_enabled() -> bool {
+    std::env::var("KVV_STRICT")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// K3 vendor 不可变参数校验
 /// 对应 Python: `_kimi_vendor_param_check(body)`
 /// 返回 Some(error_json) 表示校验失败，None 表示通过
@@ -462,6 +508,37 @@ fn strict_type_name(v: &Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 2026-09-03: 真实客户端 (Claude Code temperature=1, Codex 默认 1, Hermes 0~0.7) 不能被 400。
+    #[test]
+    fn normalize_passes_real_client_temperatures_through() {
+        for t in [0.0, 0.2, 0.7, 1.0, 1.5, 2.0] {
+            let mut b = json!({"temperature": t, "top_p": 0.9, "messages": []});
+            kimi_vendor_param_normalize(&mut b);
+            assert_eq!(b["temperature"].as_f64(), Some(t), "temperature {t} 必须透传");
+            assert_eq!(b["top_p"].as_f64(), Some(0.9));
+        }
+        // 旧严格校验对同样输入是 400 —— 仅在 KVV_STRICT 下保留
+        assert!(kimi_vendor_param_check(&json!({"temperature": 1.0})).is_some());
+    }
+
+    #[test]
+    fn normalize_drops_invalid_or_unsupported_params_silently() {
+        let mut b = json!({
+            "temperature": "hot", "top_p": 1.7,
+            "presence_penalty": 0.5, "frequency_penalty": 0.3, "n": 2,
+            "max_tokens": 100
+        });
+        kimi_vendor_param_normalize(&mut b);
+        assert!(b.get("temperature").is_none());
+        assert!(b.get("top_p").is_none());
+        assert!(b.get("presence_penalty").is_none());
+        assert!(b.get("frequency_penalty").is_none());
+        assert!(b.get("n").is_none());
+        assert_eq!(b["max_tokens"], 100, "无关字段不动");
+        let mut nonobj = json!("x");
+        kimi_vendor_param_normalize(&mut nonobj); // 不 panic
+    }
 
     #[test]
     fn test_kimi_is_thinking() {

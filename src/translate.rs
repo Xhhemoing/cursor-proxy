@@ -774,15 +774,11 @@ impl StreamTranslator {
                             delta,
                             None,
                         ));
-                        // isComplete: 发送 finish_reason = "tool_calls" 表示该工具调用已完成
-                        if is_complete {
-                            out_events.push(openai_chunk(
-                                &self.id,
-                                &self.public_model,
-                                json!({}),
-                                Some("tool_calls"),
-                            ));
-                        }
+                        // 注意: 这里**不**因 isComplete 发 finish_reason。OpenAI 规范每个 choice 只有一次
+                        // 非空 finish_reason (在流末尾)。Codex 的 Chat 路径收到首个 finish_reason 即结束本轮,
+                        // 之前逐工具发 "tool_calls" 会让并行第二个工具调用被丢弃 (2026-09-03 修复)。
+                        // 与 Python 参考 ChatTranslator.feed()/complete() 行为一致。
+                        let _ = is_complete;
                     }
                     Dialect::Anthropic => {
                         if is_new_tool {
@@ -1271,8 +1267,12 @@ impl StreamTranslator {
                         &json!({"type": "content_block_stop", "index": idx}),
                     ));
                 }
-                // 关闭所有 tool_use block
-                for (i, _) in self.out.tool_calls.iter().enumerate() {
+                // 关闭尚未关闭的 tool_use block (isComplete 时已发过 content_block_stop 的跳过,
+                // 否则同一 index 会收到两次 stop —— Anthropic 规范每个 block 只能 stop 一次)
+                for (i, c) in self.out.tool_calls.iter().enumerate() {
+                    if self.completed_tools.contains(&c.id) {
+                        continue;
+                    }
                     let index = self.alloc_anthropic_tool_idx(i);
                     evts.push(sse_event(
                         "content_block_stop",
@@ -1358,13 +1358,32 @@ impl StreamTranslator {
                 } else {
                     None
                 };
-                let final_obj = responses_message_with_request(
+                let mut final_obj = responses_message_with_request(
                     &self.id,
                     &self.public_model,
                     &self.out,
                     &u,
                     include_req.as_ref(),
                 );
+                // response.completed.output[] 的 item id 必须与流中 output_item.added/done 一致
+                // (Codex 按 id 关联 reasoning / message item)。
+                if let Some(items) = final_obj.get_mut("output").and_then(|v| v.as_array_mut()) {
+                    for it in items.iter_mut() {
+                        match it.get("type").and_then(|v| v.as_str()) {
+                            Some("reasoning") => {
+                                if let Some(rid) = &self.responses_reasoning_id {
+                                    it["id"] = json!(rid);
+                                }
+                            }
+                            Some("message") => {
+                                if let Some(mid) = &self.responses_message_id {
+                                    it["id"] = json!(mid);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 let seq = self.next_seq();
                 evts.push(sse_event(
                     "response.completed",
@@ -1821,5 +1840,144 @@ mod tests {
         assert_eq!(display_model_id("grok-4.5"), "claude-sonnet-4-6");
         assert_eq!(display_model_id("cursor-grok-4.5"), "claude-sonnet-4-6");
         assert_eq!(display_model_id("kimi-k3"), "kimi-k3");
+    }
+}
+
+#[cfg(test)]
+mod format_conformance_probe {
+    //! 输出格式标准化探针: 三方言对照 OpenAI Chat / Anthropic Messages / OpenAI Responses 规范.
+    use super::*;
+    use futures_util::stream;
+
+    fn frames() -> Vec<Result<Value, String>> {
+        vec![
+            Ok(json!({"thinkingPart": {"text": "think..."}})),
+            Ok(json!({"textPart": {"text": "Let me run it."}})),
+            Ok(json!({"toolCallPart": {"toolCallId": "Bash_0-aaaaa", "toolName": "Bash", "args": {"command": "echo 1"}, "isComplete": true}})),
+            Ok(json!({"toolCallPart": {"toolCallId": "Read_1-aaaaa", "toolName": "Read", "args": {"path": "/tmp/x"}, "isComplete": true}})),
+            Ok(json!({"extendedUsage": {"promptTokens": 10, "completionTokens": 5}, "responseInfo": {}})),
+        ]
+    }
+
+    async fn run(dialect: Dialect) -> Vec<(Option<String>, Value)> {
+        use futures_util::StreamExt;
+        let s = upstream_to_dialect_stream(Box::pin(stream::iter(frames())), "kimi-k3-max", dialect, None);
+        let raw: Vec<String> = s.map(|r| r.unwrap().0).collect().await;
+        let mut out = Vec::new();
+        for chunk in raw {
+            let mut ev: Option<String> = None;
+            for line in chunk.lines() {
+                if let Some(e) = line.strip_prefix("event: ") { ev = Some(e.trim().to_string()); }
+                else if let Some(d) = line.strip_prefix("data: ") {
+                    let d = d.trim();
+                    let v = if d == "[DONE]" { json!("[DONE]") } else { serde_json::from_str(d).unwrap_or(json!(d)) };
+                    out.push((ev.clone(), v));
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn probe_all_dialects_print_shapes() {
+        for d in [Dialect::Chat, Dialect::Anthropic, Dialect::Responses] {
+            println!("\n===== {:?} =====", d);
+            for (ev, v) in run(d).await {
+                let s = serde_json::to_string(&v).unwrap();
+                println!("{:<45} {}", ev.unwrap_or_default(), &s[..s.len().min(260)]);
+            }
+        }
+    }
+
+    /// OpenAI Chat 规范: 每个 choice 的非空 finish_reason 只出现一次 (流末尾), 且在 [DONE] 之前;
+    /// 每个 tool_calls delta 都带 id + type; 两个并行工具 index 0/1 都完整到达.
+    #[tokio::test]
+    async fn chat_stream_has_single_finish_reason_and_both_tools() {
+        let evs = run(Dialect::Chat).await;
+        let finishes: Vec<&Value> = evs
+            .iter()
+            .filter_map(|(_, v)| v.get("choices").and_then(|c| c[0].get("finish_reason")))
+            .filter(|f| !f.is_null())
+            .collect();
+        assert_eq!(finishes.len(), 1, "finish_reason 必须且只能出现一次: {finishes:?}");
+        assert_eq!(finishes[0], "tool_calls");
+        let last_two: Vec<&Value> = evs.iter().rev().take(2).map(|(_, v)| v).collect();
+        assert_eq!(last_two[0], &json!("[DONE]"));
+        assert!(last_two[1].get("usage").is_some(), "finish 帧携带 usage");
+        let mut tool_idx = std::collections::BTreeSet::new();
+        for (_, v) in &evs {
+            if let Some(tcs) = v.pointer("/choices/0/delta/tool_calls").and_then(|t| t.as_array()) {
+                for tc in tcs {
+                    assert!(tc.get("id").is_some() && tc["type"] == "function", "delta 需带 id+type: {tc}");
+                    tool_idx.insert(tc["index"].as_u64().unwrap());
+                }
+            }
+        }
+        assert_eq!(tool_idx.into_iter().collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    /// Anthropic 规范: 每个 content block 的 start/stop 各一次, 顺序 thinking → text → tool_use,
+    /// message_delta.stop_reason = tool_use, 最后 message_stop.
+    #[tokio::test]
+    async fn anthropic_stream_blocks_start_and_stop_exactly_once() {
+        let evs = run(Dialect::Anthropic).await;
+        let mut starts = std::collections::HashMap::new();
+        let mut stops = std::collections::HashMap::new();
+        for (ev, v) in &evs {
+            match ev.as_deref() {
+                Some("content_block_start") => *starts.entry(v["index"].as_u64().unwrap()).or_insert(0) += 1,
+                Some("content_block_stop") => *stops.entry(v["index"].as_u64().unwrap()).or_insert(0) += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(starts.len(), 4, "thinking+text+2 tools");
+        for (idx, n) in &starts {
+            assert_eq!(*n, 1, "index {idx} start 次数");
+            assert_eq!(stops.get(idx), Some(&1), "index {idx} stop 必须恰好一次, 实际 {:?}", stops.get(idx));
+        }
+        let names: Vec<&str> = evs.iter().filter_map(|(e, _)| e.as_deref()).collect();
+        assert_eq!(names[0], "message_start");
+        assert_eq!(names[names.len() - 2], "message_delta");
+        assert_eq!(names[names.len() - 1], "message_stop");
+        let md = &evs[evs.len() - 2].1;
+        assert_eq!(md["delta"]["stop_reason"], "tool_use");
+        // tool_use block 形态
+        let tu: Vec<&Value> = evs.iter().filter(|(e, v)| e.as_deref() == Some("content_block_start") && v["content_block"]["type"] == "tool_use").map(|(_, v)| v).collect();
+        assert_eq!(tu.len(), 2);
+        assert_eq!(tu[0]["content_block"]["name"], "Bash");
+        assert_eq!(tu[0]["content_block"]["input"], json!({}));
+    }
+
+    /// Responses 规范: sequence_number 严格递增; 每个 output item added/done 配对且 id 一致;
+    /// response.completed.output 的 item id 与流中一致; function_call 有 arguments.done.
+    #[tokio::test]
+    async fn responses_stream_items_are_consistent() {
+        let evs = run(Dialect::Responses).await;
+        let mut last_seq = 0u64;
+        let mut added = std::collections::HashMap::new();
+        let mut done = std::collections::HashMap::new();
+        for (ev, v) in &evs {
+            let seq = v["sequence_number"].as_u64().expect("每个事件都有 sequence_number");
+            assert!(seq > last_seq, "sequence_number 必须递增");
+            last_seq = seq;
+            match ev.as_deref() {
+                Some("response.output_item.added") => { added.insert(v["item"]["id"].as_str().unwrap().to_string(), v["output_index"].as_u64().unwrap()); }
+                Some("response.output_item.done") => { done.insert(v["item"]["id"].as_str().unwrap().to_string(), v["output_index"].as_u64().unwrap()); }
+                _ => {}
+            }
+        }
+        assert_eq!(added.len(), 4, "reasoning + message + 2 function_call");
+        assert_eq!(added, done, "added/done 的 id 与 output_index 必须一一配对");
+        let (ev, completed) = evs.last().unwrap();
+        assert_eq!(ev.as_deref(), Some("response.completed"));
+        assert_eq!(completed["response"]["status"], "completed");
+        let final_ids: std::collections::HashSet<String> = completed["response"]["output"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_string()).collect();
+        let streamed_ids: std::collections::HashSet<String> = added.keys().cloned().collect();
+        assert_eq!(final_ids, streamed_ids, "response.completed.output ids 必须与流中 item id 一致");
+        let fc_done = evs.iter().filter(|(e, _)| e.as_deref() == Some("response.function_call_arguments.done")).count();
+        assert_eq!(fc_done, 2, "每个 function_call 恰好一个 arguments.done");
+        let fc_items: Vec<&Value> = completed["response"]["output"].as_array().unwrap().iter().filter(|i| i["type"] == "function_call").collect();
+        assert_eq!(fc_items[0]["call_id"], "Bash_0-aaaaa");
+        assert_eq!(fc_items[0]["arguments"], "{\"command\":\"echo 1\"}");
     }
 }

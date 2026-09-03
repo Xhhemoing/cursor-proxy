@@ -724,6 +724,21 @@ pub fn anthropic_to_openai_chat(body: &Value) -> Result<Value, String> {
     if let Some(t) = body.get("temperature").and_then(|v| v.as_f64()) {
         out["temperature"] = json!(t);
     }
+    if let Some(tp) = body.get("top_p").and_then(|v| v.as_f64()) {
+        out["top_p"] = json!(tp);
+    }
+    if let Some(stop) = body.get("stop_sequences") {
+        out["stop"] = stop.clone();
+    }
+    // Claude Code 把会话标识放在 metadata.user_id; 映射到 Chat `user` 供号池粘滞/conversationId 复用
+    if let Some(uid) = body
+        .get("metadata")
+        .and_then(|m| m.get("user_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        out["user"] = json!(uid);
+    }
     if let Some(tools) = body.get("tools") {
         let mapped: Vec<Value> = tools
             .as_array()
@@ -851,6 +866,9 @@ pub fn responses_to_openai_chat(body: &Value) -> Result<Value, String> {
     }
     if let Some(t) = body.get("temperature").and_then(|v| v.as_f64()) {
         out["temperature"] = json!(t);
+    }
+    if let Some(tp) = body.get("top_p").and_then(|v| v.as_f64()) {
+        out["top_p"] = json!(tp);
     }
     if let Some(user) = body.get("user").and_then(|v| v.as_str()) {
         out["user"] = json!(user);
@@ -1409,6 +1427,63 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(chat["tool_choice"], "required");
+    }
+
+    /// Claude Code 形态: temperature=1 + top_p + stop_sequences + metadata.user_id 全部透传到 Chat 形态.
+    #[test]
+    fn anthropic_body_passes_sampling_and_session_fields() {
+        let body = json!({
+            "model": "kimi-k3-max",
+            "max_tokens": 512,
+            "temperature": 1,
+            "top_p": 0.95,
+            "stop_sequences": ["\n\nHuman:"],
+            "metadata": {"user_id": "cc-session-42"},
+            "system": [{"type": "text", "text": "SYS"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": [{"name": "Bash", "description": "sh", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}}],
+            "tool_choice": {"type": "auto"},
+        });
+        let chat = anthropic_to_openai_chat(&body).unwrap();
+        assert_eq!(chat["temperature"], 1.0);
+        assert_eq!(chat["top_p"], 0.95);
+        assert_eq!(chat["stop"], json!(["\n\nHuman:"]));
+        assert_eq!(chat["user"], "cc-session-42");
+        assert_eq!(chat["max_tokens"], 512);
+        assert_eq!(chat["tool_choice"], "auto");
+        assert_eq!(chat["tools"][0]["function"]["name"], "Bash");
+        assert_eq!(chat["messages"][0]["role"], "system");
+        // 端到端: 这些字段进 Cursor modelConfig
+        let cfg = crate::cursor::model_config_from_request(&chat).unwrap();
+        assert_eq!(cfg["temperature"], 1.0);
+        assert_eq!(cfg["topP"], 0.95);
+        assert_eq!(cfg["stopSequences"], json!(["\n\nHuman:"]));
+        assert_eq!(cfg["maxTokens"], 1024, "512 < floor → 提升");
+    }
+
+    /// Codex 形态: Responses 请求的 temperature/top_p/max_output_tokens/parallel_tool_calls 透传.
+    #[test]
+    fn responses_body_passes_sampling_fields() {
+        let body = json!({
+            "model": "kimi-k3-max",
+            "instructions": "You are Codex.",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "temperature": 1,
+            "top_p": 0.8,
+            "max_output_tokens": 4096,
+            "parallel_tool_calls": false,
+            "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object"}}],
+        });
+        let chat = responses_to_openai_chat(&body).unwrap();
+        assert_eq!(chat["temperature"], 1.0);
+        assert_eq!(chat["top_p"], 0.8);
+        assert_eq!(chat["max_tokens"], 4096);
+        assert_eq!(chat["parallel_tool_calls"], false);
+        let cfg = crate::cursor::model_config_from_request(&chat).unwrap();
+        assert_eq!(cfg["temperature"], 1.0);
+        assert_eq!(cfg["topP"], 0.8);
+        assert_eq!(cfg["maxTokens"], 4096);
+        assert_eq!(cfg["parallelToolCalls"], false);
     }
 
     #[test]
