@@ -466,12 +466,12 @@ impl AccountPool {
     }
 
     fn quota_blocks(&self, account_id: &str) -> bool {
+        // 只信 dashboard 的 has_available_usage。
+        // 免费/Kimi 号常年 usage_percent≈100 但仍可用（probe 会回 has_available_usage=true），
+        // 旧的 99.5% 阈值会把这些号永久标成 quota_blocked，每分钟 probe_ok 又立刻挡回去。
         self.quotas
             .get(account_id)
-            .map(|snap| {
-                snap.has_available_usage == Some(false)
-                    || snap.usage_percent.map(|p| p >= 99.5).unwrap_or(false)
-            })
+            .map(|snap| snap.has_available_usage == Some(false))
             .unwrap_or(false)
     }
 
@@ -1453,6 +1453,22 @@ mod tests {
         );
         let (a, _p) = pool.acquire().await.unwrap();
         assert_eq!(a.id, "b");
+    }
+
+    #[tokio::test]
+    async fn high_usage_percent_does_not_block_when_usage_available() {
+        let pool = AccountPool::new(vec![acc("a", true)], 1);
+        pool.set_quota(
+            "a",
+            QuotaSnapshot {
+                has_available_usage: Some(true),
+                usage_percent: Some(100.0),
+                ..Default::default()
+            },
+        );
+        let (got, _p) = pool.acquire().await.unwrap();
+        assert_eq!(got.id, "a");
+        assert_eq!(pool.summary()["quota_blocked"], 0);
     }
 
     #[test]

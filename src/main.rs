@@ -1082,15 +1082,31 @@ async fn inference_handler(
     }
 
     // 提取 session_id 用于会话一致性 + Cursor conversationId（缓存命中依赖二者同号）
+    // Hermes / 多数 OpenAI 客户端不传 user 或 x-session-id。缺省时用 system+首条 user
+    // 的稳定前缀作粘滞键，否则每跳轮询换号且 conversationId 走 uuid v4 → cache_read 恒 0。
     let session_owned: Option<String> = body
         .get("user")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             headers
                 .get("x-session-id")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            let prefix = crate::protocol::conversation_prefix(&body);
+            if prefix.is_empty() {
+                None
+            } else {
+                use sha1::Digest;
+                let mut h = sha1::Sha1::new();
+                h.update(prefix.as_bytes());
+                let hex = format!("{:x}", h.finalize());
+                Some(format!("cfp-aff-{}", &hex[..16]))
+            }
         });
     let session_id = session_owned.as_deref();
 

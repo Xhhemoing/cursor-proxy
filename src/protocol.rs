@@ -589,7 +589,9 @@ pub fn conversation_id_from(body: &Value, headers: Option<&axum::http::HeaderMap
     uuid::Uuid::new_v4().to_string()
 }
 
-fn conversation_prefix(body: &Value) -> String {
+/// system + 首条 user 的稳定前缀。同一 Hermes 对话的后续 tool 轮次这份前缀不变，
+/// 可当号池粘滞键（客户端经常不传 user / x-session-id）。
+pub fn conversation_prefix(body: &Value) -> String {
     let mut chunks: Vec<String> = Vec::new();
     let instructions = body.get("instructions").and_then(|v| v.as_str());
     if let Some(ins) = instructions {
@@ -1407,5 +1409,31 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(chat["tool_choice"], "required");
+    }
+
+    #[test]
+    fn conversation_prefix_stable_across_tool_turns() {
+        let turn1 = json!({
+            "messages": [
+                {"role": "system", "content": "You are a precise assistant."},
+                {"role": "user", "content": "Read /tmp/secret.txt"}
+            ]
+        });
+        let turn2 = json!({
+            "messages": [
+                {"role": "system", "content": "You are a precise assistant."},
+                {"role": "user", "content": "Read /tmp/secret.txt"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "t1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "t1", "content": "ZEBRA"}
+            ]
+        });
+        let p1 = conversation_prefix(&turn1);
+        let p2 = conversation_prefix(&turn2);
+        assert!(!p1.is_empty());
+        assert_eq!(p1, p2);
+        assert!(p1.contains("sys:You are a precise assistant."));
+        assert!(p1.contains("user:Read /tmp/secret.txt"));
     }
 }
