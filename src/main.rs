@@ -11,6 +11,7 @@
 mod admin;
 mod audit;
 mod billing;
+mod cards;
 mod config;
 mod cursor;
 pub mod error;
@@ -73,6 +74,8 @@ pub struct AppState {
     event_bus: admin::events::EventBus,
     /// 额度历史持久化存储
     quota_store: std::sync::Arc<quota::QuotaStore>,
+    /// 套餐卡存储 (plans + cards + 运行时计数)
+    card_store: std::sync::Arc<cards::CardStore>,
 }
 
 /// 按出口代理缓存 CursorClient. 直连共用一个, 每个 proxy_id 一个.
@@ -210,6 +213,10 @@ async fn main() -> anyhow::Result<()> {
         quota_store: std::sync::Arc::new(quota::QuotaStore::open(
             &std::path::Path::new(&config.billing.db_file).with_file_name("quota.db"),
         )?),
+        card_store: std::sync::Arc::new(cards::CardStore::open(
+            &std::path::Path::new(&config.billing.db_file).with_file_name("cards.json"),
+            config.billing.tz_offset_minutes,
+        )),
     });
     info!(
         event = "billing_init",
@@ -503,6 +510,45 @@ async fn main() -> anyhow::Result<()> {
             "/admin/api/billing/pricing",
             get(admin::api_pricing_get).post(admin::api_pricing_patch),
         )
+        // 套餐卡
+        .route(
+            "/admin/api/cards/plans",
+            get(admin::api_card_plans_list).post(admin::api_card_plan_upsert),
+        )
+        .route(
+            "/admin/api/cards/plans/:id",
+            axum::routing::delete(admin::api_card_plan_delete),
+        )
+        .route(
+            "/admin/api/cards/plans/seed",
+            post(admin::api_card_plans_seed),
+        )
+        .route("/admin/api/cards/presets", get(admin::api_card_presets))
+        .route(
+            "/admin/api/cards/cost-model",
+            get(admin::api_cost_model_get).post(admin::api_cost_model_set),
+        )
+        .route(
+            "/admin/api/cards/pricing-table",
+            get(admin::api_pricing_table),
+        )
+        .route("/admin/api/cards/profit", get(admin::api_cards_profit))
+        .route("/admin/api/cards", get(admin::api_cards_list))
+        .route("/admin/api/cards/issue", post(admin::api_cards_issue))
+        .route("/admin/api/cards/report", get(admin::api_cards_report))
+        .route("/admin/api/cards/:key", get(admin::api_cards_status))
+        .route(
+            "/admin/api/cards/:key",
+            axum::routing::delete(admin::api_cards_delete),
+        )
+        .route(
+            "/admin/api/cards/:key/extend",
+            post(admin::api_cards_extend),
+        )
+        .route(
+            "/admin/api/cards/:key/revoke",
+            post(admin::api_cards_revoke),
+        )
         .route("/admin/api/events", get(admin::api_events))
         .route(
             "/admin/api/quota/history/:id",
@@ -622,6 +668,25 @@ async fn watch_config(state: Arc<AppState>) -> notify::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 从请求头提取 Bearer token 或 x-api-key (不做校验)
+fn extract_token(headers: &HeaderMap) -> String {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let bearer = auth.strip_prefix("Bearer ").unwrap_or("").trim();
+    let x_api = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    if !bearer.is_empty() {
+        bearer.to_string()
+    } else {
+        x_api.to_string()
+    }
 }
 
 /// API key 鉴权; 成功时返回命中的 key 记录 (None 表示未启用鉴权).
@@ -844,7 +909,10 @@ fn dialect_error_frame(dialect: Dialect, message: &str) -> String {
     match dialect {
         Dialect::Chat => {
             let err = translate::openai_error(&msg, code, 502);
-            format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&err).unwrap())
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                serde_json::to_string(&err).unwrap()
+            )
         }
         Dialect::Anthropic => crate::protocol::sse_event(
             "error",
@@ -927,7 +995,62 @@ async fn inference_handler(
 ) -> Result<Response, Response> {
     let client_ip = addr.ip().to_string();
     let config = state.config.load();
-    let key_rec = check_auth(&headers, &config)?;
+
+    // ── 套餐卡通道: token 命中 cards.json 时走卡闸门, 否则走原 key 体系 ──
+    let raw_token = extract_token(&headers);
+    let mut card_permit: Option<cards::CardPermit> = None;
+    let mut card_throttle = cards::Throttle::Normal;
+    // 匀速流出目标 (tok/s); 0 = 不限. 卡请求由档位决定, 非卡请求恒 0
+    let mut card_pace_tps: u32 = 0;
+    let mut card_key_for_log = String::new();
+    if raw_token.starts_with("card-") {
+        // 卡前缀的 token 必须命中 cards.json; 查不到 = 伪卡, 直接 401, 不落回 key 体系
+        if state.card_store.get_card(&raw_token).is_none() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(openai_error("Invalid card key", "invalid_card", 401)),
+            )
+                .into_response());
+        }
+        let req_model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&config.default_model)
+            .to_string();
+        match state.card_store.acquire(&raw_token, &req_model) {
+            Ok((card, _plan, permit, throttle)) => {
+                card_throttle = throttle;
+                card_pace_tps = permit.pace_tps();
+                card_key_for_log = card.card_key.clone();
+                card_permit = Some(permit);
+                // 隐蔽限流 = 并发上限 + 输出匀速 (流式路径 TokenPacer). 不注入延迟、不截 max_tokens:
+                // 那两样会让 agent 客户端重试, 越限越贵 (2026-09-05 实测 fable $/h +30%/+91%).
+                if throttle != cards::Throttle::Normal {
+                    info!(
+                        event = "card_throttle",
+                        card = %card_key_for_log,
+                        throttle = throttle.as_str(),
+                        pace_tps = card_pace_tps,
+                        "card request throttled"
+                    );
+                }
+            }
+            Err((code, msg)) => {
+                return Err((
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::FORBIDDEN),
+                    Json(openai_error(&msg, "card_rejected", code)),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    let key_rec = if card_permit.is_some() {
+        // 卡已验过, 不再要求 api key 命中
+        None
+    } else {
+        check_auth(&headers, &config)?
+    };
     let used_key = match key_rec {
         Some(rec) => {
             let (tok, reqs) = state.key_usage.snapshot(&rec.key);
@@ -955,7 +1078,7 @@ async fn inference_handler(
             }
             rec.key.clone()
         }
-        None => String::new(),
+        None => card_key_for_log.clone(),
     };
 
     // Key 并发信号量: 限制同一 key 的并发请求数
@@ -1047,6 +1170,8 @@ async fn inference_handler(
         .and_then(|v| v.as_u64())
         .map(|v| v as u32)
         .or(Some(crate::cursor::DEFAULT_MAX_TOKENS));
+    // 注: 卡限流不再缩 max_tokens (截断答案 → agent 重试 → 更贵). 只做并发 + 匀速流出.
+    let _ = card_throttle;
     let max_mode = crate::cursor::max_mode_from_request(&body);
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
     let tools = body.get("tools").cloned();
@@ -1062,7 +1187,13 @@ async fn inference_handler(
     }
 
     // 计费上下文: 此刻快照单价与分成, 贯穿整个请求
-    let bctx = billing::BillingCtx::from_key(&config.billing, key_rec, &model);
+    let mut bctx = billing::BillingCtx::from_key(&config.billing, key_rec, &model);
+    if card_permit.is_some() {
+        // 卡请求: 账本 key_name 记卡号, 供 /admin/api/cards/report|profit 按卡汇总
+        bctx.key_name = card_key_for_log.clone();
+        bctx.key_hash = billing::key_hash(&card_key_for_log);
+        bctx.key_prefix = card_key_for_log.chars().take(13).collect();
+    }
     if !bctx.quote.priced {
         if config.billing.reject_unpriced {
             return Err((
@@ -1142,12 +1273,16 @@ async fn inference_handler(
         // 否则用 account 亲和 v5.
         let has_explicit = body.get("conversationId").is_some()
             || body.get("conversation").is_some()
-            || body.get("metadata").and_then(|m| m.as_object()).map(|o| {
-                o.contains_key("conversation_id")
-                    || o.contains_key("conversationId")
-                    || o.contains_key("session_id")
-                    || o.contains_key("sessionId")
-            }).unwrap_or(false)
+            || body
+                .get("metadata")
+                .and_then(|m| m.as_object())
+                .map(|o| {
+                    o.contains_key("conversation_id")
+                        || o.contains_key("conversationId")
+                        || o.contains_key("session_id")
+                        || o.contains_key("sessionId")
+                })
+                .unwrap_or(false)
             || headers.get("x-conversation-id").is_some()
             || headers.get("x-cursor-conversation-id").is_some()
             || headers.get("openai-conversation-id").is_some();
@@ -1272,8 +1407,8 @@ async fn inference_handler(
             Err(e) => {
                 last_error = e.to_string();
                 // Max mode 被拒: 关 maxMode，kimi-k3-max 降到 kimi-k3，同号重试，不记账号错误
-                let still_on_max = current_max_mode != Some(false)
-                    || model.eq_ignore_ascii_case("kimi-k3-max");
+                let still_on_max =
+                    current_max_mode != Some(false) || model.eq_ignore_ascii_case("kimi-k3-max");
                 if translate::is_max_mode_restricted(&last_error) && still_on_max {
                     info!(
                         event = "max_mode_fallback",
@@ -1318,11 +1453,7 @@ async fn inference_handler(
                         ));
                         return Err((
                             StatusCode::SERVICE_UNAVAILABLE,
-                            Json(openai_error(
-                                &last_error,
-                                "upstream_overloaded",
-                                503,
-                            )),
+                            Json(openai_error(&last_error, "upstream_overloaded", 503)),
                         )
                             .into_response());
                     }
@@ -1339,7 +1470,8 @@ async fn inference_handler(
                     let new_budget = translate::lower_output_budget(
                         current_max_tokens.unwrap_or(crate::cursor::DEFAULT_MAX_TOKENS),
                     );
-                    if new_budget < current_max_tokens.unwrap_or(crate::cursor::DEFAULT_MAX_TOKENS) {
+                    if new_budget < current_max_tokens.unwrap_or(crate::cursor::DEFAULT_MAX_TOKENS)
+                    {
                         info!(
                             event = "output_budget_retry",
                             req_id = %request_id,
@@ -1426,16 +1558,21 @@ async fn inference_handler(
         let model_clone = model.clone();
         let log_buf = state.log_buffer.clone();
         let key_usage = state.key_usage.clone();
+        let card_store = state.card_store.clone();
         let billed_key = used_key.clone();
         let metrics = state.metrics.clone();
         let ledger = state.ledger.clone();
         let bctx_s = bctx.clone();
         // P1: 克隆请求体供 translate 层判定 Responses include/encrypted reasoning
         let request_body_for_translate = body.clone();
+        // 卡并发令牌随流走: 输出期间一直占车道 (否则 handler 返回即释放, 并发帽形同虚设)
+        let card_permit_s = card_permit.take();
+        let mut pacer = cards::TokenPacer::new(card_pace_tps);
 
         tokio::spawn(async move {
             // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
             let _permit = current_permit.take().expect("permit must exist");
+            let _card_permit = card_permit_s;
             let mut usage = translate::Usage::default();
             let mut stream = Box::pin(upstream_to_dialect_stream(
                 frames,
@@ -1479,17 +1616,20 @@ async fn inference_handler(
                             pool.release(&aid, true, 10);
                             metrics.observe_err();
                             ledger.record(billing::BillingRecord::build(
-                                &bctx_s, &rid, &model_clone, &aid, usage, true, 504,
-                                start.elapsed().as_millis() as u64, &client_ip,
+                                &bctx_s,
+                                &rid,
+                                &model_clone,
+                                &aid,
+                                usage,
+                                true,
+                                504,
+                                start.elapsed().as_millis() as u64,
+                                &client_ip,
                             ));
                             return;
                         }
                         // SSE 注释帧: 规范要求所有客户端忽略, 各方言通用且不打乱协议时序
-                        if tx
-                            .send(Ok(Bytes::from(": keep-alive\n\n")))
-                            .await
-                            .is_err()
-                        {
+                        if tx.send(Ok(Bytes::from(": keep-alive\n\n"))).await.is_err() {
                             break;
                         }
                         continue;
@@ -1503,7 +1643,8 @@ async fn inference_handler(
                         // 检测是否有实际内容（非空 delta / tool_call / thinking）
                         if !has_content {
                             let sse_str = sse.as_str();
-                            if sse_str.contains("\"content\":\"") && !sse_str.contains("\"content\":\"\"")
+                            if sse_str.contains("\"content\":\"")
+                                && !sse_str.contains("\"content\":\"\"")
                                 || sse_str.contains("\"tool_calls\"")
                                 || sse_str.contains("\"thinking\"")
                                 || sse_str.contains("content_block")
@@ -1513,6 +1654,16 @@ async fn inference_handler(
                         }
                         if sse.contains(terminal_marker) {
                             sent_terminal = true;
+                        }
+                        // 匀速流出: 把上游突发按卡档位的 tok/s 放给客户端 (完整内容, 只是打字慢一点)
+                        if let Some(p) = pacer.as_mut() {
+                            let est = cards::TokenPacer::estimate_tokens(&sse);
+                            if est > 0.0 {
+                                let wait = p.admit(est);
+                                if !wait.is_zero() {
+                                    tokio::time::sleep(wait).await;
+                                }
+                            }
                         }
                         // 客户端断开即停，不阻塞转发循环
                         if tx.send(Ok(Bytes::from(sse))).await.is_err() {
@@ -1580,6 +1731,17 @@ async fn inference_handler(
             log_buf.push_with_line(log_entry, line);
             if !billed_key.is_empty() {
                 key_usage.add(&billed_key, usage.total());
+                // 套餐卡记账: 折算高级额度累加到今日 (驱动日额度帽/渐进降速)
+                if billed_key.starts_with("card-") {
+                    card_store.settle_full(
+                        &billed_key,
+                        &model_clone,
+                        usage.input,
+                        usage.output,
+                        usage.cache_read,
+                        usage.cache_write,
+                    );
+                }
             }
             metrics.observe_ok(usage.total());
             ledger.record(billing::BillingRecord::build(
@@ -1661,15 +1823,18 @@ async fn inference_handler(
                         .and_then(|c| c.get("message"))
                         .and_then(|m| {
                             // 有 reasoning_content 或 tool_calls 也算非空
-                            let has_text = m.get("content")
+                            let has_text = m
+                                .get("content")
                                 .and_then(|c| c.as_str())
                                 .map(|s| !s.is_empty())
                                 .unwrap_or(false);
-                            let has_reasoning = m.get("reasoning_content")
+                            let has_reasoning = m
+                                .get("reasoning_content")
                                 .and_then(|c| c.as_str())
                                 .map(|s| !s.is_empty())
                                 .unwrap_or(false);
-                            let has_tools = m.get("tool_calls")
+                            let has_tools = m
+                                .get("tool_calls")
                                 .and_then(|c| c.as_array())
                                 .map(|a| !a.is_empty())
                                 .unwrap_or(false);
@@ -1688,11 +1853,13 @@ async fn inference_handler(
                             !blocks.iter().any(|b| {
                                 let ty = b.get("type").and_then(|v| v.as_str()).unwrap_or("");
                                 match ty {
-                                    "thinking" => b.get("thinking")
+                                    "thinking" => b
+                                        .get("thinking")
                                         .and_then(|v| v.as_str())
                                         .map(|s| !s.is_empty())
                                         .unwrap_or(false),
-                                    "text" => b.get("text")
+                                    "text" => b
+                                        .get("text")
                                         .and_then(|v| v.as_str())
                                         .map(|s| !s.is_empty())
                                         .unwrap_or(false),
@@ -1760,6 +1927,17 @@ async fn inference_handler(
                 state.log_buffer.push_with_line(log_entry, line);
                 if !used_key.is_empty() {
                     state.key_usage.add(&used_key, usage.total());
+                    // 套餐卡记账 (非流式)
+                    if used_key.starts_with("card-") {
+                        state.card_store.settle_full(
+                            &used_key,
+                            &model,
+                            usage.input,
+                            usage.output,
+                            usage.cache_read,
+                            usage.cache_write,
+                        );
+                    }
                 }
                 state.metrics.observe_ok(usage.total());
                 state.ledger.record(billing::BillingRecord::build(
@@ -1820,7 +1998,10 @@ mod stream_error_frame_tests {
             serde_json::from_str(first.trim_start_matches("data: ")).unwrap();
         // openai SDK: 顶层 `error` 键 → APIError, 不会被当成正常 stop
         assert_eq!(v["error"]["code"], "upstream_stream_error");
-        assert!(v["error"]["message"].as_str().unwrap().contains("Provider Error"));
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Provider Error"));
         assert!(s.ends_with("data: [DONE]\n\n"));
         assert!(!s.contains("finish_reason"));
     }

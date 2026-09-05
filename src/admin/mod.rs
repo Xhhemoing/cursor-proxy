@@ -4,6 +4,7 @@
 
 pub mod accounts;
 pub mod billing;
+pub mod cards;
 pub mod events;
 pub mod health_api;
 pub mod keys;
@@ -20,6 +21,7 @@ pub async fn admin_page() -> impl IntoResponse {
 // Re-export 便于 main.rs 路由注册
 pub use accounts::*;
 pub use billing::*;
+pub use cards::*;
 pub use events::*;
 pub use health_api::*;
 pub use keys::*;
