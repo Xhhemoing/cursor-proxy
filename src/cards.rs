@@ -42,17 +42,14 @@ static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
     ("gpt-5.4-pro", (30.00, 180.00, 3.00, 0.00)),
     ("gpt-5.6-cyber", (12.50, 75.00, 1.25, 15.62)),
     ("claude-fable-5", (10.00, 50.00, 1.00, 12.50)),
-    ("fable-5", (10.00, 50.00, 1.00, 12.50)),
     ("claude-opus-5", (5.00, 25.00, 0.50, 6.25)),
     ("claude-opus-4", (5.00, 25.00, 0.50, 6.25)),
-    ("opus-5", (5.00, 25.00, 0.50, 6.25)),
     ("gpt-5.6-sol", (4.00, 20.00, 0.40, 5.00)),
     ("gpt-5.6", (4.00, 20.00, 0.40, 5.00)),
     ("gpt-5.6-terra", (2.00, 12.00, 0.20, 2.50)),
     ("gpt-5.6-luna", (0.20, 1.20, 0.02, 0.25)),
     ("claude-sonnet-4", (3.00, 15.00, 0.30, 3.75)),
     ("claude-sonnet-5", (2.00, 10.00, 0.20, 2.50)),
-    ("sonnet-5", (2.00, 10.00, 0.20, 2.50)),
     ("kimi-k3", (3.00, 15.00, 0.30, 0.00)),
     ("kimi-k2", (0.95, 4.00, 0.19, 0.00)),
     ("gpt-5.4", (2.50, 15.00, 0.25, 0.00)),
@@ -64,6 +61,9 @@ static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
     ("grok-4.6", (2.00, 6.00, 0.50, 0.00)),
     ("cursor-grok-4.6", (2.00, 6.00, 0.50, 0.00)),
 ];
+// 注: 纯别名行 (fable-5 / opus-5 / sonnet-5 / claude-opus-4 的 opus-5 等) 已从内置表删除 —
+// 它们上游不存在, 留在表里会被 candidate_models 列进「模型」页当幽灵. 计价不受影响:
+// model_price 走最长前缀匹配, "fable-5" 请求仍命中 "claude-fable-5" 的价格.
 /// 内置表导出 (面板「恢复默认」/「导入内置」用): (model, in, out, cr, cw, tier)
 pub fn builtin_table() -> Vec<(String, f64, f64, f64, f64, &'static str)> {
     PREMIUM_PRICES
@@ -738,6 +738,9 @@ pub struct CardStore {
     ledger: Option<std::sync::Mutex<rusqlite::Connection>>,
     /// 测试用: 覆盖 B8 排队超时
     lane_wait_override: Option<std::time::Duration>,
+    /// 上游 AvailableModels 最近一次拉到的模型名 (可见性判定的「上游确认」来源).
+    /// 由 /admin/api/models/upstream 拉取后写入; 重启为空 = 只列注册表条目.
+    upstream: std::sync::RwLock<Vec<String>>,
 }
 
 impl CardStore {
@@ -753,9 +756,20 @@ impl CardStore {
             path,
             ledger,
             lane_wait_override: None,
+            upstream: std::sync::RwLock::new(vec![]),
         };
         store.load();
         store
+    }
+
+    /// 上游模型名单 (可见性判定用); /admin/api/models/upstream 拉取后更新
+    pub fn set_upstream_names(&self, names: Vec<String>) {
+        if let Ok(mut g) = self.upstream.write() {
+            *g = names;
+        }
+    }
+    pub fn upstream_names(&self) -> Vec<String> {
+        self.upstream.read().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// 打开/建表 cards.db. 失败返回 None (调用方退回 JSON 全量写).
@@ -961,13 +975,16 @@ impl CardStore {
         self.plans.iter().map(|r| r.clone()).collect()
     }
 
-    /// 该套餐当前实际可调的模型 (tier/组/前缀三合一 + 全局停用过滤).
-    /// 候选 = 注册表 ∪ 内置表 ∪ 账本出现过的模型; extra_seen 传 seen_models 结果.
+    /// 该套餐当前实际可调的模型 (tier/组/前缀三合一 + 全局停用/可见性过滤).
+    /// 候选 = 注册表 ∪ 内置表 ∪ 上游确认 ∪ 账本出现过的模型.
+    /// 可见性: 注册表条目看 enabled; 非注册表模型须上游确认 (upstream 名单或变体后缀收敛).
     pub fn plan_models(&self, plan: &CardPlan, extra_seen: &[String]) -> Vec<Value> {
-        crate::models::candidate_models(extra_seen)
+        let upstream = self.upstream_names();
+        crate::models::candidate_models_extra(&upstream, extra_seen)
             .into_iter()
             .filter_map(|(m, manual)| {
                 let enabled = !crate::models::registry().is_disabled(&m);
+                let visible = crate::models::registry().is_visible(&m, &upstream);
                 let allowed = crate::models::plan_allows_model(
                     &plan.tier,
                     &plan.model_groups,
@@ -975,7 +992,7 @@ impl CardStore {
                     &m,
                 )
                 .is_ok();
-                if !enabled || !allowed {
+                if !enabled || !visible || !allowed {
                     return None;
                 }
                 let (i, o, c, w) = model_price(&m);
@@ -2091,10 +2108,17 @@ mod tests {
         let _ = crate::models::registry().delete_group("test-pam");
     }
 
-    /// plan_models: 候选全集过闸门 + 全局停用过滤
+    /// plan_models: 候选全集过闸门 + 全局停用/可见性过滤
     #[test]
     fn plan_models_respects_gate_and_disabled() {
         let s = store();
+        // 可见性: 非注册表模型须上游确认 —— 测试里把 kimi-k3* 登记为「上游已确认」
+        s.set_upstream_names(vec![
+            "kimi-k3".into(),
+            "kimi-k3-low".into(),
+            "kimi-k3-high".into(),
+            "kimi-k3-max".into(),
+        ]);
         let mut p = plan("pm");
         p.model_prefixes = vec!["kimi-".into()];
         let names: Vec<String> = s
@@ -2102,8 +2126,10 @@ mod tests {
             .iter()
             .filter_map(|v| v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string()))
             .collect();
-        assert!(!names.is_empty(), "builtin kimi models should be listed");
+        assert!(!names.is_empty(), "upstream-confirmed kimi models should be listed");
         assert!(names.iter().all(|m| m.starts_with("kimi-")), "prefix gate leaked: {:?}", names);
+        // 未上游确认的内置别名 (kimi-k2 不在 upstream 名单) 不出现
+        assert!(!names.iter().any(|m| m == "kimi-k2"), "unconfirmed builtin alias listed");
         // 全局停用后从清单消失
         crate::models::registry()
             .upsert_model(crate::models::ModelEntry {

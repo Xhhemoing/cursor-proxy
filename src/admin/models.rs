@@ -407,8 +407,10 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
         Ok(v) => {
             let names = extract_model_names(&v);
             let reg = registry();
-            // 已在注册表的条目置 upstream=true (不新建行, 避免变体名稀释前缀匹配)
+            // 已在注册表的条目置 upstream=true (不新建行, 避免变体名稀释最长前缀匹配)
             let (marked, _) = reg.mark_upstream(&names).unwrap_or((0, vec![]));
+            // 名单交给 CardStore: /v1/models 与套餐可调清单的「上游确认」来源
+            state.card_store.set_upstream_names(names.clone());
             let rows: Vec<Value> = names
                 .iter()
                 .map(|m| {

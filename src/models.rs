@@ -71,6 +71,31 @@ pub fn pattern_matches(pattern: &str, model: &str) -> bool {
     }
 }
 
+/// 剥掉一层官方变体后缀; 没有可剥的返回原名.
+/// 顺序敏感: 先剥 -fast, 再剥思考档, 再剥 -thinking (claude-opus-5-thinking-max-fast 需三轮).
+pub fn strip_variant_suffix(model: &str) -> &str {
+    const SUFFIXES: &[&str] = &[
+        "-fast",
+        "-low",
+        "-medium",
+        "-high",
+        "-xhigh",
+        "-max",
+        "-none",
+        "-minimal",
+        "-extra-high",
+        "-thinking",
+    ];
+    for s in SUFFIXES {
+        if let Some(base) = model.strip_suffix(s) {
+            if !base.is_empty() {
+                return base;
+            }
+        }
+    }
+    model
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RegistryData {
     #[serde(default)]
@@ -269,6 +294,37 @@ impl ModelRegistry {
     pub fn is_disabled(&self, model: &str) -> bool {
         self.lookup(model).map_or(false, |e| !e.enabled)
     }
+
+    /// 模型是否对客户端可见 (进 /v1/models 与套餐可调清单).
+    /// 规则: 注册表条目看自己的 enabled; 非注册表模型要求「上游确认过」——
+    /// 上游 AvailableModels 拉到的名字直接可见, 或能剥掉官方变体后缀
+    /// (-low/-medium/-high/-xhigh/-max/-none/-minimal/-extra-high/-thinking[-*]/-fast)
+    /// 落到一个可见名上. 内置表里的纯别名 (fable-5/opus-5/gpt-5/gemini-3/glm-5/kimi-k2…)
+    /// 上游根本不存在, 不再出现在列表里.
+    pub fn is_visible(&self, model: &str, upstream: &[String]) -> bool {
+        let d = self.data.load();
+        if let Some(e) = d.models.iter().find(|e| e.model == model) {
+            return e.enabled;
+        }
+        if upstream.iter().any(|u| u == model) {
+            return true;
+        }
+        // 剥变体后缀, 逐级向可见名收敛 (如 claude-opus-5-thinking-max-fast → …→ claude-opus-5)
+        let mut m = model;
+        loop {
+            let stripped = strip_variant_suffix(m);
+            if stripped == m {
+                return false;
+            }
+            m = stripped;
+            if upstream.iter().any(|u| u == m) {
+                return true;
+            }
+            if let Some(e) = d.models.iter().find(|e| e.model == m) {
+                return e.enabled;
+            }
+        }
+    }
 }
 
 /// 拒绝原因 (供 main.rs 组装 403 文案)
@@ -311,14 +367,23 @@ pub fn plan_allows_model(
 /// 候选模型全集: 注册表 ∪ 内置表 ∪ 额外名 (如账本 seen).
 /// 每项 (模型名, 是否注册表手动条目). 注册表同名优先 (带 enabled/tier 等手动设定).
 pub fn candidate_models(extra: &[String]) -> Vec<(String, bool)> {
+    candidate_models_extra(&[], extra)
+}
+
+/// 同 candidate_models, 额外并入上游确认名单 (upstream).
+pub fn candidate_models_extra(upstream: &[String], extra: &[String]) -> Vec<(String, bool)> {
     let snap = registry().snapshot();
-    let mut out: Vec<(String, bool)> = snap.models.iter().map(|e| (e.model.clone(), true)).collect();
+    let mut out: Vec<(String, bool)> = snap
+        .models
+        .iter()
+        .map(|e| (e.model.clone(), true))
+        .collect();
     for (m, ..) in crate::cards::builtin_table() {
         if !out.iter().any(|(n, _)| *n == m) {
             out.push((m, false));
         }
     }
-    for m in extra {
+    for m in upstream.iter().chain(extra.iter()) {
         if !out.iter().any(|(n, _)| n == m) {
             out.push((m.clone(), false));
         }
@@ -356,6 +421,38 @@ mod tests {
         assert!(pattern_matches("kimi-k3-high", "kimi-k3-high"));
         assert!(!pattern_matches("kimi-k3-high", "kimi-k3-high-fast"));
         assert!(!pattern_matches("", "x"));
+    }
+
+    #[test]
+    fn strip_suffix_chains() {
+        assert_eq!(strip_variant_suffix("claude-opus-5-thinking-max-fast"), "claude-opus-5-thinking-max");
+        assert_eq!(strip_variant_suffix("claude-opus-5-thinking-max"), "claude-opus-5-thinking");
+        assert_eq!(strip_variant_suffix("claude-opus-5-thinking"), "claude-opus-5");
+        assert_eq!(strip_variant_suffix("claude-opus-5"), "claude-opus-5");
+        assert_eq!(strip_variant_suffix("gpt-5.6-sol-none-fast"), "gpt-5.6-sol-none");
+        assert_eq!(strip_variant_suffix("kimi-k3"), "kimi-k3");
+    }
+
+    #[test]
+    fn visibility_rules() {
+        let r = reg();
+        let up = vec!["kimi-k3-low".to_string(), "claude-opus-5-low".to_string()];
+        // 上游名单直接可见
+        assert!(r.is_visible("kimi-k3-low", &up));
+        // 变体收敛: claude-opus-5-thinking-max-fast → … → claude-opus-5-low 不在, 但中途无命中 → 不可见
+        assert!(!r.is_visible("claude-opus-5-thinking-max-fast", &up));
+        // 上游有 kimi-k3-low → kimi-k3-low-fast 剥 -fast 命中 → 可见
+        assert!(r.is_visible("kimi-k3-low-fast", &up));
+        // 纯别名 (上游不存在) 不可见
+        assert!(!r.is_visible("fable-5", &up));
+        assert!(!r.is_visible("gpt-5", &up));
+        // 注册表条目看 enabled
+        r.upsert_model(entry("my-custom", 1.0, 2.0, "")).unwrap();
+        assert!(r.is_visible("my-custom", &[]));
+        let mut e = entry("my-custom", 1.0, 2.0, "");
+        e.enabled = false;
+        r.upsert_model(e).unwrap();
+        assert!(!r.is_visible("my-custom", &[]));
     }
 
     #[test]

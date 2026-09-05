@@ -876,8 +876,10 @@ async fn models_handler(
     let config = state.config.load();
     let _used_key = check_auth(&headers, &config)?;
     let created = chrono::Utc::now().timestamp();
-    // 动态列表: 注册表 ∪ 内置表 ∪ 账本出现过的模型; 全局停用 (enabled=false) 的不列出.
-    // 之前是硬编码 4 个 kimi —— 面板里配了价格的模型在 bot 的模型选择器里根本看不到.
+    // 动态列表: 注册表(enabled) ∪ 内置表 ∪ 上游确认 ∪ 账本 seen, 过可见性闸门.
+    // 可见性: 注册表条目看 enabled; 非注册表模型须上游确认 (拉过 AvailableModels 或变体后缀收敛)
+    // —— 内置表里的纯别名 (fable-5/opus-5/gpt-5/gemini-3/glm-5/kimi-k2…) 上游不存在, 不再列出.
+    let upstream = state.card_store.upstream_names();
     let mut ids: Vec<String> = vec![];
     let mut push = |id: String| {
         if !ids.iter().any(|x| *x == id) {
@@ -885,6 +887,9 @@ async fn models_handler(
         }
     };
     push(config.default_model.clone());
+    // kimi-k3 是网关侧别名 (auto_select_kimi_model 按请求特征映射到 max/high/low), 上游不存在
+    // 同名模型但客户端习惯了这个入口, 始终保留.
+    push("kimi-k3".to_string());
     let reg = models::registry();
     let snap = reg.snapshot();
     for e in &snap.models {
@@ -893,12 +898,17 @@ async fn models_handler(
         }
     }
     for (m, ..) in cards::builtin_table() {
-        if !reg.is_disabled(&m) {
+        if reg.is_visible(&m, &upstream) {
             push(m);
         }
     }
+    for m in upstream.iter() {
+        if reg.is_visible(m, &upstream) {
+            push(m.clone());
+        }
+    }
     for (m, _) in admin::seen_models(&state) {
-        if !reg.is_disabled(&m) {
+        if reg.is_visible(&m, &upstream) {
             push(m);
         }
     }
