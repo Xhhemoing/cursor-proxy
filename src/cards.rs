@@ -153,6 +153,41 @@ pub fn estimate_quota_cost_full(
 
 // ─────────────────────────── 成本模型 (利润报表用) ───────────────────────────
 
+/// B1: 估算请求体的输入 token 数 (定额卡预扣用). 递归遍历所有字符串值
+/// (messages / system / tools / input …), CJK ≈ 1 tok/字, ASCII ≈ 0.25 tok/字,
+/// 与 `TokenPacer::estimate_tokens` 同一口径; 另加每条 message ~4 tok 结构开销.
+pub fn estimate_request_input_tokens(body: &Value) -> u64 {
+    fn walk(v: &Value, est: &mut f64) {
+        match v {
+            Value::String(s) => {
+                for c in s.chars() {
+                    *est += if c.is_ascii() { 0.25 } else { 1.0 };
+                }
+            }
+            Value::Array(a) => {
+                for x in a {
+                    walk(x, est);
+                }
+            }
+            Value::Object(o) => {
+                *est += 4.0;
+                for (_, x) in o {
+                    walk(x, est);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut est = 0.0f64;
+    // 只数会送上游的内容字段; 跳过 model/stream/temperature 等标量本来就不计
+    for key in ["messages", "system", "tools", "input", "instructions", "prompt"] {
+        if let Some(v) = body.get(key) {
+            walk(v, &mut est);
+        }
+    }
+    est.round() as u64
+}
+
 /// 订阅成本模型: 把「烧掉的官方面值 $」折成真实人民币成本.
 /// Grok Heavy: ¥130/号, 高级额度 $1000/周重置, 号只用 2 周 → ¥130 / $2000 = ¥0.065/面值$.
 /// 可在 admin 调整 (号价涨/用满 4 周 等).
@@ -641,6 +676,14 @@ pub struct CardRuntime {
     pub rpm: RpmBucket,
     /// 行为信号
     pub behavior: BehaviorSignals,
+    /// B8: 并发车道释放通知 — 等待者 FIFO 排队而非自旋/立即 429
+    pub lane_freed: tokio::sync::Notify,
+    /// B7: 每卡共享的匀速器 — 该卡所有并发流喂同一个桶, 卡总输出 ≤ pace_tps
+    /// (之前每请求各建一个桶, N 并发实际放出 N × pace, 限速形同虚设)
+    pub pacer: std::sync::Mutex<Option<TokenPacer>>,
+    /// B1: 定额卡在途预扣 (micro-$): 已 acquire 未 settle 的请求按估算预占余额,
+    /// 防止并发 N 个大请求同时通过「余额 > 0」检查后集体透支
+    pub hold_micro: AtomicU64,
 }
 
 /// 简易 RPM 桶: 固定窗口 60s
@@ -690,20 +733,126 @@ pub struct CardStore {
     cost_model: std::sync::RwLock<CostModel>,
     tz_offset_minutes: i32,
     path: std::path::PathBuf,
+    /// B4: 定额卡余额账本 (cards.db, SQLite WAL). 热路径只写这一行, 不再每请求全量重写 cards.json.
+    /// None = 打不开 DB (只读文件系统等), 退回 cards.json 全量写 (慢但不丢账).
+    ledger: Option<std::sync::Mutex<rusqlite::Connection>>,
+    /// 测试用: 覆盖 B8 排队超时
+    lane_wait_override: Option<std::time::Duration>,
 }
 
 impl CardStore {
     pub fn open(path: impl AsRef<std::path::Path>, tz_offset_minutes: i32) -> Self {
+        let path = path.as_ref().to_path_buf();
+        let ledger = Self::open_ledger(&path.with_extension("db"));
         let store = Self {
             plans: DashMap::new(),
             cards: DashMap::new(),
             runtimes: DashMap::new(),
             cost_model: std::sync::RwLock::new(CostModel::default()),
             tz_offset_minutes,
-            path: path.as_ref().to_path_buf(),
+            path,
+            ledger,
+            lane_wait_override: None,
         };
         store.load();
         store
+    }
+
+    /// 打开/建表 cards.db. 失败返回 None (调用方退回 JSON 全量写).
+    fn open_ledger(db_path: &std::path::Path) -> Option<std::sync::Mutex<rusqlite::Connection>> {
+        let conn = match rusqlite::Connection::open(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(event = "card_ledger_open", error = %e, path = %db_path.display(), "cards.db open failed; falling back to cards.json writes");
+                return None;
+            }
+        };
+        let init = conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE IF NOT EXISTS card_face_used (
+                 card_key TEXT PRIMARY KEY,
+                 face_used_micro INTEGER NOT NULL DEFAULT 0,
+                 updated_at INTEGER NOT NULL DEFAULT 0
+             );",
+        );
+        if let Err(e) = init {
+            tracing::warn!(event = "card_ledger_init", error = %e, "cards.db schema init failed; falling back to cards.json writes");
+            return None;
+        }
+        Some(std::sync::Mutex::new(conn))
+    }
+
+    /// B4: 定额卡扣款热路径 — 只 upsert 一行. 返回 true = 已落库 (无需再写 JSON).
+    fn ledger_add_face_used(&self, key: &str, add_micro: u64, new_total_micro: u64) -> bool {
+        let Some(m) = self.ledger.as_ref() else {
+            return false;
+        };
+        let Ok(conn) = m.lock() else {
+            return false;
+        };
+        let now = now_unix() as i64;
+        // 写「累加后的总额」而不是 +=: 内存里 cards[key].face_used_micro 已是权威值,
+        // DB 只是它的持久副本, 避免 DB 与内存因并发累加顺序不同而分叉.
+        let r = conn.execute(
+            "INSERT INTO card_face_used (card_key, face_used_micro, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(card_key) DO UPDATE SET face_used_micro = excluded.face_used_micro, updated_at = excluded.updated_at",
+            rusqlite::params![key, new_total_micro as i64, now],
+        );
+        match r {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(event = "card_ledger_write", error = %e, card = %key, add_micro, "cards.db write failed; falling back to cards.json");
+                false
+            }
+        }
+    }
+
+    /// 启动时: 用 cards.db 覆盖 cards.json 里的 face_used_micro (DB 是权威; JSON 里的是旧版遗留/兜底).
+    /// 反向: DB 没有但 JSON 有 (从旧版本升级) → 一次性写进 DB.
+    fn ledger_sync_on_load(&self) {
+        let Some(m) = self.ledger.as_ref() else {
+            return;
+        };
+        let Ok(conn) = m.lock() else {
+            return;
+        };
+        let mut from_db = std::collections::HashMap::<String, u64>::new();
+        if let Ok(mut st) = conn.prepare("SELECT card_key, face_used_micro FROM card_face_used") {
+            if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+                for (k, v) in rows.flatten() {
+                    from_db.insert(k, v.max(0) as u64);
+                }
+            }
+        }
+        let now = now_unix() as i64;
+        let mut migrated = 0usize;
+        for mut c in self.cards.iter_mut() {
+            match from_db.get(c.key()) {
+                Some(&db_val) => {
+                    // DB 权威. 但若 JSON 值更大 (DB 曾写失败退回 JSON), 取 max 不少收
+                    let v = db_val.max(c.face_used_micro);
+                    c.face_used_micro = v;
+                    if v != db_val {
+                        let _ = conn.execute(
+                            "UPDATE card_face_used SET face_used_micro=?2, updated_at=?3 WHERE card_key=?1",
+                            rusqlite::params![c.key(), v as i64, now],
+                        );
+                    }
+                }
+                None if c.face_used_micro > 0 => {
+                    let _ = conn.execute(
+                        "INSERT OR REPLACE INTO card_face_used (card_key, face_used_micro, updated_at) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![c.key(), c.face_used_micro as i64, now],
+                    );
+                    migrated += 1;
+                }
+                None => {}
+            }
+        }
+        if migrated > 0 {
+            tracing::info!(event = "card_ledger_migrate", migrated, "migrated face_used from cards.json into cards.db");
+        }
     }
 
     pub fn cost_model(&self) -> CostModel {
@@ -767,10 +916,13 @@ impl CardStore {
                 }
             }
         }
+        // B4: cards.db 里的 face_used 是权威, 覆盖/迁移 JSON 值
+        self.ledger_sync_on_load();
         tracing::info!(
             event = "card_load",
             plans = self.plans.len(),
             cards = self.cards.len(),
+            ledger = self.ledger.is_some(),
             "card store loaded"
         );
     }
@@ -859,6 +1011,12 @@ impl CardStore {
         let ok = self.cards.remove(key).is_some();
         self.runtimes.remove(key);
         if ok {
+            if let Some(Ok(conn)) = self.ledger.as_ref().map(|m| m.lock()) {
+                let _ = conn.execute(
+                    "DELETE FROM card_face_used WHERE card_key = ?1",
+                    rusqlite::params![key],
+                );
+            }
             self.save();
         }
         ok
@@ -889,6 +1047,9 @@ impl CardStore {
                     day_start: AtomicU64::new(0),
                     rpm: RpmBucket::new(),
                     behavior: BehaviorSignals::new(),
+                    lane_freed: tokio::sync::Notify::new(),
+                    pacer: std::sync::Mutex::new(None),
+                    hold_micro: AtomicU64::new(0),
                 })
             })
             .clone()
@@ -955,13 +1116,164 @@ impl CardStore {
 
     // ── 请求路径: 准入 + 并发令牌 ──
 
+    /// 等待空闲车道的最长时间 (B8): 超时才 429. 期间不占 CPU, FIFO 唤醒.
+    /// 对真人: 高峰期多等几秒; 对脚本: 无法靠高频重试抢车道 (每次都排到队尾).
+    pub const LANE_WAIT_SECS: u64 = 30;
+
+    /// 实际等待时长 (测试可缩短)
+    fn lane_wait(&self) -> std::time::Duration {
+        self.lane_wait_override
+            .unwrap_or(std::time::Duration::from_secs(Self::LANE_WAIT_SECS))
+    }
+
+    /// 测试用: 缩短排队超时 (仅本 store 实例)
+    #[cfg(test)]
+    pub fn set_lane_wait(&mut self, d: std::time::Duration) {
+        self.lane_wait_override = Some(d);
+    }
+
     /// 校验卡 + 拿并发令牌。Ok 返回 (卡, 套餐, 令牌, 档位)。
     /// Err 返回 (HTTP 状态码, 错误信息)。
-    pub fn acquire(
+    ///
+    /// `est_input_tok`: 请求体估算输入 token 数 (B1 预扣用), 0 = 未知按保守默认.
+    /// 车道满时异步排队最多 `LANE_WAIT_SECS` 秒 (B8), 而不是自旋 3 次就 429.
+    pub async fn acquire(
+        &self,
+        key: &str,
+        model: &str,
+        est_input_tok: u64,
+    ) -> Result<(Card, CardPlan, CardPermit, Throttle), (u16, String)> {
+        let (card, plan, rt, throttle, cap, hold) = self.admit(key, model, est_input_tok)?;
+        // 并发闸门: 先试一次, 满则排队等释放通知 (Notify 是 FIFO 的)
+        let deadline = tokio::time::Instant::now() + self.lane_wait();
+        loop {
+            if Self::try_take_lane(&rt, cap) {
+                break;
+            }
+            let notified = rt.lane_freed.notified();
+            // 拿到 notified future 后再复查一次, 避免释放发生在 check 与 await 之间而漏唤醒
+            if Self::try_take_lane(&rt, cap) {
+                break;
+            }
+            match tokio::time::timeout_at(deadline, notified).await {
+                Ok(()) => continue,
+                Err(_) => {
+                    rt.day_count.fetch_sub(1, Ordering::Relaxed);
+                    rt.hold_micro.fetch_sub(hold, Ordering::Relaxed);
+                    return Err((
+                        429,
+                        format!(
+                            "card concurrency limit exceeded (max {}, waited {:.0}s)",
+                            cap,
+                            self.lane_wait().as_secs_f64()
+                        ),
+                    ));
+                }
+            }
+        }
+        let pace_tps = Self::pace_for(&plan, throttle);
+        // B7: 档位变化时重置该卡共享桶的速率 (同卡多流共用一个桶)
+        if let Ok(mut g) = rt.pacer.lock() {
+            match (&mut *g, pace_tps) {
+                (_, 0) => *g = None,
+                (Some(p), tps) if (p.tps - tps as f64).abs() < f64::EPSILON => {}
+                (slot, tps) => *slot = TokenPacer::new(tps),
+            }
+        }
+        Ok((
+            card,
+            plan,
+            CardPermit {
+                rt,
+                throttle,
+                pace_tps,
+                model: model.to_string(),
+                key: key.to_string(),
+                hold_micro: hold,
+                settled: false,
+            },
+            throttle,
+        ))
+    }
+
+    /// 同步版 acquire (单测/非 async 上下文): 车道满立即 429, 不排队.
+    #[cfg(test)]
+    pub fn acquire_now(
         &self,
         key: &str,
         model: &str,
     ) -> Result<(Card, CardPlan, CardPermit, Throttle), (u16, String)> {
+        let (card, plan, rt, throttle, cap, hold) = self.admit(key, model, 0)?;
+        if !Self::try_take_lane(&rt, cap) {
+            rt.day_count.fetch_sub(1, Ordering::Relaxed);
+            rt.hold_micro.fetch_sub(hold, Ordering::Relaxed);
+            return Err((
+                429,
+                format!("card concurrency limit exceeded (max {})", cap),
+            ));
+        }
+        let pace_tps = Self::pace_for(&plan, throttle);
+        Ok((
+            card,
+            plan,
+            CardPermit {
+                rt,
+                throttle,
+                pace_tps,
+                model: model.to_string(),
+                key: key.to_string(),
+                hold_micro: hold,
+                settled: false,
+            },
+            throttle,
+        ))
+    }
+
+    fn try_take_lane(rt: &CardRuntime, cap: u32) -> bool {
+        let cap = cap as u64;
+        loop {
+            let cur = rt.in_flight.load(Ordering::Acquire);
+            if cur >= cap {
+                return false;
+            }
+            if rt
+                .in_flight
+                .compare_exchange(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn pace_for(plan: &CardPlan, throttle: Throttle) -> u32 {
+        match throttle {
+            Throttle::Normal => plan.pace_normal_tps,
+            Throttle::Soften => plan.pace_soften_tps,
+            Throttle::Degraded => plan.pace_degraded_tps,
+        }
+    }
+
+    /// B1: 单请求预扣估算 (micro-$). 输入按估算 token 计, 输出按 2k 保守估; 未知输入按保守默认.
+    fn hold_estimate_micro(model: &str, est_input_tok: u64) -> u64 {
+        let usd = if est_input_tok == 0 {
+            estimate_quota_cost(model, 0, 0, 0)
+        } else {
+            // 预扣不算缓存命中 (无法预知), 输入全按 input 价; 输出保守 2k
+            estimate_quota_cost(model, est_input_tok, 2_000, 0)
+        };
+        (usd * 1e6) as u64
+    }
+
+    /// 准入检查 (不含并发闸门): 卡/套餐状态、余额 (含在途预扣)、模型门禁、RPM、档位.
+    /// 成功时 day_count 已 +1、hold 已加到 hold_micro —— 调用方拿不到车道必须回滚这两项.
+    #[allow(clippy::type_complexity)]
+    fn admit(
+        &self,
+        key: &str,
+        model: &str,
+        est_input_tok: u64,
+    ) -> Result<(Card, CardPlan, Arc<CardRuntime>, Throttle, u32, u64), (u16, String)> {
         let now = now_unix();
         let card = self
             .get_card(key)
@@ -978,19 +1290,31 @@ impl CardStore {
         if !plan.enabled {
             return Err((403, "plan disabled".into()));
         }
-        // 定额卡: 余额用尽 → 402
+        let rt = self.runtime(key);
+        // 定额卡: 余额 (扣除在途预扣) 用尽 → 402. 这是 B1 的核心: 并发 N 个请求同时到达时,
+        // 每个都能看到前面请求的预扣, 不会集体通过「余额 > 0」检查后透支.
+        let mut hold = 0u64;
         if plan.kind == PlanKind::Quota {
             let face_micro = (plan.face_usd * 1e6) as u64;
-            if card.face_used_micro >= face_micro {
+            let in_flight_hold = rt.hold_micro.load(Ordering::Relaxed);
+            let committed = card.face_used_micro.saturating_add(in_flight_hold);
+            if committed >= face_micro {
                 return Err((
                     402,
                     format!(
-                        "card quota exhausted (${:.2} / ${:.2})",
+                        "card quota exhausted (${:.2} / ${:.2}{})",
                         card.face_used_micro as f64 / 1e6,
-                        plan.face_usd
+                        plan.face_usd,
+                        if in_flight_hold > 0 {
+                            format!(", ${:.2} in flight", in_flight_hold as f64 / 1e6)
+                        } else {
+                            String::new()
+                        }
                     ),
                 ));
             }
+            // 预扣额不超过剩余余额 (最后一笔允许把余额烧到 0, 不因估算偏大而拒绝)
+            hold = Self::hold_estimate_micro(model, est_input_tok).min(face_micro - committed);
         }
         // 模型层级
         if !plan.tier.is_empty() && !tier_allows(&plan.tier, model) {
@@ -1031,7 +1355,6 @@ impl CardStore {
                 ),
             ));
         }
-        let rt = self.runtime(key);
         let ds = self.roll_day(&rt, now);
 
         // RPM 闸门 (先于计数, 拒绝时不污染当日计数)
@@ -1047,6 +1370,7 @@ impl CardStore {
         rt.behavior.on_arrive(now, ds);
         let (throttle, _load, _score) = self.eval_throttle(&plan, &rt, now);
         rt.day_count.fetch_add(1, Ordering::Relaxed);
+        rt.hold_micro.fetch_add(hold, Ordering::Relaxed);
 
         let conc_cap = match throttle {
             Throttle::Normal => plan.max_concurrency.max(1),
@@ -1055,50 +1379,7 @@ impl CardStore {
                 .max(1),
             Throttle::Degraded => plan.degraded_concurrency.max(1),
         };
-
-        // 并发闸门 (自旋等待短窗口, 超时拒绝)
-        let cap = conc_cap as u64;
-        let mut spins = 0u32;
-        loop {
-            let cur = rt.in_flight.load(Ordering::Relaxed);
-            if cur < cap {
-                if rt
-                    .in_flight
-                    .compare_exchange(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    break;
-                }
-            } else {
-                spins += 1;
-                if spins > 3 {
-                    rt.day_count.fetch_sub(1, Ordering::Relaxed);
-                    return Err((
-                        429,
-                        format!("card concurrency limit exceeded (max {})", cap),
-                    ));
-                }
-                std::thread::yield_now();
-            }
-        }
-
-        let pace_tps = match throttle {
-            Throttle::Normal => plan.pace_normal_tps,
-            Throttle::Soften => plan.pace_soften_tps,
-            Throttle::Degraded => plan.pace_degraded_tps,
-        };
-
-        Ok((
-            card,
-            plan,
-            CardPermit {
-                rt,
-                throttle,
-                pace_tps,
-                model: model.to_string(),
-            },
-            throttle,
-        ))
+        Ok((card, plan, rt, throttle, conc_cap, hold))
     }
 
     /// 请求完成后记账: 把实际 token 折算成官方口径额度累加到今日; 定额卡同时扣面值.
@@ -1123,10 +1404,6 @@ impl CardStore {
         cache_read_tok: u64,
         cache_write_tok: u64,
     ) -> f64 {
-        let rt = self.runtime(key);
-        let now = now_unix();
-        self.roll_day(&rt, now);
-        rt.behavior.on_done(now);
         let cost = estimate_quota_cost_full(
             model,
             input_tok,
@@ -1134,21 +1411,61 @@ impl CardStore {
             cache_read_tok,
             cache_write_tok,
         );
-        let micro = (cost * 1e6) as u64;
+        self.settle_usd(key, cost);
+        cost
+    }
+
+    /// 按已折算的美元结算 (B3: 中断路径用本地估算值调用). 幂等由调用方 (CardPermit) 保证.
+    fn settle_usd(&self, key: &str, cost_usd: f64) {
+        let rt = self.runtime(key);
+        let now = now_unix();
+        self.roll_day(&rt, now);
+        rt.behavior.on_done(now);
+        let micro = (cost_usd * 1e6) as u64;
         rt.day_quota_micro.fetch_add(micro, Ordering::Relaxed);
-        // 定额卡: 持久化扣面值
+        // 定额卡: 持久化扣面值. B4: 热路径只 upsert cards.db 一行; DB 不可用才退回全量写 JSON
         let is_quota = self
             .get_card(key)
             .and_then(|c| self.get_plan(&c.plan_id))
             .map(|p| p.kind == PlanKind::Quota)
             .unwrap_or(false);
         if is_quota {
-            if let Some(mut c) = self.cards.get_mut(key) {
+            let new_total = if let Some(mut c) = self.cards.get_mut(key) {
                 c.face_used_micro = c.face_used_micro.saturating_add(micro);
+                c.face_used_micro
+            } else {
+                return;
+            };
+            if !self.ledger_add_face_used(key, micro, new_total) {
+                self.save();
             }
-            self.save();
         }
-        cost
+    }
+
+    /// 通过令牌结算 (推荐入口): 释放预扣 + 记账, 幂等 (第二次调用无效).
+    /// 中断路径 (客户端断开/上游错误/超时) 也走这里, 传入本地估算的 usage —— 否则
+    /// 客户端可以在 usage 帧之前掐断连接白嫖 (B3).
+    pub fn settle_permit(
+        &self,
+        permit: &mut CardPermit,
+        input_tok: u64,
+        output_tok: u64,
+        cache_read_tok: u64,
+        cache_write_tok: u64,
+    ) -> f64 {
+        if permit.settled {
+            return 0.0;
+        }
+        permit.settled = true;
+        permit.release_hold();
+        self.settle_full(
+            &permit.key,
+            &permit.model,
+            input_tok,
+            output_tok,
+            cache_read_tok,
+            cache_write_tok,
+        )
     }
 
     /// 卡运行态快照 (管理面板)
@@ -1237,12 +1554,17 @@ impl Throttle {
     }
 }
 
-/// 并发令牌: Drop 时释放一个车道. 携带本请求的匀速目标.
+/// 并发令牌: Drop 时释放一个车道 (并唤醒一个排队者). 携带本请求的匀速目标.
 pub struct CardPermit {
     rt: Arc<CardRuntime>,
     throttle: Throttle,
     pace_tps: u32,
     model: String,
+    key: String,
+    /// B1: 本请求在 rt.hold_micro 里预占的 micro-$, 结算/丢弃时归还
+    hold_micro: u64,
+    /// 是否已结算 (幂等; 未结算就 Drop 说明调用方漏了 settle —— 仍归还 hold, 但记警告)
+    settled: bool,
 }
 
 impl CardPermit {
@@ -1255,23 +1577,64 @@ impl CardPermit {
     pub fn model(&self) -> &str {
         &self.model
     }
+    pub fn key(&self) -> &str {
+        &self.key
+    }
     /// 本请求输出匀速目标 (tok/s). 0 = 不限
     pub fn pace_tps(&self) -> u32 {
         self.pace_tps
+    }
+    /// B7: 向该卡的共享匀速桶放一帧 (估算 token 数), 返回调用方应 sleep 的时长.
+    /// 同卡所有并发流共用一个桶 → 卡总输出 ≤ pace_tps. pace=0 时恒 ZERO.
+    pub fn pace_admit(&self, tokens: f64) -> std::time::Duration {
+        if self.pace_tps == 0 || tokens <= 0.0 {
+            return std::time::Duration::ZERO;
+        }
+        match self.rt.pacer.lock() {
+            Ok(mut g) => match g.as_mut() {
+                Some(p) => p.admit(tokens),
+                None => std::time::Duration::ZERO,
+            },
+            Err(_) => std::time::Duration::ZERO,
+        }
+    }
+    fn release_hold(&mut self) {
+        if self.hold_micro > 0 {
+            // 用 fetch_update 防止并发下减到负数 (u64 下溢)
+            let h = self.hold_micro;
+            let _ = self.rt.hold_micro.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+                |cur| Some(cur.saturating_sub(h)),
+            );
+            self.hold_micro = 0;
+        }
     }
 }
 
 impl Drop for CardPermit {
     fn drop(&mut self) {
-        self.rt.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if !self.settled {
+            // 未经 settle_permit 的丢弃: 归还预扣 (余额不能被永久锁住).
+            // 正常路径不应走到这里 —— main.rs 的所有出口都必须 settle.
+            self.release_hold();
+            tracing::debug!(event = "card_permit_unsettled_drop", card = %self.key, "permit dropped without settle");
+        }
+        self.rt.in_flight.fetch_sub(1, Ordering::AcqRel);
+        // B8: 唤醒一个排队者 (Notify::notify_one 会存一个 permit, 即使此刻没人在等也不丢)
+        self.rt.lane_freed.notify_one();
     }
 }
 
 // ─────────────────────────── 匀速流出 (pacing) ───────────────────────────
 
 /// 令牌桶式匀速器: 把上游 34–48 tok/s 的突发流按 `tps` 节奏放给客户端.
-/// 帧内 token 数按字符估 (≈4 字符/token, 中文 ≈1.5 字符/token, 取 3). 只对流式生效.
+/// 帧内 token 数按字符估 (CJK ≈ 1 tok/字, ASCII ≈ 0.25 tok/字). 只对流式生效.
 /// 允许 burst = 1s 的量, 首帧不等待 (TTFT 不受影响).
+///
+/// B7: 每卡一个实例 (挂在 CardRuntime.pacer), 同卡多流共享 —— 不再每请求各建一个.
+/// 长时间空闲后 `sent` 会远低于 `allowed`, 相当于无限 burst; 用 `resync` 把基线拉回,
+/// 保证空闲重来时最多只有 1s 的 burst.
 pub struct TokenPacer {
     tps: f64,
     /// 已放出的 token 累计 (估算)
@@ -1342,9 +1705,16 @@ impl TokenPacer {
     pub fn admit(&mut self, tokens: f64) -> std::time::Duration {
         let now = std::time::Instant::now();
         let started = *self.started.get_or_insert(now);
+        let elapsed = now.duration_since(started).as_secs_f64();
+        // 空闲重同步 (B7 共享桶): 桶闲置越久 allowed 越大, 不收口的话一次空闲 60s 后可以
+        // 无等待放出 60×tps 个 token. 若当前欠量已为负 (放得少于配额), 把基线拉回到
+        // 「恰好还剩 1s burst」的位置.
+        let allowed_before = self.tps * (elapsed + 1.0);
+        if self.sent < allowed_before - self.tps {
+            self.sent = allowed_before - self.tps;
+        }
         self.sent += tokens;
         // 允许量 = 1s burst + tps × 已过时间
-        let elapsed = now.duration_since(started).as_secs_f64();
         let allowed = self.tps * (elapsed + 1.0);
         if self.sent <= allowed {
             std::time::Duration::ZERO
@@ -1392,11 +1762,268 @@ mod tests {
         let s = store();
         s.upsert_plan(plan("p1"));
         let c = s.issue_card("p1", "alice").unwrap();
-        let (_, pl, permit, throttle) = s.acquire(&c.card_key, "kimi-k3").unwrap();
+        let (_, pl, permit, throttle) = s.acquire_now(&c.card_key, "kimi-k3").unwrap();
         assert_eq!(pl.max_concurrency, 2);
         assert_eq!(throttle, Throttle::Normal);
         assert_eq!(permit.pace_tps(), 25);
         drop(permit);
+    }
+
+    /// B4: 定额卡扣款走 cards.db 写穿, 不再每请求全量重写 cards.json; 重开从 DB 恢复余额.
+    #[test]
+    fn quota_settle_writes_db_not_json() {
+        let s = store();
+        let mut p = plan("q4");
+        p.kind = PlanKind::Quota;
+        p.face_usd = 5.0;
+        p.fair_use_rpd = 0;
+        s.upsert_plan(p);
+        let c = s.issue_card("q4", "db").unwrap();
+        assert!(s.ledger.is_some(), "test store must open cards.db");
+        let json_path = s.path.clone();
+        let db_path = json_path.with_extension("db");
+        assert!(db_path.exists());
+        let json_before = std::fs::read_to_string(&json_path).unwrap();
+        // 10 次结算: JSON 不应变化 (只 issue 时写过一次), DB 应累加
+        for _ in 0..10 {
+            s.settle(&c.card_key, "claude-opus-5", 0, 0, 0); // $0.215 each
+        }
+        let json_after = std::fs::read_to_string(&json_path).unwrap();
+        assert_eq!(json_before, json_after, "settle must not rewrite cards.json when db is available");
+        assert_eq!(s.get_card(&c.card_key).unwrap().face_used_micro, 2_150_000);
+        // 直接查 DB
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let v: i64 = conn
+            .query_row(
+                "SELECT face_used_micro FROM card_face_used WHERE card_key=?1",
+                rusqlite::params![c.card_key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 2_150_000);
+        // 重开: JSON 里 face_used 还是 0 (从未重写), 但 DB 权威 → 恢复 2.15
+        drop(s);
+        let s2 = CardStore::open(&json_path, 480);
+        assert_eq!(s2.get_card(&c.card_key).unwrap().face_used_micro, 2_150_000);
+        // 删卡同时清 DB 行
+        assert!(s2.delete_card(&c.card_key));
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM card_face_used WHERE card_key=?1",
+                rusqlite::params![c.card_key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// B4: 从旧版升级 — JSON 里有 face_used 但 DB 没有 → 启动时迁入 DB; JSON 更大时取 max.
+    #[test]
+    fn quota_ledger_migrates_from_json_and_takes_max() {
+        let s = store();
+        let mut p = plan("q5");
+        p.kind = PlanKind::Quota;
+        p.face_usd = 5.0;
+        s.upsert_plan(p);
+        let c = s.issue_card("q5", "mig").unwrap();
+        let json_path = s.path.clone();
+        let db_path = json_path.with_extension("db");
+        drop(s);
+        // 模拟旧版: 手改 JSON 里的 face_used, 删掉 DB
+        let mut data: Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        data["cards"][0]["face_used_micro"] = json!(777_000);
+        std::fs::write(&json_path, serde_json::to_string_pretty(&data).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let s2 = CardStore::open(&json_path, 480);
+        assert_eq!(s2.get_card(&c.card_key).unwrap().face_used_micro, 777_000);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let v: i64 = conn
+            .query_row(
+                "SELECT face_used_micro FROM card_face_used WHERE card_key=?1",
+                rusqlite::params![c.card_key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 777_000, "must migrate json value into db");
+        // DB 比 JSON 小 (DB 曾写失败退回 JSON 写): 取 max
+        conn.execute(
+            "UPDATE card_face_used SET face_used_micro=100 WHERE card_key=?1",
+            rusqlite::params![c.card_key],
+        )
+        .unwrap();
+        drop(s2);
+        let s3 = CardStore::open(&json_path, 480);
+        assert_eq!(s3.get_card(&c.card_key).unwrap().face_used_micro, 777_000);
+    }
+
+    /// B1: 定额卡并发透支 — 余额只够一笔时, 第二笔并发请求必须被在途预扣挡住.
+    #[test]
+    fn quota_hold_blocks_concurrent_overdraft() {
+        let s = store();
+        let mut p = plan("qh");
+        p.kind = PlanKind::Quota;
+        p.face_usd = 0.3; // opus 默认估算单笔 $0.215
+        p.fair_use_rpd = 0;
+        p.max_concurrency = 4;
+        s.upsert_plan(p);
+        let c = s.issue_card("qh", "hold").unwrap();
+        // 第 1 笔: 余额 0.3 > 0, 放行并预扣 min(0.215, 0.3) = 0.215
+        let (_, _, mut g1, _) = s.acquire_now(&c.card_key, "claude-opus-5").unwrap();
+        let rt = s.runtime(&c.card_key);
+        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), 215_000);
+        // 第 2 笔: face_used(0) + hold(0.215) = 0.215 < 0.3 → 还能放, 预扣被夹到剩余 0.085
+        let (_, _, mut g2, _) = s.acquire_now(&c.card_key, "claude-opus-5").unwrap();
+        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), 300_000);
+        // 第 3 笔: committed = 0.3 ≥ 0.3 → 402, 且错误里带 in flight
+        match s.acquire_now(&c.card_key, "claude-opus-5") {
+            Ok(_) => panic!("3rd concurrent request must be blocked by in-flight hold"),
+            Err((code, msg)) => {
+                assert_eq!(code, 402);
+                assert!(msg.contains("in flight"), "{msg}");
+            }
+        }
+        // 结算第 1 笔 (真实 $0.215): hold 释放 0.215, face_used += 0.215
+        s.settle_permit(&mut g1, 0, 0, 0, 0);
+        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), 85_000);
+        assert_eq!(s.get_card(&c.card_key).unwrap().face_used_micro, 215_000);
+        // 幂等: 再结算一次无效
+        assert_eq!(s.settle_permit(&mut g1, 0, 0, 0, 0), 0.0);
+        assert_eq!(s.get_card(&c.card_key).unwrap().face_used_micro, 215_000);
+        // 第 2 笔实际只用了很少 (100 out tok = $0.0025): hold 全部归还, 只扣实际
+        s.settle_permit(&mut g2, 0, 100, 0, 0);
+        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), 0);
+        assert_eq!(s.get_card(&c.card_key).unwrap().face_used_micro, 217_500);
+        drop(g1);
+        drop(g2);
+        // 现在余额 0.0825 > 0 → 可以再来一笔
+        assert!(s.acquire_now(&c.card_key, "claude-opus-5").is_ok());
+    }
+
+    /// B1: 未结算就 Drop 的令牌必须归还预扣, 否则余额被永久锁死.
+    #[test]
+    fn unsettled_permit_drop_releases_hold() {
+        let s = store();
+        let mut p = plan("qd");
+        p.kind = PlanKind::Quota;
+        p.face_usd = 5.0;
+        p.fair_use_rpd = 0;
+        s.upsert_plan(p);
+        let c = s.issue_card("qd", "drop").unwrap();
+        let rt = s.runtime(&c.card_key);
+        {
+            let (_, _, _g, _) = s.acquire_now(&c.card_key, "claude-opus-5").unwrap();
+            assert!(rt.hold_micro.load(Ordering::Relaxed) > 0);
+        }
+        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), 0);
+        assert_eq!(rt.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(s.get_card(&c.card_key).unwrap().face_used_micro, 0);
+    }
+
+    /// B8: 车道满时排队等待, 释放后 FIFO 放行, 不再立即 429.
+    #[tokio::test]
+    async fn lane_wait_queues_then_proceeds() {
+        let s = Arc::new(store());
+        let mut p = plan("lq");
+        p.max_concurrency = 1;
+        p.fair_use_rpd = 0;
+        s.upsert_plan(p);
+        let c = s.issue_card("lq", "queue").unwrap();
+        let key = c.card_key.clone();
+        let (_, _, g1, _) = s.acquire(&key, "kimi-k3", 0).await.unwrap();
+        // 第二个请求在后台排队 (把 permit 一起带回, 否则在 task 里就 drop 了)
+        let s2 = s.clone();
+        let k2 = key.clone();
+        let waiter = tokio::spawn(async move {
+            s2.acquire(&k2, "kimi-k3", 0).await.map(|(_, _, g, t)| (g, t))
+        });
+        // 等 300ms (远小于 30s 超时), 排队者仍在等
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!waiter.is_finished(), "must still be queued while lane is held");
+        // 释放车道 → 排队者被唤醒并拿到车道
+        drop(g1);
+        let (g2, t) = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter must wake promptly after release")
+            .unwrap()
+            .expect("queued request must be admitted");
+        assert_eq!(t, Throttle::Normal);
+        let rt = s.runtime(&key);
+        assert_eq!(rt.in_flight.load(Ordering::Relaxed), 1);
+        drop(g2);
+        assert_eq!(rt.in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    /// B8: 排队超时 → 429, 且 day_count / hold 回滚. (用 override 把 30s 缩到 200ms)
+    #[tokio::test]
+    async fn lane_wait_times_out_and_rolls_back() {
+        let mut st = store();
+        st.set_lane_wait(std::time::Duration::from_millis(200));
+        let s = Arc::new(st);
+        let mut p = plan("lt");
+        p.max_concurrency = 1;
+        p.fair_use_rpd = 0;
+        p.kind = PlanKind::Quota;
+        p.face_usd = 10.0;
+        s.upsert_plan(p);
+        let c = s.issue_card("lt", "timeout").unwrap();
+        let key = c.card_key.clone();
+        let (_, _, _g1, _) = s.acquire(&key, "claude-opus-5", 0).await.unwrap();
+        let rt = s.runtime(&key);
+        let hold_after_first = rt.hold_micro.load(Ordering::Relaxed);
+        let day_after_first = rt.day_count.load(Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        match s.acquire(&key, "claude-opus-5", 0).await {
+            Ok(_) => panic!("must time out while lane is held"),
+            Err((code, msg)) => {
+                assert_eq!(code, 429);
+                assert!(msg.contains("waited"), "{msg}");
+            }
+        }
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150), "must actually wait");
+        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), hold_after_first, "hold must roll back");
+        assert_eq!(rt.day_count.load(Ordering::Relaxed), day_after_first, "day_count must roll back");
+    }
+
+    /// B7: 同卡两条并发流共用一个匀速桶 —— 合计放出量受 pace 约束, 而不是各自一份.
+    #[tokio::test]
+    async fn shared_pacer_caps_total_output_across_streams() {
+        let s = store();
+        let mut p = plan("sp");
+        p.max_concurrency = 2;
+        p.fair_use_rpd = 0;
+        p.pace_normal_tps = 10;
+        s.upsert_plan(p);
+        let c = s.issue_card("sp", "pace").unwrap();
+        let (_, _, g1, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
+        let (_, _, g2, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
+        assert_eq!(g1.pace_tps(), 10);
+        // 流 1 用掉 1s burst (10 tok) 不等
+        assert_eq!(g1.pace_admit(10.0), std::time::Duration::ZERO);
+        // 流 2 紧接着再放 10 tok: 若各自一桶会是 ZERO; 共享桶下要等 ~1s
+        let w = g2.pace_admit(10.0);
+        assert!(w.as_secs_f64() > 0.9 && w.as_secs_f64() <= 1.0, "{w:?}");
+        // pace=0 的卡: 恒不等
+        let s0 = store();
+        s0.upsert_plan(CardPlan { id: "np".into(), name: "np".into(), ..CardPlan::default() });
+        let c0 = s0.issue_card("np", "x").unwrap();
+        let (_, _, g0, _) = s0.acquire(&c0.card_key, "kimi-k3", 0).await.unwrap();
+        assert_eq!(g0.pace_admit(1e6), std::time::Duration::ZERO);
+    }
+
+    /// B7: 共享桶空闲后不能无限 burst — 空闲重同步把基线拉回 1s burst.
+    #[test]
+    fn pacer_idle_resync_limits_burst() {
+        let mut p = TokenPacer::new(10).unwrap();
+        assert_eq!(p.admit(10.0), std::time::Duration::ZERO);
+        // 模拟空闲 5s: 手动把 started 往前拨
+        p.started = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        // 空闲后 allowed = 10×6 = 60, sent = 10 → 未重同步可无等待放 50 tok;
+        // 重同步后 sent 被拉到 50, 再放 10 → 恰好 60 不等, 再放 10 → 等 1s
+        assert_eq!(p.admit(10.0), std::time::Duration::ZERO);
+        let w = p.admit(10.0);
+        assert!(w.as_secs_f64() > 0.9 && w.as_secs_f64() <= 1.0, "{w:?}");
     }
 
     #[test]
@@ -1429,8 +2056,8 @@ mod tests {
         p.model_groups = vec!["test-kimi-only".into()];
         s.upsert_plan(p);
         let c = s.issue_card("mg", "hank").unwrap();
-        assert!(s.acquire(&c.card_key, "kimi-k3-high").is_ok());
-        match s.acquire(&c.card_key, "claude-opus-5") {
+        assert!(s.acquire_now(&c.card_key, "kimi-k3-high").is_ok());
+        match s.acquire_now(&c.card_key, "claude-opus-5") {
             Err((403, msg)) => assert!(msg.contains("model groups"), "{msg}"),
             other => panic!("expected 403, got {:?}", other.map(|_| ())),
         }
@@ -1442,9 +2069,9 @@ mod tests {
         let s = store();
         s.upsert_plan(plan("p1"));
         let c = s.issue_card("p1", "bob").unwrap();
-        let _g1 = s.acquire(&c.card_key, "kimi-k3").unwrap().2;
-        let _g2 = s.acquire(&c.card_key, "kimi-k3").unwrap().2;
-        match s.acquire(&c.card_key, "kimi-k3") {
+        let _g1 = s.acquire_now(&c.card_key, "kimi-k3").unwrap().2;
+        let _g2 = s.acquire_now(&c.card_key, "kimi-k3").unwrap().2;
+        match s.acquire_now(&c.card_key, "kimi-k3") {
             Ok(_) => panic!("3rd concurrent acquire must be rejected"),
             Err((code, _)) => assert_eq!(code, 429),
         }
@@ -1456,15 +2083,15 @@ mod tests {
         s.upsert_plan(plan("p1")); // fair_use_rpd=5
         let c = s.issue_card("p1", "carol").unwrap();
         for _ in 0..5 {
-            drop(s.acquire(&c.card_key, "kimi-k3").unwrap().2);
+            drop(s.acquire_now(&c.card_key, "kimi-k3").unwrap().2);
         }
         // 第 6 次: 5/5 = 1.0 → 软化 (load ≥ 0.7 且 ≤ 1.0)
-        let (_, _, p6, t6) = s.acquire(&c.card_key, "kimi-k3").unwrap();
+        let (_, _, p6, t6) = s.acquire_now(&c.card_key, "kimi-k3").unwrap();
         assert_eq!(t6, Throttle::Soften);
         assert_eq!(p6.pace_tps(), 18);
         drop(p6);
         // 第 7 次: 6/5 > 1.0 → 压制, 匀速降到 12
-        let (_, _, p7, t7) = s.acquire(&c.card_key, "kimi-k3").unwrap();
+        let (_, _, p7, t7) = s.acquire_now(&c.card_key, "kimi-k3").unwrap();
         assert_eq!(t7, Throttle::Degraded);
         assert_eq!(p7.pace_tps(), 12);
     }
@@ -1481,14 +2108,14 @@ mod tests {
         // opus-5 默认成本 (20k in, 4k out, 30k cr) = 0.1+0.1+0.015 = $0.215
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
-        let (_, _, _, t0) = s.acquire(&c.card_key, "claude-opus-5").unwrap();
+        let (_, _, _, t0) = s.acquire_now(&c.card_key, "claude-opus-5").unwrap();
         assert_eq!(t0, Throttle::Normal, "43% 额度应正常");
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
-        let (_, _, _, t1) = s.acquire(&c.card_key, "claude-opus-5").unwrap();
+        let (_, _, _, t1) = s.acquire_now(&c.card_key, "claude-opus-5").unwrap();
         assert_eq!(t1, Throttle::Soften, "86% 额度应进软化档");
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
-        let (_, _, _, t2) = s.acquire(&c.card_key, "claude-opus-5").unwrap();
+        let (_, _, _, t2) = s.acquire_now(&c.card_key, "claude-opus-5").unwrap();
         assert_eq!(t2, Throttle::Degraded, ">100% 额度应进压制档");
     }
 
@@ -1577,8 +2204,8 @@ mod tests {
         p.tier = TIER_ECONOMY.into();
         s.upsert_plan(p);
         let c = s.issue_card("eco", "erin").unwrap();
-        assert!(s.acquire(&c.card_key, "grok-4.6").is_ok());
-        match s.acquire(&c.card_key, "claude-fable-5-1-thinking-high") {
+        assert!(s.acquire_now(&c.card_key, "grok-4.6").is_ok());
+        match s.acquire_now(&c.card_key, "claude-fable-5-1-thinking-high") {
             Ok(_) => panic!("flagship model must be rejected on economy plan"),
             Err((code, msg)) => {
                 assert_eq!(code, 403);
@@ -1596,14 +2223,14 @@ mod tests {
         p.fair_use_rpd = 0;
         s.upsert_plan(p);
         let c = s.issue_card("q", "frank").unwrap();
-        assert!(s.acquire(&c.card_key, "claude-opus-5").is_ok());
+        assert!(s.acquire_now(&c.card_key, "claude-opus-5").is_ok());
         // 烧 $0.215 ×2 = $0.43 < 0.5 → 还能用
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
-        assert!(s.acquire(&c.card_key, "claude-opus-5").is_ok());
+        assert!(s.acquire_now(&c.card_key, "claude-opus-5").is_ok());
         // 第 3 次 → $0.645 ≥ 0.5 → 402
         s.settle(&c.card_key, "claude-opus-5", 0, 0, 0);
-        match s.acquire(&c.card_key, "claude-opus-5") {
+        match s.acquire_now(&c.card_key, "claude-opus-5") {
             Ok(_) => panic!("exhausted quota card must 402"),
             Err((code, _)) => assert_eq!(code, 402),
         }
@@ -1662,12 +2289,12 @@ mod tests {
         let c = s.issue_card("ab", "grace").unwrap();
         // 制造秒接: 连续 acquire→settle 间隔 0s (同秒)
         for _ in 0..12 {
-            let (_, _, g, _) = s.acquire(&c.card_key, "grok-4.6").unwrap();
+            let (_, _, g, _) = s.acquire_now(&c.card_key, "grok-4.6").unwrap();
             drop(g);
             s.settle(&c.card_key, "grok-4.6", 100, 10, 0);
         }
         // 秒接率 ≥ 40% → +30 ≥ 15 → 压制
-        let (_, _, g, t) = s.acquire(&c.card_key, "grok-4.6").unwrap();
+        let (_, _, g, t) = s.acquire_now(&c.card_key, "grok-4.6").unwrap();
         assert_eq!(t, Throttle::Degraded);
         assert_eq!(g.pace_tps(), 12);
     }
@@ -1736,7 +2363,7 @@ mod tests {
         let mut c = s.issue_card("p1", "eve").unwrap();
         c.expires_at = 1;
         s.cards.insert(c.card_key.clone(), c.clone());
-        match s.acquire(&c.card_key, "kimi-k3") {
+        match s.acquire_now(&c.card_key, "kimi-k3") {
             Ok(_) => panic!("expired card must be rejected"),
             Err((code, _)) => assert_eq!(code, 402),
         }

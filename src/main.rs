@@ -1124,6 +1124,9 @@ async fn inference_handler_inner(
     // 匀速流出目标 (tok/s); 0 = 不限. 卡请求由档位决定, 非卡请求恒 0
     let mut card_pace_tps: u32 = 0;
     let mut card_key_for_log = String::new();
+    // B1/B3: 请求体输入 token 估算 (CJK 1 tok/字, ASCII 0.25 tok/字). 卡路径用于预扣,
+    // 流式中断路径用于兜底结算. 非卡请求也算 (代价 O(body)), 保持一份口径.
+    let est_in = cards::estimate_request_input_tokens(&body);
     if raw_token.starts_with("card-") {
         // 卡前缀的 token 必须命中 cards.json; 查不到 = 伪卡, 直接 401, 不落回 key 体系
         if state.card_store.get_card(&raw_token).is_none() {
@@ -1138,7 +1141,8 @@ async fn inference_handler_inner(
             .and_then(|v| v.as_str())
             .unwrap_or(&config.default_model)
             .to_string();
-        match state.card_store.acquire(&raw_token, &req_model) {
+        // B8: 车道满时在此排队 (最多 LANE_WAIT_SECS), 不再立即 429
+        match state.card_store.acquire(&raw_token, &req_model, est_in).await {
             Ok((card, _plan, permit, throttle)) => {
                 card_throttle = throttle;
                 card_pace_tps = permit.pace_tps();
@@ -1706,7 +1710,6 @@ async fn inference_handler_inner(
         let rid = request_id.clone();
         let model_clone = model.clone();
         let key_usage = state.key_usage.clone();
-        let card_store = state.card_store.clone();
         let billed_key = used_key.clone();
         let metrics = state.metrics.clone();
         let ledger = state.ledger.clone();
@@ -1714,14 +1717,20 @@ async fn inference_handler_inner(
         // P1: 克隆请求体供 translate 层判定 Responses include/encrypted reasoning
         let request_body_for_translate = body.clone();
         // 卡并发令牌随流走: 输出期间一直占车道 (否则 handler 返回即释放, 并发帽形同虚设)
-        let card_permit_s = card_permit.take();
-        let mut pacer = cards::TokenPacer::new(card_pace_tps);
+        // B7: 匀速器不再每请求新建 —— 通过 permit.pace_admit() 喂该卡的共享桶
+        let mut card_permit_s = card_permit.take();
+        let card_store_s = state.card_store.clone();
+        let est_in_s = est_in;
+        let _ = card_pace_tps; // 已由 permit 携带
 
         tokio::spawn(async move {
             // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
             let _permit = current_permit.take().expect("permit must exist");
-            let _card_permit = card_permit_s;
             let mut usage = translate::Usage::default();
+            // B3: 本地累计已放给客户端的输出 token 估算. 中断路径 (断连/上游错误/超时) 拿不到
+            // usage 帧时用它兜底结算, 否则客户端可在 usage 帧前掐断白嫖; 正常路径取 max(上报, 估算)
+            let mut local_out_est = 0.0f64;
+            let local_in_est = est_in_s;
             let mut stream = Box::pin(upstream_to_dialect_stream(
                 frames,
                 &model_clone,
@@ -1763,6 +1772,12 @@ async fn inference_handler_inner(
                             }
                             pool.release(&aid, true, 10);
                             metrics.observe_err();
+                            // B3: 上游 hang 死也要按已放出的内容结算 (取 max(上报, 本地估算))
+                            if let Some(p) = card_permit_s.as_mut() {
+                                let (i, o, cr, cw) =
+                                    settle_usage_for_card(&usage, local_in_est, local_out_est);
+                                card_store_s.settle_permit(p, i, o, cr, cw);
+                            }
                             ledger.record(billing::BillingRecord::build(
                                 &bctx_s,
                                 &rid,
@@ -1803,11 +1818,13 @@ async fn inference_handler_inner(
                         if sse.contains(terminal_marker) {
                             sent_terminal = true;
                         }
-                        // 匀速流出: 把上游突发按卡档位的 tok/s 放给客户端 (完整内容, 只是打字慢一点)
-                        if let Some(p) = pacer.as_mut() {
-                            let est = cards::TokenPacer::estimate_tokens(&sse);
-                            if est > 0.0 {
-                                let wait = p.admit(est);
+                        // B3: 本地累计输出 token 估算 (含 reasoning), 中断时兜底结算用
+                        let est = cards::TokenPacer::estimate_tokens(&sse);
+                        if est > 0.0 {
+                            local_out_est += est;
+                            // B7 匀速流出: 喂该卡的共享桶 (同卡多流合计 ≤ pace_tps), 完整内容只是打字慢一点
+                            if let Some(p) = card_permit_s.as_ref() {
+                                let wait = p.pace_admit(est);
                                 if !wait.is_zero() {
                                     tokio::time::sleep(wait).await;
                                 }
@@ -1879,17 +1896,22 @@ async fn inference_handler_inner(
             // (请求日志由 ledger.record 镜像写入 ring buffer, 不再手动 push, 避免重复)
             if !billed_key.is_empty() {
                 key_usage.add(&billed_key, usage.total());
-                // 套餐卡记账: 折算高级额度累加到今日 (驱动日额度帽/渐进降速)
-                if billed_key.starts_with("card-") {
-                    card_store.settle_full(
-                        &billed_key,
-                        &model_clone,
-                        usage.input,
-                        usage.output,
-                        usage.cache_read,
-                        usage.cache_write,
+            }
+            // 套餐卡记账 (B3): 所有落到这里的出口 —— 正常收尾 / 客户端中途断开 (tx.send 失败 break) /
+            // 上游 stream_error break —— 都结算. usage 帧没到就用本地估算兜底, 到了取 max.
+            if let Some(p) = card_permit_s.as_mut() {
+                let (i, o, cr, cw) = settle_usage_for_card(&usage, local_in_est, local_out_est);
+                if usage.output == 0 && o > 0 {
+                    info!(
+                        event = "card_settle_estimated",
+                        req_id = %rid,
+                        card = %p.key(),
+                        est_in = i,
+                        est_out = o,
+                        "no usage frame from upstream (client abort / stream error); settled on local estimate"
                     );
                 }
+                card_store_s.settle_permit(p, i, o, cr, cw);
             }
             metrics.observe_ok(usage.total());
             ledger.record(billing::BillingRecord::build(
@@ -1933,6 +1955,10 @@ async fn inference_handler_inner(
             Err(_) => {
                 state.pool.release(&account_id, true, 10);
                 state.metrics.observe_err();
+                // B3: 非流式超时 — 上游可能已算完 (输入已烧), 按输入估算结算
+                if let Some(p) = card_permit.as_mut() {
+                    state.card_store.settle_permit(p, est_in, 0, 0, 0);
+                }
                 error!(
                     event = "upstream_timeout",
                     req_id = %request_id,
@@ -2075,17 +2101,11 @@ async fn inference_handler_inner(
                 // (请求日志由 ledger.record 镜像写入 ring buffer, 不再手动 push, 避免重复)
                 if !used_key.is_empty() {
                     state.key_usage.add(&used_key, usage.total());
-                    // 套餐卡记账 (非流式)
-                    if used_key.starts_with("card-") {
-                        state.card_store.settle_full(
-                            &used_key,
-                            &model,
-                            usage.input,
-                            usage.output,
-                            usage.cache_read,
-                            usage.cache_write,
-                        );
-                    }
+                }
+                // 套餐卡记账 (非流式): 通过 permit 结算 (释放预扣 + 记账, 幂等)
+                if let Some(p) = card_permit.as_mut() {
+                    let (i, o, cr, cw) = settle_usage_for_card(&usage, est_in, 0.0);
+                    state.card_store.settle_permit(p, i, o, cr, cw);
                 }
                 state.metrics.observe_ok(usage.total());
                 state.ledger.record(billing::BillingRecord::build(
@@ -2106,6 +2126,10 @@ async fn inference_handler_inner(
             Err(e) => {
                 state.pool.release(&account_id, true, 10);
                 state.metrics.observe_err();
+                // B3: 翻译失败 — 上游已消费输入, 按输入估算结算
+                if let Some(p) = card_permit.as_mut() {
+                    state.card_store.settle_permit(p, est_in, 0, 0, 0);
+                }
                 error!(
                     event = "translate_error",
                     req_id = %request_id,
@@ -2131,6 +2155,44 @@ async fn inference_handler_inner(
                     .into_response())
             }
         }
+    }
+}
+
+/// B3: 卡结算用量 = max(上游上报, 本地估算). 上游 usage 帧到了就以它为准 (更准);
+/// 没到 (客户端中途断开 / 上游错误 / 超时) 就用本地估算兜底 —— 输入按请求体估, 输出按已放出的帧估.
+/// 取 max 而不是简单回退: 上游偶尔上报 output=0 但确实吐了内容 (空 usage 帧), 也不能少收.
+fn settle_usage_for_card(
+    usage: &translate::Usage,
+    local_in_est: u64,
+    local_out_est: f64,
+) -> (u64, u64, u64, u64) {
+    let reported_in = usage.input + usage.cache_read + usage.cache_write;
+    let (i, cr, cw) = if reported_in > 0 {
+        (usage.input, usage.cache_read, usage.cache_write)
+    } else {
+        // 无上报输入: 全按 input 价估 (无法区分缓存命中, 保守)
+        (local_in_est, 0, 0)
+    };
+    let o = usage.output.max(local_out_est.round() as u64);
+    (i, o, cr, cw)
+}
+
+#[cfg(test)]
+mod card_settle_tests {
+    use super::*;
+
+    #[test]
+    fn settle_usage_prefers_reported_input_and_max_output() {
+        // 上游上报齐全: 输入用上报 (含缓存拆分), 输出取 max
+        let u = translate::Usage { input: 100, output: 50, cache_read: 900, cache_write: 0 };
+        assert_eq!(settle_usage_for_card(&u, 5000, 30.0), (100, 50, 900, 0));
+        assert_eq!(settle_usage_for_card(&u, 5000, 80.4), (100, 80, 900, 0));
+        // 无上报 (客户端中途断开): 输入用本地估, 输出用本地估
+        let none = translate::Usage::default();
+        assert_eq!(settle_usage_for_card(&none, 5000, 123.6), (5000, 124, 0, 0));
+        // 上报了输入但 output=0 (空 usage 帧) 且本地放出了内容: 输出不能是 0
+        let partial = translate::Usage { input: 100, output: 0, cache_read: 0, cache_write: 0 };
+        assert_eq!(settle_usage_for_card(&partial, 5000, 40.0), (100, 40, 0, 0));
     }
 }
 
