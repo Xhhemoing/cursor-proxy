@@ -76,15 +76,23 @@ pub fn builtin_table() -> Vec<(String, f64, f64, f64, f64, &'static str)> {
 const FALLBACK_PRICE: (f64, f64, f64, f64) = (5.0, 25.0, 0.5, 6.25);
 
 /// 查模型价格: 注册表手动定价优先 (models.json, 面板可改), 否则内置官方表.
-/// 注册表命中时按其原值 (不再自动 ×2 `-fast`, 手动定价即所见即所得).
+///
+/// `-fast` 倍率规则 (B2 修复, 2026-09-05): 注册表 `lookup` 是最长前缀匹配, 只要面板录过
+/// `claude-opus-5`, 请求 `claude-opus-5-fast` 也会命中它 —— 之前直接原值返回, fast 按半价记账.
+/// 现在: 请求是 `-fast` 而命中的注册表条目本身不是 `-fast` 名 → 补 ×2 (官方 fast 变体统一 ×2);
+/// 注册表条目本身就是 `-fast` 名 (面板专门给 fast 定价) → 所见即所得, 不再乘.
 pub fn model_price(model: &str) -> (f64, f64, f64, f64) {
     if let Some(e) = crate::models::registry().lookup(model) {
-        return (
+        let mut p = (
             e.input_per_m,
             e.output_per_m,
             e.cache_read_per_m,
             e.cache_write_per_m,
         );
+        if model.ends_with("-fast") && !e.model.ends_with("-fast") {
+            p = (p.0 * 2.0, p.1 * 2.0, p.2 * 2.0, p.3 * 2.0);
+        }
+        return p;
     }
     builtin_model_price(model)
 }
@@ -1504,6 +1512,35 @@ mod tests {
         // 与官方账单核对: acc-3 kimi-k3-high in=13.71M out=1.46M cr=179.12M → $116.8
         let c = estimate_quota_cost_full("kimi-k3-high", 13_710_000, 1_460_000, 179_120_000, 0);
         assert!((c - 116.8).abs() < 1.5, "got {}", c);
+    }
+
+    /// B2 回归: 注册表按最长前缀命中时, `-fast` 请求不能按基础模型半价记账.
+    #[test]
+    fn registry_prefix_hit_keeps_fast_multiplier() {
+        let reg = crate::models::registry();
+        // 唯一前缀, 避免与其他测试/内置表串扰
+        let base = "b2test-zeta-9";
+        let fast = "b2test-zeta-9-fast";
+        let mk = |m: &str, i: f64, o: f64| crate::models::ModelEntry {
+            model: m.into(),
+            input_per_m: i,
+            output_per_m: o,
+            cache_read_per_m: i / 10.0,
+            cache_write_per_m: 0.0,
+            tier: "standard".into(),
+            enabled: true,
+            note: String::new(),
+        };
+        reg.upsert_model(mk(base, 4.0, 20.0)).unwrap();
+        // 面板只录了基础名: fast 请求前缀命中 → 必须 ×2
+        assert_eq!(model_price(base), (4.0, 20.0, 0.4, 0.0));
+        assert_eq!(model_price(fast), (8.0, 40.0, 0.8, 0.0));
+        // 面板专门给 fast 定价: 所见即所得, 不再乘
+        reg.upsert_model(mk(fast, 9.0, 45.0)).unwrap();
+        assert_eq!(model_price(fast), (9.0, 45.0, 0.9, 0.0));
+        assert_eq!(model_price(base), (4.0, 20.0, 0.4, 0.0));
+        let _ = reg.delete_model(fast);
+        let _ = reg.delete_model(base);
     }
 
     #[test]
