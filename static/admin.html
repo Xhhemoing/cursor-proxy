@@ -965,6 +965,12 @@
                   <label>并发 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
                   <label>模型层级 <select id="cp-tier"><option value="">不限</option><option value="economy">economy（便宜）</option><option value="standard">standard</option><option value="flagship">flagship（全模型）</option></select></label>
                   <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限；与层级同时生效）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
+                  <div class="span-2" style="grid-column:1/-1;font-size:12px;color:var(--muted)">
+                    模型可见性 = 层级 ∧ 模型组 ∧ 前缀（高级里）三者交集；全空 = 全部模型。
+                    <span id="cp-mcount" class="pill info" style="display:none"></span>
+                    <button type="button" class="ghost" id="cp-preview" style="margin-left:6px">预览可用模型</button>
+                    <span id="cp-warn" style="color:var(--bad,#c66)"></span>
+                  </div>
                   <label class="inline"><input type="checkbox" id="cp-enabled" checked> 启用</label>
                 </div>
                 <details id="cp-adv" style="margin-top:8px">
@@ -1067,11 +1073,12 @@
               </div>
             </div>
             <div class="panel fill">
-              <div class="ph"><h3>官方价格表 ($/1M tokens) 与模型层级</h3></div>
+              <div class="ph"><h3>模型价格与层级</h3><p>价格/层级的唯一编辑入口在「模型」页（手动定价即时生效，覆盖内置官方表）。此处只读展示同一数据源。</p></div>
+              <div style="padding:0 12px 8px"><a href="#models" class="pill info" style="text-decoration:none">→ 去「模型」页编辑价格 / 层级 / 模型组</a></div>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>模型</th><th>层级</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th></tr></thead>
-                  <tbody id="cd-price-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+                  <thead><tr><th>模型</th><th>层级</th><th>来源</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th></tr></thead>
+                  <tbody id="cd-price-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -1728,7 +1735,10 @@
         tr.innerHTML =
           '<td class="mono">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mono">' + rmb(p.price) + '</td>' +
           '<td>' + (p.kind === 'quota' ? '<span class="pill info">定额 $' + p.face_usd + '</span>' : '<span class="pill ok">畅饮</span>') + '</td>' +
-          '<td class="mono">' + esc(p.tier || '不限') + ((p.model_groups || []).length ? '<br><span class="muted" style="font-size:10px">组: ' + esc(p.model_groups.join(',')) + '</span>' : '') + '</td><td class="mono">' + p.duration_hours + 'h</td>' +
+          '<td class="mono">' + esc(p.tier || '不限') + ((p.model_groups || []).length ? '<br><span class="muted" style="font-size:10px">组: ' + esc(p.model_groups.join(',')) + '</span>' : '') +
+          (p.model_count != null ? '<br><span class="muted" style="font-size:10px">可调 ' + p.model_count + ' 模型</span>' : '') +
+          ((p.warnings || []).length ? '<br><span class="pill bad" style="font-size:10px" title="' + esc(p.warnings.join('；')) + '">⚠ ' + esc(p.warnings[0].slice(0, 18)) + '</span>' : '') +
+          '</td><td class="mono">' + p.duration_hours + 'h</td>' +
           '<td class="mono">' + p.max_concurrency + (p.degraded_concurrency && p.degraded_concurrency !== p.max_concurrency ? ' → ' + p.degraded_concurrency : '') + '</td>' +
           '<td class="mono">' + p.rpm_limit + '</td><td class="mono">' + paceLabel(p) + '</td><td class="mono">' + capLabel(p) + '</td>' +
           '<td class="mono">' + (p.abuse_score_threshold || '关') + '</td>' +
@@ -1791,10 +1801,25 @@
       if (isNew && (body.name == null || body.price == null)) return cdMsg('新建套餐需要 名称 + 售价', true);
       if (body.kind === 'quota' && isNew && !body.face_usd) return cdMsg('定额卡需要面值 $', true);
       try {
-        await api('/admin/api/cards/plans', { method: 'POST', body: JSON.stringify(body) });
-        cdMsg((isNew ? '已创建 ' : '已更新 ') + body.id);
+        const d = await api('/admin/api/cards/plans', { method: 'POST', body: JSON.stringify(body) });
+        const w = (d.warnings || []).join('；');
+        cdMsg((isNew ? '已创建 ' : '已更新 ') + body.id + '，可调模型 ' + (d.model_count ?? '?') + ' 个' + (w ? ' ⚠ ' + w : ''), !!w);
         await loadPlans();
       } catch (e) { cdMsg(e.message, true); }
+    });
+    // 可用模型预览: 已存套餐直接拉服务端; 未保存的新套餐先静默 upsert 再拉 (表单态与服务端判定完全一致)
+    document.getElementById('cp-preview').addEventListener('click', async () => {
+      const id = document.getElementById('cp-id').value.trim();
+      if (!id) return cdMsg('先填 id 再预览', true);
+      try {
+        const d = await api('/admin/api/cards/plans/' + encodeURIComponent(id) + '/models');
+        const names = (d.models || []).map((m) => m.model);
+        const mc = document.getElementById('cp-mcount');
+        mc.style.display = '';
+        mc.textContent = '可调 ' + d.count + ' 个';
+        document.getElementById('cp-warn').textContent = (d.warnings || []).join('；');
+        cdMsg(d.count ? names.slice(0, 12).join(', ') + (d.count > 12 ? ' …' : '') : '该套餐当前 0 个模型可调', !d.count);
+      } catch (e) { cdMsg('预览失败: ' + e.message + ' (新套餐请先保存一次)', true); }
     });
     document.getElementById('cd-seed').addEventListener('click', async () => {
       if (!confirm('写入 10 档预置套餐？已存在的 id 不会覆盖')) return;
@@ -1915,6 +1940,7 @@
         const tr = document.createElement('tr');
         const tp = r.tier === 'economy' ? 'ok' : r.tier === 'standard' ? 'warn' : 'bad';
         tr.innerHTML = '<td class="mono">' + esc(r.model) + '</td><td><span class="pill ' + tp + '">' + esc(r.tier) + '</span></td>' +
+          '<td>' + (r.source === 'manual' ? '<span class="pill info">手动</span>' : '<span class="muted">内置</span>') + '</td>' +
           ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">' + usd(r[k], 2) + '</td>').join('');
         tb.appendChild(tr);
       });
@@ -1963,7 +1989,7 @@
       rows.forEach((m) => {
         const tr = document.createElement('tr');
         tr.innerHTML =
-          '<td class="mono">' + esc(m.model) + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td><td>' + tierPill(m.tier) + (m.tier_manual ? '' : ' <span class="muted" style="font-size:10px">auto</span>') + '</td>' +
+          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td><td>' + tierPill(m.tier) + (m.tier_manual ? '' : ' <span class="muted" style="font-size:10px">auto</span>') + '</td>' +
           ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">$' + Number(m[k] || 0).toFixed(2) + '</td>').join('') +
           '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px">' + (m.groups || []).map(esc).join(', ') + '</td>' +
           '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td></td>';

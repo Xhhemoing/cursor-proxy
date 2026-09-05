@@ -53,7 +53,7 @@ fn validate_entry(e: &ModelEntry) -> Result<(), String> {
 }
 
 /// 账本里出现过的模型 (最近 30 天), 用于把「用过但没设置」的模型列出来
-fn seen_models(state: &AppState) -> Vec<(String, u64)> {
+pub(crate) fn seen_models(state: &AppState) -> Vec<(String, u64)> {
     let Ok(conn) = state.ledger.reader() else {
         return vec![];
     };
@@ -85,6 +85,7 @@ fn row(model: &str, source: &str, seen: u64) -> Value {
         "tier": cards::model_tier(model),
         "tier_manual": manual.as_ref().map(|e| e.tier.clone()).unwrap_or_default(),
         "enabled": manual.as_ref().map(|e| e.enabled).unwrap_or(true),
+        "upstream": manual.as_ref().map(|e| e.upstream).unwrap_or(false),
         "note": manual.as_ref().map(|e| e.note.clone()).unwrap_or_default(),
         "groups": reg.groups_of(model),
         "requests_30d": seen,
@@ -155,6 +156,7 @@ pub async fn api_models_upsert(
         cache_write_per_m: w,
         tier: cards::model_tier(&model).to_string(),
         enabled: true,
+        upstream: false,
         note: String::new(),
     });
     let e = ModelEntry {
@@ -165,6 +167,7 @@ pub async fn api_models_upsert(
         cache_write_per_m: b.cache_write_per_m.unwrap_or(cur.cache_write_per_m),
         tier: b.tier.unwrap_or(cur.tier),
         enabled: b.enabled.unwrap_or(cur.enabled),
+        upstream: cur.upstream,
         note: b.note.unwrap_or(cur.note),
     };
     if let Err(m) = validate_entry(&e) {
@@ -237,6 +240,7 @@ pub async fn api_models_import_builtin(
             cache_write_per_m: w,
             tier: tier.to_string(),
             enabled: true,
+            upstream: false,
             note: "builtin".into(),
         };
         if reg.upsert_model(e).is_ok() {
@@ -403,6 +407,8 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
         Ok(v) => {
             let names = extract_model_names(&v);
             let reg = registry();
+            // 已在注册表的条目置 upstream=true (不新建行, 避免变体名稀释前缀匹配)
+            let (marked, _) = reg.mark_upstream(&names).unwrap_or((0, vec![]));
             let rows: Vec<Value> = names
                 .iter()
                 .map(|m| {
@@ -410,12 +416,13 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
                     json!({
                         "model": m,
                         "in_registry": manual,
+                        "upstream": true,
                         "tier": cards::model_tier(m),
                         "price": cards::model_price(m),
                     })
                 })
                 .collect();
-            Json(json!({"account": acc.id, "models": rows, "count": rows.len()})).into_response()
+            Json(json!({"account": acc.id, "models": rows, "count": rows.len(), "marked": marked})).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -544,6 +551,7 @@ pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q
                     cache_write_per_m: (w * 100.0).round() / 100.0,
                     tier: cur.as_ref().map(|x| x.tier.clone()).unwrap_or_default(),
                     enabled: cur.as_ref().map(|x| x.enabled).unwrap_or(true),
+                    upstream: cur.as_ref().map(|x| x.upstream).unwrap_or(false),
                     note: format!("litellm:{src}"),
                 };
                 if reg.upsert_model(e).is_ok() {

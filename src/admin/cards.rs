@@ -35,7 +35,71 @@ use crate::AppState;
 
 pub async fn api_card_plans_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let plans = state.card_store.list_plans();
-    Json(json!({ "plans": plans }))
+    let seen: Vec<String> = crate::admin::seen_models(&state)
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    let rows: Vec<Value> = plans
+        .iter()
+        .map(|p| {
+            let models = state.card_store.plan_models(p, &seen);
+            let mut v = serde_json::to_value(p).unwrap_or_else(|_| json!({}));
+            v["model_count"] = json!(models.len());
+            v["warnings"] = json!(plan_warnings(p, models.len()));
+            v
+        })
+        .collect();
+    Json(json!({ "plans": rows }))
+}
+
+/// 套餐配置体检 (保存/列表共用): 组 id 失效、前缀永不命中、组合后 0 模型可调
+fn plan_warnings(p: &CardPlan, allowed_count: usize) -> Vec<String> {
+    let mut w: Vec<String> = vec![];
+    let reg = crate::models::registry();
+    let snap = reg.snapshot();
+    for g in &p.model_groups {
+        if !snap.groups.iter().any(|x| &x.id == g) {
+            w.push(format!("模型组 '{}' 不存在 (可能已删除), 该条件永不放行", g));
+        }
+    }
+    let candidates = crate::models::candidate_models(&[]);
+    for pre in &p.model_prefixes {
+        if !candidates.iter().any(|(m, _)| m.starts_with(pre.as_str())) {
+            w.push(format!("前缀 '{}' 在已知模型中无任何命中", pre));
+        }
+    }
+    let restricted =
+        !p.tier.is_empty() || !p.model_groups.is_empty() || !p.model_prefixes.is_empty();
+    if restricted && allowed_count == 0 {
+        w.push("当前 tier/组/前缀组合下 0 个模型可调 —— 开出去的卡会全部 403".to_string());
+    }
+    w
+}
+
+/// GET /admin/api/cards/plans/:id/models — 该套餐实际可调模型清单 (面板「可用模型」预览)
+pub async fn api_card_plan_models(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let Some(plan) = state.card_store.get_plan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("plan '{}' not found", id)})),
+        )
+            .into_response();
+    };
+    let seen: Vec<String> = crate::admin::seen_models(&state)
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    let models = state.card_store.plan_models(&plan, &seen);
+    Json(json!({
+        "plan": id,
+        "count": models.len(),
+        "models": models,
+        "warnings": plan_warnings(&plan, models.len()),
+    }))
+    .into_response()
 }
 
 pub async fn api_card_presets(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -147,7 +211,19 @@ pub async fn api_card_plan_upsert(
             .into_response();
     }
     state.card_store.upsert_plan(plan.clone());
-    Json(json!({ "ok": true, "plan": plan })).into_response()
+    // 保存后体检: 组失效/前缀不命中/0 模型可调 —— 不拦保存, 但必须在响应里亮出来
+    let seen: Vec<String> = crate::admin::seen_models(&state)
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    let models = state.card_store.plan_models(&plan, &seen);
+    Json(json!({
+        "ok": true,
+        "plan": plan,
+        "model_count": models.len(),
+        "warnings": plan_warnings(&plan, models.len()),
+    }))
+    .into_response()
 }
 
 pub async fn api_card_plan_delete(
@@ -188,31 +264,23 @@ pub async fn api_cost_model_set(
 }
 
 /// 官方口径价格表 + 层级, 供调价时对照
-pub async fn api_pricing_table(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    let models = [
-        "claude-fable-5-1-thinking-max",
-        "claude-fable-5-1-thinking-high",
-        "claude-fable-5",
-        "claude-opus-5-fast",
-        "claude-opus-5",
-        "kimi-k3-max",
-        "kimi-k3-high",
-        "kimi-k3",
-        "gpt-5.6-sol",
-        "gpt-5.4-pro",
-        "grok-4.6",
-        "claude-sonnet-5",
-    ];
-    let rows: Vec<Value> = models
-        .iter()
-        .map(|m| {
-            let (i, o, c, w) = cards::model_price(m);
+pub async fn api_pricing_table(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // 动态: 注册表 ∪ 内置表 ∪ 账本出现过的模型 (与「模型」页同一全集, 成本/定价不再两张皮)
+    let seen: Vec<String> = crate::admin::seen_models(&state)
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
+    let rows: Vec<Value> = crate::models::candidate_models(&seen)
+        .into_iter()
+        .map(|(m, manual)| {
+            let (i, o, c, w) = cards::model_price(&m);
             json!({
                 "model": m,
-                "tier": cards::model_tier(m),
+                "tier": cards::model_tier(&m),
+                "source": if manual { "manual" } else { "builtin" },
                 "input_per_m": i, "output_per_m": o, "cache_read_per_m": c, "cache_write_per_m": w,
                 // 参考: 典型请求 (20k in / 4k out / 30k cr) 官方口径成本
-                "typical_req_usd": cards::estimate_quota_cost(m, 0, 0, 0),
+                "typical_req_usd": cards::estimate_quota_cost(&m, 0, 0, 0),
             })
         })
         .collect();

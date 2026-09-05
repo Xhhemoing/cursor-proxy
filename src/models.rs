@@ -27,6 +27,10 @@ pub struct ModelEntry {
     /// 是否允许调用 (false = 全局停用, 所有 key/卡都 403)
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 该模型经上游 AvailableModels 确认存在 (面板「获取可用模型」标记).
+    /// 仅作展示/提醒, 不参与闸门 —— 上游列表拉不到不代表模型不可用.
+    #[serde(default)]
+    pub upstream: bool,
     #[serde(default)]
     pub note: String,
 }
@@ -166,6 +170,30 @@ impl ModelRegistry {
         self.save(d)
     }
 
+    /// 把一批模型名标记为「上游确认可用」; 已在注册表的条目只置位, 不新建条目
+    /// (上游名可能带变体后缀, 盲目建行会稀释最长前缀匹配).
+    /// 返回 (置位条数, 上游有但注册表没有的名字).
+    pub fn mark_upstream(&self, names: &[String]) -> anyhow::Result<(usize, Vec<String>)> {
+        let mut d = (*self.data.load_full()).clone();
+        let mut missing: Vec<String> = vec![];
+        let mut marked = 0usize;
+        for n in names {
+            match d.models.iter_mut().find(|e| &e.model == n) {
+                Some(e) => {
+                    if !e.upstream {
+                        e.upstream = true;
+                        marked += 1;
+                    }
+                }
+                None => missing.push(n.clone()),
+            }
+        }
+        if marked > 0 {
+            self.save(d)?;
+        }
+        Ok((marked, missing))
+    }
+
     pub fn delete_model(&self, model: &str) -> anyhow::Result<bool> {
         let mut d = (*self.data.load_full()).clone();
         let n = d.models.len();
@@ -252,6 +280,52 @@ pub fn deny_reason(allowed_groups: &[String], model: &str) -> String {
     )
 }
 
+/// 套餐模型闸门 (tier / model_groups / model_prefixes 三合一).
+/// 全部为空 = 不限; 任一非空项都必须通过. 返回 Err(人类可读原因) 表示拒绝.
+pub fn plan_allows_model(
+    tier: &str,
+    groups: &[String],
+    prefixes: &[String],
+    model: &str,
+) -> Result<(), String> {
+    if !tier.is_empty() && !crate::cards::tier_allows(tier, model) {
+        return Err(format!(
+            "model '{}' is tier '{}', plan allows tier '{}'",
+            model,
+            crate::cards::model_tier(model),
+            tier
+        ));
+    }
+    if !prefixes.is_empty() && !prefixes.iter().any(|p| model.starts_with(p.as_str())) {
+        return Err(format!(
+            "model '{}' not in prefixes {:?}",
+            model, prefixes
+        ));
+    }
+    if !registry().allowed_by_groups(groups, model) {
+        return Err(deny_reason(groups, model));
+    }
+    Ok(())
+}
+
+/// 候选模型全集: 注册表 ∪ 内置表 ∪ 额外名 (如账本 seen).
+/// 每项 (模型名, 是否注册表手动条目). 注册表同名优先 (带 enabled/tier 等手动设定).
+pub fn candidate_models(extra: &[String]) -> Vec<(String, bool)> {
+    let snap = registry().snapshot();
+    let mut out: Vec<(String, bool)> = snap.models.iter().map(|e| (e.model.clone(), true)).collect();
+    for (m, ..) in crate::cards::builtin_table() {
+        if !out.iter().any(|(n, _)| *n == m) {
+            out.push((m, false));
+        }
+    }
+    for m in extra {
+        if !out.iter().any(|(n, _)| n == m) {
+            out.push((m.clone(), false));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +343,7 @@ mod tests {
             cache_write_per_m: 0.0,
             tier: tier.into(),
             enabled: true,
+            upstream: false,
             note: String::new(),
         }
     }

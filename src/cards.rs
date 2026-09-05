@@ -961,6 +961,35 @@ impl CardStore {
         self.plans.iter().map(|r| r.clone()).collect()
     }
 
+    /// 该套餐当前实际可调的模型 (tier/组/前缀三合一 + 全局停用过滤).
+    /// 候选 = 注册表 ∪ 内置表 ∪ 账本出现过的模型; extra_seen 传 seen_models 结果.
+    pub fn plan_models(&self, plan: &CardPlan, extra_seen: &[String]) -> Vec<Value> {
+        crate::models::candidate_models(extra_seen)
+            .into_iter()
+            .filter_map(|(m, manual)| {
+                let enabled = !crate::models::registry().is_disabled(&m);
+                let allowed = crate::models::plan_allows_model(
+                    &plan.tier,
+                    &plan.model_groups,
+                    &plan.model_prefixes,
+                    &m,
+                )
+                .is_ok();
+                if !enabled || !allowed {
+                    return None;
+                }
+                let (i, o, c, w) = model_price(&m);
+                Some(json!({
+                    "model": m,
+                    "tier": model_tier(&m),
+                    "source": if manual { "manual" } else { "builtin" },
+                    "input_per_m": i, "output_per_m": o,
+                    "cache_read_per_m": c, "cache_write_per_m": w,
+                }))
+            })
+            .collect()
+    }
+
     // ── 卡 CRUD ──
     pub fn issue_card(&self, plan_id: &str, owner: &str) -> Result<Card, String> {
         self.issue_card_priced(plan_id, owner, None)
@@ -1316,44 +1345,11 @@ impl CardStore {
             // 预扣额不超过剩余余额 (最后一笔允许把余额烧到 0, 不因估算偏大而拒绝)
             hold = Self::hold_estimate_micro(model, est_input_tok).min(face_micro - committed);
         }
-        // 模型层级
-        if !plan.tier.is_empty() && !tier_allows(&plan.tier, model) {
-            return Err((
-                403,
-                format!(
-                    "model '{}' is tier '{}', not allowed on '{}' plan (tier '{}')",
-                    model,
-                    model_tier(model),
-                    plan.id,
-                    plan.tier
-                ),
-            ));
-        }
-        // 模型前缀
-        if !plan.model_prefixes.is_empty()
-            && !plan
-                .model_prefixes
-                .iter()
-                .any(|p| model.starts_with(p.as_str()))
+        // 模型访问三合一 (tier / 前缀 / 模型组): 全部为空 = 不限, 任一非空都要过
+        if let Err(reason) =
+            crate::models::plan_allows_model(&plan.tier, &plan.model_groups, &plan.model_prefixes, model)
         {
-            return Err((
-                403,
-                format!(
-                    "model '{}' not allowed on plan '{}' (prefixes: {:?})",
-                    model, plan.id, plan.model_prefixes
-                ),
-            ));
-        }
-        // 模型组 (models.json)
-        if !crate::models::registry().allowed_by_groups(&plan.model_groups, model) {
-            return Err((
-                403,
-                format!(
-                    "{} (plan '{}')",
-                    crate::models::deny_reason(&plan.model_groups, model),
-                    plan.id
-                ),
-            ));
+            return Err((403, format!("{} (plan '{}')", reason, plan.id)));
         }
         let ds = self.roll_day(&rt, now);
 
@@ -2064,6 +2060,73 @@ mod tests {
         let _ = crate::models::registry().delete_group("test-kimi-only");
     }
 
+    /// 三合一闸门: tier ∧ 前缀 ∧ 组 任一不过即拒; 全空 = 全放
+    #[test]
+    fn plan_allows_model_combination() {
+        use crate::models::plan_allows_model as f;
+        // 全空 = 不限
+        assert!(f("", &[], &[], "anything-at-all").is_ok());
+        // tier 单条件 (用唯一名, 避免与并行测试写入的注册表条目串扰)
+        assert!(f("standard", &[], &[], "kimi-k3").is_ok());
+        assert!(f("economy", &[], &[], "pam-flagship-zzz").is_err()); // 未知模型按旗舰算
+        assert!(f("flagship", &[], &[], "pam-flagship-zzz").is_ok());
+        // 前缀单条件
+        assert!(f("", &[], &["kimi-".into()], "kimi-k3").is_ok());
+        assert!(f("", &[], &["kimi-".into()], "gpt-5.6").is_err());
+        // 组单条件
+        crate::models::registry()
+            .upsert_group(crate::models::ModelGroup {
+                id: "test-pam".into(),
+                name: "t".into(),
+                members: vec!["kimi-*".into()],
+                note: String::new(),
+            })
+            .unwrap();
+        assert!(f("", &["test-pam".into()], &[], "kimi-k3").is_ok());
+        assert!(f("", &["test-pam".into()], &[], "gpt-5.6").is_err());
+        // 组合: tier 过但组不过 → 拒; 三者都过 → 放
+        assert!(f("flagship", &["test-pam".into()], &["kimi-".into()], "kimi-k3").is_ok());
+        assert!(f("flagship", &["test-pam".into()], &[], "claude-opus-5").is_err());
+        assert!(f("economy", &["test-pam".into()], &["kimi-".into()], "kimi-k3").is_ok());
+        let _ = crate::models::registry().delete_group("test-pam");
+    }
+
+    /// plan_models: 候选全集过闸门 + 全局停用过滤
+    #[test]
+    fn plan_models_respects_gate_and_disabled() {
+        let s = store();
+        let mut p = plan("pm");
+        p.model_prefixes = vec!["kimi-".into()];
+        let names: Vec<String> = s
+            .plan_models(&p, &[])
+            .iter()
+            .filter_map(|v| v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert!(!names.is_empty(), "builtin kimi models should be listed");
+        assert!(names.iter().all(|m| m.starts_with("kimi-")), "prefix gate leaked: {:?}", names);
+        // 全局停用后从清单消失
+        crate::models::registry()
+            .upsert_model(crate::models::ModelEntry {
+                model: "kimi-k3".into(),
+                input_per_m: 3.0,
+                output_per_m: 15.0,
+                cache_read_per_m: 0.3,
+                cache_write_per_m: 0.0,
+                tier: String::new(),
+                enabled: false,
+                upstream: false,
+                note: String::new(),
+            })
+            .unwrap();
+        let names2: Vec<String> = s
+            .plan_models(&p, &[])
+            .iter()
+            .filter_map(|v| v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert!(!names2.iter().any(|m| m == "kimi-k3"), "disabled model still listed");
+        let _ = crate::models::registry().delete_model("kimi-k3");
+    }
+
     #[test]
     fn concurrency_cap_enforced() {
         let s = store();
@@ -2156,6 +2219,7 @@ mod tests {
             cache_write_per_m: 0.0,
             tier: "standard".into(),
             enabled: true,
+            upstream: false,
             note: String::new(),
         };
         reg.upsert_model(mk(base, 4.0, 20.0)).unwrap();

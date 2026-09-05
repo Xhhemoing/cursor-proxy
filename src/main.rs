@@ -540,6 +540,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::delete(admin::api_card_plan_delete),
         )
         .route(
+            "/admin/api/cards/plans/:id/models",
+            get(admin::api_card_plan_models),
+        )
+        .route(
             "/admin/api/cards/plans/seed",
             post(admin::api_card_plans_seed),
         )
@@ -872,10 +876,30 @@ async fn models_handler(
     let config = state.config.load();
     let _used_key = check_auth(&headers, &config)?;
     let created = chrono::Utc::now().timestamp();
-    let mut ids: Vec<String> = vec![config.default_model.clone()];
-    for id in ["kimi-k3", "kimi-k3-low", "kimi-k3-high", "kimi-k3-max"] {
-        if !ids.iter().any(|x| x == id) {
-            ids.push(id.to_string());
+    // 动态列表: 注册表 ∪ 内置表 ∪ 账本出现过的模型; 全局停用 (enabled=false) 的不列出.
+    // 之前是硬编码 4 个 kimi —— 面板里配了价格的模型在 bot 的模型选择器里根本看不到.
+    let mut ids: Vec<String> = vec![];
+    let mut push = |id: String| {
+        if !ids.iter().any(|x| *x == id) {
+            ids.push(id);
+        }
+    };
+    push(config.default_model.clone());
+    let reg = models::registry();
+    let snap = reg.snapshot();
+    for e in &snap.models {
+        if e.enabled {
+            push(e.model.clone());
+        }
+    }
+    for (m, ..) in cards::builtin_table() {
+        if !reg.is_disabled(&m) {
+            push(m);
+        }
+    }
+    for (m, _) in admin::seen_models(&state) {
+        if !reg.is_disabled(&m) {
+            push(m);
         }
     }
     let data: Vec<Value> = ids
