@@ -250,6 +250,53 @@ pub fn parse_quota(sand: &Value, period: &Value) -> QuotaSnapshot {
 }
 
 impl CursorClient {
+    /// 拉取该账号可用的全部模型 (AvailableModels RPC)
+    pub async fn available_models(
+        &self,
+        access_token: &str,
+        machine_id: &str,
+    ) -> Result<Value, CursorError> {
+        let mut req = hyper::Request::builder()
+            .method("POST")
+            .uri(format!("{}/aiserver.v1.AiService/AvailableModels", self.backend()))
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .header("connect-timeout-ms", "15000")
+            .header("accept", "application/json")
+            .header("accept-encoding", "identity");
+        for (k, v) in crate::cursor::cursor_headers(access_token, machine_id) {
+            req = req.header(k, v);
+        }
+        let req = req
+            .body(http_body_util::Full::new(hyper::body::Bytes::from_static(b"{}")))
+            .map_err(|e| CursorError::Network(e.to_string()))?;
+        let resp = self
+            .request(req)
+            .await
+            .map_err(|e| CursorError::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let body_bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .map_err(|e| CursorError::Network(e.to_string()))?
+            .to_bytes();
+        if status >= 400 {
+            let text = String::from_utf8_lossy(&body_bytes);
+            return Err(CursorError::Http(status, text.chars().take(200).collect()));
+        }
+        if let Ok(v) = serde_json::from_slice::<Value>(&body_bytes) {
+            return Ok(v);
+        }
+        if body_bytes.len() >= 5 {
+            let n = u32::from_be_bytes([body_bytes[1], body_bytes[2], body_bytes[3], body_bytes[4]]) as usize;
+            if body_bytes.len() >= 5 + n {
+                if let Ok(v) = serde_json::from_slice::<Value>(&body_bytes[5..5 + n]) {
+                    return Ok(v);
+                }
+            }
+        }
+        Err(CursorError::Decode("available models response not json".into()))
+    }
+
     pub async fn dashboard_call(
         &self,
         access_token: &str,

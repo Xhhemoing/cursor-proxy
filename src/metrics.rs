@@ -200,6 +200,7 @@ mod tests {
                 refresh_url: None,
                 proxy_id: None,
                 tags: Vec::new(),
+                priority: 50,
             }],
             2,
         );

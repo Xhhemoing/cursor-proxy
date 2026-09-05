@@ -168,6 +168,9 @@
     .page-fill .panel.fill .foot-row { padding: 6px 10px; border-top: 1px solid var(--line); }
     .form-grid .span-2 { grid-column: span 2; }
 
+    .qbar { display: inline-block; width: 90px; height: 6px; background: var(--bg-3); border-radius: 3px; overflow: hidden; vertical-align: middle; margin-right: 6px; }
+    .qbar i { display: block; height: 100%; border-radius: 3px; }
+    .qbar i.ok { background: var(--ok); } .qbar i.warn { background: var(--warn); } .qbar i.bad { background: var(--bad); }
     /* ---------- 表格 ---------- */
     .table-scroll { overflow: auto; flex: 1; min-height: 0; max-height: none; }
     table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
@@ -283,6 +286,7 @@
         <div class="sub">号池控制台</div>
       </div>
       <nav id="nav">
+        <a href="#overview" data-page="overview">概览</a>
         <div class="grp">运营</div>
         <a href="#pool" data-page="pool">号池<span class="badge" id="nav-pool-badge"></span></a>
         <a href="#proxies" data-page="proxies">IP 代理池<span class="badge" id="nav-proxy-badge"></span></a>
@@ -291,7 +295,6 @@
         <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
         <a href="#models" data-page="models">模型<span class="badge" id="nav-models-badge"></span></a>
         <div class="grp">观测</div>
-        <a href="#overview" data-page="overview">概览</a>
         <a href="#health" data-page="health">健康诊断<span class="badge" id="nav-health-badge"></span></a>
         <a href="#logs" data-page="logs">请求日志</a>
         <div class="grp">系统</div>
@@ -315,24 +318,37 @@
       <!-- ================= 概览 ================= -->
       <section class="page page-fill" id="page-overview">
         <div class="page-head">
-          <div><h2>概览</h2><p>号池健康与今日收入 · 每 4 秒自动刷新</p></div>
+          <div><h2>概览</h2><p>全局健康 · 今日经营 · 每 4 秒自动刷新</p></div>
           <div class="actions"><button type="button" class="ghost" id="ov-refresh">刷新</button></div>
         </div>
         <div class="stats">
-          <div class="stat"><div class="l">账号</div><div class="v" id="k-total">–</div><div class="s">号池总数</div></div>
-          <div class="stat"><div class="l">可用</div><div class="v ok" id="k-avail">–</div><div class="s">可被调度</div></div>
-          <div class="stat"><div class="l">在飞</div><div class="v" id="k-inflight">–</div><div class="s">当前占用槽位</div></div>
-          <div class="stat"><div class="l">冷却中</div><div class="v warn" id="k-cooling">–</div><div class="s">等待恢复</div></div>
-          <div class="stat"><div class="l">今日金额</div><div class="v" id="ov-cost">–</div><div class="s"><span id="ov-cur"></span> 计费价</div></div>
-          <div class="stat"><div class="l">今日分成</div><div class="v warn" id="ov-comm">–</div><div class="s">销售应得</div></div>
-          <div class="stat"><div class="l">今日请求</div><div class="v" id="ov-req">–</div><div class="s">已入账</div></div>
-          <div class="stat"><div class="l">今日 TOKENS</div><div class="v" id="ov-tok">–</div><div class="s">输入 + 输出</div></div>
+          <div class="stat"><div class="l">账号</div><div class="v" id="k-total">–</div><div class="s">可用 <b class="ok" id="k-avail">–</b> · 冷却 <b class="warn" id="k-cooling">–</b></div></div>
+          <div class="stat"><div class="l">额度剩余</div><div class="v" id="ov-quota-left">–</div><div class="s" id="ov-quota-sub">号池合计</div></div>
+          <div class="stat"><div class="l">今日收入</div><div class="v ok" id="ov-cost">–</div><div class="s">分成 <b class="warn" id="ov-comm">–</b> <span id="ov-cur"></span></div></div>
+          <div class="stat"><div class="l">套餐卡利润</div><div class="v" id="ov-card-profit">–</div><div class="s">今日 · 毛利 <b class="mono" id="ov-card-margin">–</b></div></div>
+          <div class="stat"><div class="l">今日请求</div><div class="v" id="ov-req">–</div><div class="s">错误率 <b id="ov-err-rate">–</b></div></div>
+          <div class="stat"><div class="l">延迟 p50 / p90</div><div class="v sm" id="ov-lat">–</div><div class="s">日志缓冲区</div></div>
+          <div class="stat"><div class="l">在飞</div><div class="v" id="k-inflight">–</div><div class="s">全局 RPM <b class="mono" id="k-rpm">–</b></div></div>
           <div class="stat"><div class="l">默认模型</div><div class="v sm" id="k-model">–</div><div class="s">未指定 model 时</div></div>
-          <div class="stat"><div class="l">全局 RPM</div><div class="v" id="k-rpm">–</div><div class="s">每分钟请求</div></div>
         </div>
-        <div class="panel fill" id="overview-log">
-          <div class="ph"><h3>最近请求</h3><p>最新 12 条</p></div>
-          <div class="log" id="log-body-ov"></div>
+        <div class="grid-2" style="flex:1;min-height:0;grid-template-columns:1fr 1fr">
+          <div class="panel fill" style="margin-bottom:0">
+            <div class="ph"><h3>号池额度</h3><p>按周额度剩余排序 · 点击进号池</p></div>
+            <div class="table-scroll"><table>
+              <thead><tr><th>账号</th><th>额度使用</th><th>剩余 $</th><th>重置</th><th>状态</th></tr></thead>
+              <tbody id="ov-pool-body"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+            </table></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;min-height:0">
+            <div class="panel" style="margin-bottom:0;flex:0 0 auto">
+              <div class="ph"><h3>今日按模型</h3><p>请求 / 金额</p></div>
+              <div class="table-scroll" style="max-height:180px"><table><tbody id="ov-models-body"><tr><td class="muted">–</td></tr></tbody></table></div>
+            </div>
+            <div class="panel fill" id="overview-log" style="margin-bottom:0">
+              <div class="ph"><h3>最近请求</h3><p>最新 12 条 · 含失败</p></div>
+              <div class="log" id="log-body-ov"></div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -408,7 +424,7 @@
               <thead>
                 <tr>
                   <th style="width:44px"><input type="checkbox" id="acc-check-all"></th>
-                  <th>ID</th><th class="num">请求</th><th class="num">错误</th><th class="num">在飞</th><th>额度</th><th>出口</th><th>状态</th><th>健康</th><th></th>
+                  <th>ID</th><th class="num">请求</th><th class="num">错误</th><th class="num">在飞</th><th>额度</th><th>优先级</th><th>出口</th><th>状态</th><th>健康</th><th></th>
                 </tr>
               </thead>
               <tbody id="acc-body"></tbody>
@@ -752,6 +768,8 @@
         <div class="page-head">
           <div><h2>模型</h2><p>手动定价 / 层级 / 停用 · 模型组（供 API Key 与套餐限定可访问范围）</p></div>
           <div class="actions">
+            <button type="button" class="ghost" id="md-fetch-upstream">获取可用模型</button>
+            <button type="button" class="ghost" id="md-sync-litellm">从 litellm 同步价格</button>
             <button type="button" class="ghost" id="md-import-builtin">导入内置价格表</button>
             <button type="button" class="ghost" id="md-refresh">刷新</button>
           </div>
@@ -790,6 +808,13 @@
                 <label>层级 <select id="md-tier-f"><option value="">全部</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
               </div>
             </form>
+            <div class="panel" id="md-upstream-box" style="display:none;flex:0 0 auto;margin-bottom:8px">
+              <div class="ph"><h3>上游可用模型</h3></div>
+              <div class="table-scroll" style="max-height:220px"><table>
+                <thead><tr><th>模型</th><th>层级</th><th>价格 in/out</th><th>状态</th><th></th></tr></thead>
+                <tbody id="md-upstream-body"></tbody>
+              </table></div>
+            </div>
             <div class="panel fill">
               <div class="ph"><h3>模型列表 <span class="muted" id="md-count"></span></h3></div>
               <div class="table-scroll">
@@ -930,29 +955,34 @@
             <details class="add" id="cd-plan-add">
               <summary>新建 / 编辑套餐（同 id 即覆盖，留空字段沿用原值）</summary>
               <div class="body">
-                <div class="form-grid">
+                <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
                   <label>id <input id="cp-id" placeholder="day-std-1"></label>
                   <label>名称 <input id="cp-name" placeholder="畅饮·标准 1并发"></label>
                   <label>售价 ¥ <input id="cp-price" type="number" step="0.1" min="0"></label>
-                  <label>类型 <select id="cp-kind"><option value="unlimited">unlimited 畅饮</option><option value="quota">quota 定额</option></select></label>
-                  <label>定额面值 $ <input id="cp-face" type="number" step="1" min="0" placeholder="仅 quota"></label>
-                  <label>模型层级 <select id="cp-tier"><option value="">不限</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
+                  <label>类型 <select id="cp-kind"><option value="unlimited">畅饮（不限次）</option><option value="quota">定额（用完即止）</option></select></label>
+                  <label id="cp-face-wrap" style="display:none">定额面值 $ <input id="cp-face" type="number" step="1" min="0" placeholder="如 200"></label>
                   <label>时长 h <input id="cp-dur" type="number" min="1" placeholder="24"></label>
                   <label>并发 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
-                  <label>RPM <input id="cp-rpm" type="number" min="0" placeholder="30"></label>
-                  <label>日次数帽 <input id="cp-rpd" type="number" min="0" placeholder="0=关"></label>
-                  <label>日额度帽 $ <input id="cp-dq" type="number" step="1" min="0" placeholder="0=关"></label>
-                  <label>软化比 <input id="cp-soft" type="number" step="0.05" min="0" max="1" placeholder="0.7"></label>
-                  <label>压制并发 <input id="cp-dconc" type="number" min="1" placeholder="1"></label>
-                  <label>匀速 normal tok/s <input id="cp-p0" type="number" min="0" placeholder="0=不限速"></label>
-                  <label>匀速 soften <input id="cp-p1" type="number" min="0" placeholder="0=不限速"></label>
-                  <label>匀速 degraded <input id="cp-p2" type="number" min="0" placeholder="0=不限速"></label>
-                  <label>行为评分阈值 <input id="cp-abuse" type="number" min="0" max="100" placeholder="55, 0=关"></label>
-                  <label>模型前缀 <input id="cp-prefix" placeholder="逗号分隔, 空=不限"></label>
+                  <label>模型层级 <select id="cp-tier"><option value="">不限</option><option value="economy">economy（便宜）</option><option value="standard">standard</option><option value="flagship">flagship（全模型）</option></select></label>
                   <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限；与层级同时生效）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
-                  <label class="span-2">备注 <input id="cp-note"></label>
                   <label class="inline"><input type="checkbox" id="cp-enabled" checked> 启用</label>
                 </div>
+                <details id="cp-adv" style="margin-top:8px">
+                  <summary style="cursor:pointer;color:var(--muted);font-size:12px">高级限制（一般不用动）</summary>
+                  <div class="form-grid" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+                    <label>RPM <input id="cp-rpm" type="number" min="0" placeholder="30"></label>
+                    <label>日次数帽 <input id="cp-rpd" type="number" min="0" placeholder="0=关"></label>
+                    <label>日额度帽 $ <input id="cp-dq" type="number" step="1" min="0" placeholder="0=关"></label>
+                    <label>软化比 <input id="cp-soft" type="number" step="0.05" min="0" max="1" placeholder="0.7"></label>
+                    <label>压制并发 <input id="cp-dconc" type="number" min="1" placeholder="1"></label>
+                    <label>匀速 normal <input id="cp-p0" type="number" min="0" placeholder="0=不限速"></label>
+                    <label>匀速 soften <input id="cp-p1" type="number" min="0" placeholder="0=不限速"></label>
+                    <label>匀速 degraded <input id="cp-p2" type="number" min="0" placeholder="0=不限速"></label>
+                    <label>行为评分阈值 <input id="cp-abuse" type="number" min="0" max="100" placeholder="55, 0=关"></label>
+                    <label>模型前缀 <input id="cp-prefix" placeholder="逗号分隔, 空=不限"></label>
+                    <label class="span-2">备注 <input id="cp-note"></label>
+                  </div>
+                </details>
                 <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
                   <button type="button" class="ghost" id="cp-reset">清空</button>
                   <button type="button" id="cp-save">保存套餐</button>
@@ -1141,10 +1171,16 @@
       if (acc.quota && acc.quota.plan) top.appendChild(el('span', { class: 'pill gray' }, String(acc.quota.plan).toUpperCase()));
       c.appendChild(top);
       if (acc.cooldown || (acc.errors > 0 && !acc.enabled)) c.appendChild(el('span', { class: 'star' }, '✳'));
-      c.appendChild(el('div', { class: 'meta' }, fmtQuota(acc.quota)));
+      if (acc.quota && acc.quota.usage_percent != null) {
+        const qw = el('div', { class: 'meta' });
+        qw.innerHTML = quotaBar(acc.quota.usage_percent) + '<span class="mono" style="font-size:11px">' + Number(acc.quota.usage_percent).toFixed(1) + '% · 剩 $' + (quotaLeft(acc) || 0).toFixed(0) + ' · ' + fmtReset(acc.quota) + ' 重置</span>';
+        c.appendChild(qw);
+      } else {
+        c.appendChild(el('div', { class: 'meta' }, fmtQuota(acc.quota)));
+      }
       if (acc.stats && acc.stats.consecutive_errors > 0) c.appendChild(el('div', { class: 'err' }, '连续错误 ' + acc.stats.consecutive_errors + ' 次' + (acc.stats.auto_disabled_count ? ' · 自动禁用 ' + acc.stats.auto_disabled_count + ' 次' : '')));
       const rows = el('div', { class: 'rows' });
-      [['请求', fmtN(acc.requests)], ['错误', String(acc.errors)], ['在飞', acc.inflight + ' / ' + acc.max_concurrency], ['健康', acc.health_score == null ? '—' : acc.health_score + ' / 100']]
+      [['优先级', String(acc.priority != null ? acc.priority : 50)], ['请求', fmtN(acc.requests)], ['错误', String(acc.errors)], ['在飞', acc.inflight + ' / ' + acc.max_concurrency], ['健康', acc.health_score == null ? '—' : acc.health_score + ' / 100']]
         .forEach(([k, v]) => { const d = el('div'); d.appendChild(el('span', null, k)); d.appendChild(el('span', null, v)); rows.appendChild(d); });
       c.appendChild(rows);
       const foot = el('div', { class: 'foot' });
@@ -1187,8 +1223,14 @@
         if (acc.errors > 0) err.classList.add('bad');
         tr.appendChild(err);
         tr.appendChild(el('td', { class: 'num' }, String(acc.inflight) + ' / ' + String(acc.max_concurrency)));
-        const qtd = el('td', { class: 'text' }, fmtQuota(acc.quota));
+        const qtd = el('td', { class: 'text' });
+        if (acc.quota && acc.quota.usage_percent != null) {
+          qtd.innerHTML = quotaBar(acc.quota.usage_percent) + '<span class="mono" style="font-size:11px">' + Number(acc.quota.usage_percent).toFixed(1) + '% · 剩 $' + (quotaLeft(acc) || 0).toFixed(0) + '</span>';
+        } else {
+          qtd.textContent = fmtQuota(acc.quota);
+        }
         tr.appendChild(qtd);
+        tr.appendChild(el('td', { class: 'num', title: '调度优先级(小=优先)' }, String(acc.priority != null ? acc.priority : 50)));
         const egress = (acc.assigned_proxy || acc.proxy_id || '直连') + (acc.proxy_mode === 'manual' ? ' 手动' : acc.proxy_mode === 'auto' ? ' 自动' : '');
         tr.appendChild(el('td', { class: 'text' }, egress));
         const [label, cls] = statusCell(acc);
@@ -1598,6 +1640,7 @@
       document.getElementById('f-timeout').value = settings.timeout_s;
       document.getElementById('f-conc').value = settings.max_concurrency_per_account;
       renderAccounts(pool);
+      renderOverviewPool(pool);
       renderKeys(keys);
       renderLogs(allLogs);
       renderProxies(proxies);
@@ -1613,6 +1656,7 @@
         .forEach(([k, v]) => { kv.appendChild(el('dt', null, k)); kv.appendChild(el('dd', null, v == null ? '—' : String(v))); });
       setLive(true);
       loadOverviewBilling().catch(() => {});
+      loadOverviewExtra().catch(() => {});
     }
     function setLive(ok) {
       const n = document.getElementById('live');
@@ -1716,8 +1760,13 @@
       set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
       renderGroupPicker(document.getElementById('cp-groups'), p.model_groups || []);
       document.getElementById('cp-enabled').checked = !!p.enabled;
+      document.getElementById('cp-kind').dispatchEvent(new Event('change'));
+      document.getElementById('cp-adv').open = true;
       document.getElementById('cp-id').scrollIntoView({ block: 'center' });
     }
+    document.getElementById('cp-kind').addEventListener('change', (e) => {
+      document.getElementById('cp-face-wrap').style.display = e.target.value === 'quota' ? '' : 'none';
+    });
     document.getElementById('cp-reset').addEventListener('click', () => {
       document.querySelectorAll('#cd-plan-add input, #cd-plan-add select').forEach((n) => { if (n.type === 'checkbox') n.checked = true; else n.value = ''; });
       document.getElementById('cp-kind').value = 'unlimited';
@@ -2152,6 +2201,135 @@
     document.getElementById('lg-detail-close').addEventListener('click', () => document.getElementById('lg-detail').close());
     document.getElementById('lg-detail-copy').addEventListener('click', async () => { await copyText(document.getElementById('lg-detail-body').textContent); lgMsg('已复制'); });
     lgSetLive(true);
+    // ---------- 概览 (重构: 默认首屏) ----------
+    function quotaLeft(acc) {
+      const q = acc.quota;
+      if (!q || q.usage_percent == null) return null;
+      return Math.max(0, 1000 * (1 - q.usage_percent / 100));
+    }
+    function fmtReset(q) {
+      const t = q && (q.next_reset_at || q.billing_cycle_end_at);
+      if (!t) return '–';
+      const d = new Date(t * 1000);
+      const p2 = (n) => String(n).padStart(2, '0');
+      return (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+    }
+    function quotaBar(pct) {
+      const p = Math.max(0, Math.min(100, pct || 0));
+      const cls = p >= 90 ? 'bad' : p >= 70 ? 'warn' : 'ok';
+      return '<div class="qbar"><i class="' + cls + '" style="width:' + p.toFixed(1) + '%"></i></div>';
+    }
+    function renderOverviewPool(pool) {
+      const tb = document.getElementById('ov-pool-body');
+      if (!tb) return;
+      tb.innerHTML = '';
+      const rows = (pool.accounts || []).slice().sort((a, b) => {
+        const la = quotaLeft(a), lb = quotaLeft(b);
+        if (la == null && lb == null) return 0;
+        if (la == null) return 1;
+        if (lb == null) return -1;
+        return la - lb;
+      });
+      if (!rows.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">号池为空</td></tr>'; return; }
+      let totalLeft = 0, known = 0;
+      rows.forEach((acc) => {
+        const q = acc.quota || {};
+        const pct = q.usage_percent;
+        const left = quotaLeft(acc);
+        if (left != null) { totalLeft += left; known++; }
+        const tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', () => { location.hash = '#pool'; });
+        const [label, cls] = statusCell(acc);
+        tr.innerHTML = '<td class="mono">' + esc(acc.id) + '</td>' +
+          '<td style="min-width:120px">' + (pct != null ? quotaBar(pct) + '<span class="mono" style="font-size:11px">' + Number(pct).toFixed(1) + '%</span>' : '<span class="muted">未探测</span>') + '</td>' +
+          '<td class="mono">' + (left != null ? '$' + left.toFixed(0) : '–') + '</td>' +
+          '<td class="mono muted" style="font-size:11px">' + fmtReset(q) + '</td>' +
+          '<td><span class="pill ' + cls + '">' + label + '</span></td>';
+        tb.appendChild(tr);
+      });
+      const elL = document.getElementById('ov-quota-left');
+      if (elL) {
+        elL.textContent = known ? '$' + totalLeft.toFixed(0) : '–';
+        document.getElementById('ov-quota-sub').textContent = known ? known + ' 个号已探测 · 周额度' : '未探测';
+      }
+    }
+    async function loadOverviewExtra() {
+      // 套餐卡今日利润 + 日志统计 + 今日按模型
+      const d = localDate(new Date());
+      try {
+        const p = await api('/admin/api/cards/profit?group=plan&from=' + d + '&to=' + d);
+        const t = p.totals || {};
+        const el = document.getElementById('ov-card-profit');
+        if (el) {
+          el.textContent = '¥' + Number(t.profit_rmb || 0).toFixed(2);
+          el.className = 'v ' + ((t.profit_rmb || 0) >= 0 ? 'ok' : 'bad');
+          document.getElementById('ov-card-margin').textContent = t.margin == null ? '–' : (t.margin * 100).toFixed(1) + '%';
+        }
+      } catch (_) {}
+      try {
+        const s = await api('/admin/api/logs/stats');
+        const r = document.getElementById('ov-err-rate');
+        if (r) {
+          r.textContent = ((s.error_rate || 0) * 100).toFixed(1) + '%';
+          r.className = s.error_rate > 0.1 ? 'bad' : s.error_rate > 0.02 ? 'warn' : 'ok';
+        }
+        const L = s.latency || {};
+        const el = document.getElementById('ov-lat');
+        if (el) el.textContent = fmtLat(L.p50_ms) + ' / ' + fmtLat(L.p90_ms);
+      } catch (_) {}
+      try {
+        const m = await api('/admin/api/billing/summary?group=model&from=' + d + '&to=' + d);
+        const tb = document.getElementById('ov-models-body');
+        if (tb) {
+          tb.innerHTML = '';
+          const rows = (m.rows || []).slice(0, 10);
+          if (!rows.length) tb.innerHTML = '<tr><td class="muted">今日暂无</td></tr>';
+          rows.forEach((r) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td class="mono" style="font-size:11px">' + esc(r.model || '') + '</td><td class="mono">' + fmtN(r.requests) + '</td><td class="mono muted">' + esc(String(r.cost || '')) + '</td>';
+            tb.appendChild(tr);
+          });
+        }
+      } catch (_) {}
+    }
+
+    // ---------- 模型页: 上游可用模型 + litellm 同步 ----------
+    document.getElementById('md-fetch-upstream').addEventListener('click', async () => {
+      mdMsg('正在向上游拉取可用模型…');
+      try {
+        const d = await api('/admin/api/models/upstream');
+        const news = (d.models || []).filter((m) => !m.in_registry);
+        mdMsg('账号 ' + d.account + ' 返回 ' + d.count + ' 个模型；' + news.length + ' 个未在模型列表');
+        const box = document.getElementById('md-upstream-box');
+        box.style.display = '';
+        const tb = document.getElementById('md-upstream-body');
+        tb.innerHTML = '';
+        (d.models || []).forEach((m) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td class="mono">' + esc(m.model) + '</td><td>' + tierPill(m.tier) + '</td>' +
+            '<td class="mono">$' + Number(m.price[0]).toFixed(2) + '/$' + Number(m.price[1]).toFixed(2) + '</td>' +
+            '<td>' + (m.in_registry ? '<span class="muted">已有</span>' : '<span class="pill warn">未添加</span>') + '</td><td></td>';
+          if (!m.in_registry) {
+            tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '添加')).addEventListener('click', async () => {
+              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, input_per_m: m.price[0], output_per_m: m.price[1], cache_read_per_m: m.price[2], cache_write_per_m: m.price[3], note: 'upstream' }) });
+              await loadModelsPage();
+              document.getElementById('md-fetch-upstream').click();
+            });
+          }
+          tb.appendChild(tr);
+        });
+      } catch (e) { mdMsg(e.message, true); }
+    });
+    document.getElementById('md-sync-litellm').addEventListener('click', async () => {
+      if (!confirm('从 litellm 公共价格表同步价格？只填未手动设置过的模型，不覆盖你的手改')) return;
+      mdMsg('正在同步 litellm…');
+      try {
+        const d = await api('/admin/api/models/sync-litellm', { method: 'POST' });
+        mdMsg('已填 ' + (d.filled || []).length + ' 个；跳过手动 ' + (d.skipped_manual || []).length + ' 个；无价格 ' + (d.no_price || []).length + ' 个');
+        await loadModelsPage();
+      } catch (e) { mdMsg(e.message, true); }
+    });
     // ---------- 路由: hash → 页面 ----------
     const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'cards', 'models', 'settings', 'logs', 'health'];
     function showPage(name) {
@@ -3099,6 +3277,7 @@
 
     // 操作后即时刷新（不等待下一轮轮询）
     function refreshSoon() { setTimeout(() => loadAll().catch(() => {}), 100); }
+    if (!location.hash) location.hash = '#overview';
     showPage(location.hash.slice(1));
     loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });
     startPolling();

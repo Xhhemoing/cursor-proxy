@@ -385,3 +385,181 @@ pub async fn api_groups_delete(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
+
+// ── 上游可用模型 / litellm 一键同步 ──
+
+/// GET /admin/api/models/upstream — 用号池第一个可用号拉 Cursor 官方可用模型列表
+pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response {
+    let acc = state
+        .pool
+        .accounts()
+        .into_iter()
+        .find(|a| a.enabled)
+        .or_else(|| state.pool.accounts().into_iter().next());
+    let Some(acc) = acc else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "no accounts"}))).into_response();
+    };
+    match state.cursor.available_models(&acc.access_token, &acc.machine_id).await {
+        Ok(v) => {
+            let names = extract_model_names(&v);
+            let reg = registry();
+            let rows: Vec<Value> = names
+                .iter()
+                .map(|m| {
+                    let manual = reg.get_exact(m).is_some();
+                    json!({
+                        "model": m,
+                        "in_registry": manual,
+                        "tier": cards::model_tier(m),
+                        "price": cards::model_price(m),
+                    })
+                })
+                .collect();
+            Json(json!({"account": acc.id, "models": rows, "count": rows.len()})).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// AvailableModels 响应的模型名提取: 兼容 {"models":[{"name":..}|".."]} / {"modelIds":[..]} 等
+fn extract_model_names(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut walk = |arr: &Vec<Value>| {
+        for it in arr {
+            let n = it
+                .as_str()
+                .map(|s| s.to_string())
+                .or_else(|| it.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                .or_else(|| it.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()));
+            if let Some(n) = n {
+                if !n.is_empty() && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+    };
+    for key in ["models", "modelIds", "model_ids", "availableModels", "available_models"] {
+        if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
+            walk(arr);
+        }
+    }
+    out
+}
+
+const LITELLM_URLS: &[&str] = &[
+    "https://fastly.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json",
+    "https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json",
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+];
+
+/// Cursor 模型名 → litellm 目录名候选 (第一个命中即采用)
+fn litellm_candidates(model: &str) -> Vec<String> {
+    let mut c: Vec<String> = vec![model.to_string()];
+    if let Some(base) = model.strip_suffix("-fast") {
+        c.push(base.to_string());
+    }
+    if let Some(rest) = model.strip_prefix("cursor-") {
+        c.push(rest.to_string());
+    }
+    // 家族映射 (与 Python 版 pricing.py FAMILIES 一致)
+    for (prefix, vendor) in [
+        ("claude-4.5-sonnet", "claude-sonnet-4-5"),
+        ("claude-4.5-haiku", "claude-haiku-4-5"),
+        ("claude-4.5-opus", "claude-opus-4-5"),
+        ("gpt-5.6-sol", "gpt-5.6"),
+        ("gpt-5", "gpt-5"),
+        ("grok", "grok-4"),
+    ] {
+        if model.starts_with(prefix) {
+            c.push(vendor.to_string());
+        }
+    }
+    c
+}
+
+/// POST /admin/api/models/sync-litellm — 拉 litellm 价格表, 为已知模型填价.
+/// 只填「注册表里没有手动条目」的模型; ?overwrite=1 才覆盖手动条目.
+pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q): Query<ImportQuery>) -> Response {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    };
+    let mut table: Option<Value> = None;
+    let mut errs: Vec<String> = vec![];
+    for url in LITELLM_URLS {
+        match client.get(*url).send().await {
+            Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+                Ok(v) => {
+                    table = Some(v);
+                    break;
+                }
+                Err(e) => errs.push(format!("{url}: parse {e}")),
+            },
+            Ok(r) => errs.push(format!("{url}: HTTP {}", r.status())),
+            Err(e) => errs.push(format!("{url}: {e}")),
+        }
+    }
+    let Some(table) = table else {
+        return (StatusCode::BAD_GATEWAY, Json(json!({"error": "all litellm mirrors failed", "detail": errs}))).into_response();
+    };
+    let price_of = |name: &str| -> Option<(f64, f64, f64, f64)> {
+        let e = table.get(name)?;
+        let g = |k: &str| e.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) * 1e6; // $/token → $/1M
+        Some((g("input_cost_per_token"), g("output_cost_per_token"), g("cache_read_input_token_cost"), g("cache_creation_input_token_cost")))
+    };
+    // 目标模型集合: 内置表 + 注册表已有 + 账本出现过的
+    let mut targets: Vec<String> = cards::builtin_table().iter().map(|(m, ..)| m.clone()).collect();
+    for e in &registry().snapshot().models {
+        if !targets.contains(&e.model) {
+            targets.push(e.model.clone());
+        }
+    }
+    for (m, _) in seen_models(&state) {
+        if !targets.contains(&m) {
+            targets.push(m);
+        }
+    }
+    let overwrite = q.overwrite == Some(1);
+    let reg = registry();
+    let mut filled: Vec<String> = vec![];
+    let mut skipped_manual: Vec<String> = vec![];
+    let mut no_price: Vec<String> = vec![];
+    for m in &targets {
+        if !overwrite && reg.get_exact(m).is_some() {
+            skipped_manual.push(m.clone());
+            continue;
+        }
+        let hit = litellm_candidates(m).iter().find_map(|cand| price_of(cand).map(|p| (cand.clone(), p)));
+        match hit {
+            Some((src, (i, o, c, w))) => {
+                let cur = reg.get_exact(m);
+                let e = ModelEntry {
+                    model: m.clone(),
+                    input_per_m: (i * 100.0).round() / 100.0,
+                    output_per_m: (o * 100.0).round() / 100.0,
+                    cache_read_per_m: (c * 100.0).round() / 100.0,
+                    cache_write_per_m: (w * 100.0).round() / 100.0,
+                    tier: cur.as_ref().map(|x| x.tier.clone()).unwrap_or_default(),
+                    enabled: cur.as_ref().map(|x| x.enabled).unwrap_or(true),
+                    note: format!("litellm:{src}"),
+                };
+                if reg.upsert_model(e).is_ok() {
+                    filled.push(m.clone());
+                }
+            }
+            None => no_price.push(m.clone()),
+        }
+    }
+    state.audit.key_op("models_sync_litellm", "*", json!({"filled": filled.len()}));
+    Json(json!({
+        "ok": true,
+        "filled": filled,
+        "skipped_manual": skipped_manual,
+        "no_price": no_price,
+        "note": "litellm 是公开目录价, 与 Cursor 官方口径可能不同; 关键模型建议用官方仪表盘对账后手动改",
+    }))
+    .into_response()
+}

@@ -555,6 +555,8 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_models_import_builtin),
         )
         .route("/admin/api/models/resolve", get(admin::api_models_resolve))
+        .route("/admin/api/models/upstream", get(admin::api_models_upstream))
+        .route("/admin/api/models/sync-litellm", post(admin::api_models_sync_litellm))
         .route(
             "/admin/api/models/groups",
             get(admin::api_groups_list).post(admin::api_groups_upsert),

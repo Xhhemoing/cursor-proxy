@@ -244,6 +244,9 @@ pub struct AccountUpsertBody {
     pub proxy_id: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 调度优先级 (小=优先); None = 保持原值或默认 50
+    #[serde(default)]
+    pub priority: Option<i32>,
 }
 
 fn default_true() -> bool {
@@ -265,8 +268,16 @@ pub async fn api_account_upsert(
         refresh_url: None,
         proxy_id: body.proxy_id.filter(|s| !s.trim().is_empty()),
         tags: body.tags,
+        priority: body.priority.unwrap_or(50),
     };
     let existed = state.pool.has_account(&acc.id);
+    let mut acc = acc;
+    // 覆盖已有账号且未显式传优先级时, 保留原值
+    if existed && body.priority.is_none() {
+        if let Some(old) = state.pool.accounts().iter().find(|a| a.id == acc.id) {
+            acc.priority = old.priority;
+        }
+    }
     match config::upsert_account(acc) {
         Ok(accounts) => {
             state.pool.replace_accounts(accounts);
@@ -521,6 +532,7 @@ pub async fn api_accounts_import(State(state): State<Arc<AppState>>, body: Strin
                     refresh_url: None,
                     proxy_id: None,
                     tags: Vec::new(),
+                    priority: 50,
                 });
             }
         }
@@ -563,6 +575,7 @@ pub async fn api_accounts_import(State(state): State<Arc<AppState>>, body: Strin
                 refresh_url: None,
                 proxy_id: None,
                 tags: Vec::new(),
+                priority: 50,
             });
         }
     }
@@ -703,6 +716,7 @@ pub struct AccountsBatchEditBody {
     pub enabled: Option<bool>,
     pub proxy_id: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
+    pub priority: Option<i32>,
 }
 
 /// POST /admin/api/accounts/batch-edit — 批量修改账号字段 (代理/标签/开关)
@@ -734,6 +748,9 @@ pub async fn api_accounts_batch_edit(
         }
         if let Some(ref t) = body.tags {
             acc.tags = t.clone();
+        }
+        if let Some(p) = body.priority {
+            acc.priority = p;
         }
         match config::save_accounts(&accounts) {
             Ok(_) => {

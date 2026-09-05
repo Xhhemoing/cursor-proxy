@@ -265,6 +265,9 @@ impl AccountPool {
                 })
             })
             .collect();
+        // 优先级调度: 数字小者优先 (同优先级保持原顺序, 稳定排序)
+        let mut available = available;
+        available.sort_by_key(|s| s.slot.account.priority);
         self.available_slots.store(Arc::new(available));
     }
 
@@ -559,6 +562,11 @@ impl AccountPool {
 
     pub fn has_account(&self, account_id: &str) -> bool {
         self.slots.contains_key(account_id)
+    }
+
+    /// 全部账号 (含禁用), 供 admin 读取配置字段 (如 priority)
+    pub fn accounts(&self) -> Vec<Account> {
+        self.slots.iter().map(|r| r.value().account.clone()).collect()
     }
 
     /// 清除冷却
@@ -1069,6 +1077,7 @@ impl AccountPool {
             "health_score": self.health_score(id).map(|h| h.score),
             "proxy_id": slot.account.proxy_id,
             "tags": slot.account.tags,
+            "priority": slot.account.priority,
         })
     }
 
@@ -1356,6 +1365,7 @@ mod tests {
             refresh_url: None,
             proxy_id: None,
             tags: Vec::new(),
+            priority: 50,
         }
     }
 

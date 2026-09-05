@@ -443,6 +443,13 @@ pub struct Account {
     /// 账号标签, 用于自动分配规则匹配
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 调度优先级: 数字越小越先被选中 (默认 50)
+    #[serde(default = "default_account_priority")]
+    pub priority: i32,
+}
+
+fn default_account_priority() -> i32 {
+    50
 }
 
 fn default_true() -> bool {
@@ -555,6 +562,7 @@ mod tests {
                 refresh_url: None,
                 proxy_id: None,
                 tags: Vec::new(),
+                priority: 50,
             }];
             atomic_write(
                 &accounts_path(),
