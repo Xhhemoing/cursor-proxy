@@ -301,13 +301,13 @@ fn default_soften_ratio() -> f64 {
     0.7
 }
 fn default_pace_normal() -> u32 {
-    25
+    0 // 0 = 不限速 (用户要求: 一开始不限速, 需要时按套餐单独开)
 }
 fn default_pace_soften() -> u32 {
-    18
+    0
 }
 fn default_pace_degraded() -> u32 {
-    12
+    0
 }
 fn default_abuse_threshold() -> u32 {
     55
@@ -355,7 +355,7 @@ impl CardPlan {
             duration_hours: 24,
             max_concurrency: conc,
             rpm_limit: 30 * conc,
-            note: "无限畅饮: 24h 不限次; 匀速流出 25 tok/s, 行为评分 ≥55 降到 12 tok/s".into(),
+            note: "无限畅饮: 24h 不限次, 不限速 (pace_* 全 0); 行为评分 ≥55 仅降并发".into(),
             ..CardPlan::default()
         };
         let quota = |id: &str, name: &str, price: f64, face: f64| CardPlan {
@@ -1321,6 +1321,10 @@ mod tests {
             fair_use_rpd: 5,
             degraded_concurrency: 1,
             abuse_score_threshold: 0, // 单测默认关行为评分, 单独测
+            // 单测显式开 pacing 以验证档位→速率映射; 生产默认 0 = 不限速
+            pace_normal_tps: 25,
+            pace_soften_tps: 18,
+            pace_degraded_tps: 12,
             ..CardPlan::default()
         }
     }
@@ -1335,6 +1339,19 @@ mod tests {
         assert_eq!(throttle, Throttle::Normal);
         assert_eq!(permit.pace_tps(), 25);
         drop(permit);
+    }
+
+    #[test]
+    fn default_plan_and_presets_have_no_pacing() {
+        let d = CardPlan::default();
+        assert_eq!((d.pace_normal_tps, d.pace_soften_tps, d.pace_degraded_tps), (0, 0, 0));
+        for p in CardPlan::presets() {
+            assert_eq!(p.pace_normal_tps, 0, "{}", p.id);
+            assert_eq!(p.pace_soften_tps, 0, "{}", p.id);
+            assert_eq!(p.pace_degraded_tps, 0, "{}", p.id);
+        }
+        // pace 0 → 不建 pacer
+        assert!(TokenPacer::new(0).is_none());
     }
 
     #[test]

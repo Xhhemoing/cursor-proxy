@@ -288,6 +288,7 @@
         <a href="#proxies" data-page="proxies">IP 代理池<span class="badge" id="nav-proxy-badge"></span></a>
         <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
         <a href="#billing" data-page="billing">计费账单</a>
+        <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
         <div class="grp">观测</div>
         <a href="#overview" data-page="overview">概览</a>
         <a href="#health" data-page="health">健康诊断<span class="badge" id="nav-health-badge"></span></a>
@@ -773,6 +774,147 @@
           </div>
         </div>
       </section>
+      <!-- ================= 套餐卡 ================= -->
+      <section class="page page-fill" id="page-cards">
+        <div class="page-head">
+          <div><h2>套餐卡</h2><p>无限畅饮 / 定额卡 · 独立 <code>card-</code> key · 成本按官方额度口径折算</p></div>
+          <div class="actions">
+            <button type="button" class="ghost" id="cd-seed">写入预置套餐</button>
+            <button type="button" class="ghost" id="cd-refresh">刷新</button>
+          </div>
+        </div>
+        <div id="cards-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
+          <div class="tabs">
+            <button type="button" class="active" data-tab="plans">套餐</button>
+            <button type="button" data-tab="cards">卡</button>
+            <button type="button" data-tab="profit">利润</button>
+            <button type="button" data-tab="cost">成本模型 / 价格表</button>
+          </div>
+          <div class="info" id="cd-msg" style="min-height:18px;margin-bottom:6px"></div>
+
+          <!-- 套餐 -->
+          <div id="cd-tab-plans" style="display:flex;flex:1;min-height:0;flex-direction:column">
+            <details class="add" id="cd-plan-add">
+              <summary>新建 / 编辑套餐（同 id 即覆盖，留空字段沿用原值）</summary>
+              <div class="body">
+                <div class="form-grid">
+                  <label>id <input id="cp-id" placeholder="day-std-1"></label>
+                  <label>名称 <input id="cp-name" placeholder="畅饮·标准 1并发"></label>
+                  <label>售价 ¥ <input id="cp-price" type="number" step="0.1" min="0"></label>
+                  <label>类型 <select id="cp-kind"><option value="unlimited">unlimited 畅饮</option><option value="quota">quota 定额</option></select></label>
+                  <label>定额面值 $ <input id="cp-face" type="number" step="1" min="0" placeholder="仅 quota"></label>
+                  <label>模型层级 <select id="cp-tier"><option value="">不限</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
+                  <label>时长 h <input id="cp-dur" type="number" min="1" placeholder="24"></label>
+                  <label>并发 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
+                  <label>RPM <input id="cp-rpm" type="number" min="0" placeholder="30"></label>
+                  <label>日次数帽 <input id="cp-rpd" type="number" min="0" placeholder="0=关"></label>
+                  <label>日额度帽 $ <input id="cp-dq" type="number" step="1" min="0" placeholder="0=关"></label>
+                  <label>软化比 <input id="cp-soft" type="number" step="0.05" min="0" max="1" placeholder="0.7"></label>
+                  <label>压制并发 <input id="cp-dconc" type="number" min="1" placeholder="1"></label>
+                  <label>匀速 normal tok/s <input id="cp-p0" type="number" min="0" placeholder="0=不限速"></label>
+                  <label>匀速 soften <input id="cp-p1" type="number" min="0" placeholder="0=不限速"></label>
+                  <label>匀速 degraded <input id="cp-p2" type="number" min="0" placeholder="0=不限速"></label>
+                  <label>行为评分阈值 <input id="cp-abuse" type="number" min="0" max="100" placeholder="55, 0=关"></label>
+                  <label>模型前缀 <input id="cp-prefix" placeholder="逗号分隔, 空=不限"></label>
+                  <label class="span-2">备注 <input id="cp-note"></label>
+                  <label class="inline"><input type="checkbox" id="cp-enabled" checked> 启用</label>
+                </div>
+                <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
+                  <button type="button" class="ghost" id="cp-reset">清空</button>
+                  <button type="button" id="cp-save">保存套餐</button>
+                </div>
+              </div>
+            </details>
+            <div class="panel fill">
+              <div class="ph"><h3>套餐列表</h3></div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>id</th><th>名称</th><th>售价</th><th>类型</th><th>层级</th><th>时长</th><th>并发</th><th>RPM</th><th>限速 tok/s</th><th>次数/额度帽</th><th>评分阈</th><th>状态</th><th></th></tr></thead>
+                  <tbody id="cd-plans-body"><tr><td colspan="13" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 卡 -->
+          <div id="cd-tab-cards" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <details class="add" id="cd-issue">
+              <summary>开卡</summary>
+              <div class="body">
+                <div class="form-grid">
+                  <label>套餐 <select id="ci-plan"></select></label>
+                  <label>归属 / 备注 <input id="ci-owner" placeholder="买家昵称"></label>
+                  <label>实收 ¥ <input id="ci-paid" type="number" step="0.1" min="0" placeholder="空=套餐价"></label>
+                  <label>张数 <input id="ci-count" type="number" min="1" max="100" value="1"></label>
+                </div>
+                <div class="toolbar" style="margin-top:10px;justify-content:flex-end"><button type="button" id="ci-submit">开卡</button></div>
+                <pre id="ci-out" class="mono" style="white-space:pre-wrap;margin:8px 0 0;font-size:12px"></pre>
+              </div>
+            </details>
+            <div class="panel fill">
+              <div class="ph"><h3>卡列表 <span class="muted" id="cd-cards-count"></span></h3></div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>卡号</th><th>套餐</th><th>归属</th><th>实收</th><th>到期</th><th>档位</th><th>在飞</th><th>今日次数</th><th>今日面值$</th><th>今日成本¥</th><th>定额余额$</th><th>评分</th><th>状态</th><th></th></tr></thead>
+                  <tbody id="cd-cards-body"><tr><td colspan="14" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 利润 -->
+          <div id="cd-tab-profit" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <form id="cd-profit-filter" class="filter">
+              <div class="fields">
+                <label>起 <input id="pf-from" placeholder="YYYY-MM-DD"></label>
+                <label>止（含） <input id="pf-to" placeholder="YYYY-MM-DD"></label>
+                <label>分组 <select id="pf-group"><option value="plan">按套餐</option><option value="card">按卡</option><option value="day">按天</option></select></label>
+              </div>
+              <div class="foot"><span class="info"></span><button type="submit">查询</button></div>
+            </form>
+            <div class="stat-strip">
+              <div><div class="l">收入 ¥</div><div class="v ok" id="pk-rev">–</div><div class="s">卡实收 (按开卡日)</div></div>
+              <div><div class="l">成本 ¥</div><div class="v warn" id="pk-cost">–</div><div class="s">面值 $<b class="mono" id="pk-face">–</b> × ¥/$ <b class="mono" id="pk-rate">–</b></div></div>
+              <div><div class="l">利润 ¥ / 毛利</div><div class="v" id="pk-profit">–</div><div class="s"><span id="pk-cards">–</span> 卡 · <span id="pk-req">–</span> 请求</div></div>
+            </div>
+            <div class="panel fill">
+              <div class="ph"><h3 id="cd-profit-title">按套餐</h3></div>
+              <div class="table-scroll">
+                <table>
+                  <thead id="cd-profit-head"></thead>
+                  <tbody id="cd-profit-body"><tr><td class="muted">点「查询」</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 成本 -->
+          <div id="cd-tab-cost" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <div class="panel" style="flex:0 0 auto">
+              <div class="ph"><h3>成本模型（Grok Heavy 号）</h3></div>
+              <div style="padding:10px 12px">
+                <div class="form-grid">
+                  <label>号价 ¥/号 <input id="cm-price" type="number" step="1" min="0"></label>
+                  <label>周额度 $/周 <input id="cm-quota" type="number" step="1" min="1"></label>
+                  <label>号可用周数 <input id="cm-weeks" type="number" step="0.5" min="0.5"></label>
+                  <label>= 成本 ¥ / 面值 $ <input id="cm-rate" readonly></label>
+                </div>
+                <div class="toolbar" style="margin-top:10px;justify-content:flex-end"><button type="button" id="cm-save">保存</button></div>
+              </div>
+            </div>
+            <div class="panel fill">
+              <div class="ph"><h3>官方价格表 ($/1M tokens) 与模型层级</h3></div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>模型</th><th>层级</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th></tr></thead>
+                  <tbody id="cd-price-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
   <script>
@@ -1353,8 +1495,245 @@
       document.getElementById('ov-tok').textContent = fmtN((t.input_tokens || 0) + (t.output_tokens || 0));
       document.getElementById('ov-cur').textContent = r.currency ? '(' + r.currency + ')' : '';
     }
+    // innerHTML 只拼接 esc() 转义后的服务端字段与固定模板, 数值直接 Number() 格式化
+    // ---------- 套餐卡 ----------
+    const CD_TABS = ['plans', 'cards', 'profit', 'cost'];
+    let cdTab = 'plans';
+    let cdPlans = [];
+    const cdMsg = (m, err) => toast('cd-msg', m, err);
+    const rmb = (v) => '¥' + Number(v || 0).toFixed(2);
+    const usd = (v, d) => '$' + Number(v || 0).toFixed(d == null ? 3 : d);
+    const pct = (v) => v == null ? '–' : (Number(v) * 100).toFixed(1) + '%';
+    const tsDate = (s) => s ? new Date(s * 1000).toLocaleString('zh-CN', { hour12: false }) : '–';
+    function paceLabel(p) {
+      if (!p.pace_normal_tps && !p.pace_soften_tps && !p.pace_degraded_tps) return '不限速';
+      return (p.pace_normal_tps || '∞') + ' / ' + (p.pace_soften_tps || '∞') + ' / ' + (p.pace_degraded_tps || '∞');
+    }
+    function capLabel(p) {
+      const a = [];
+      if (p.fair_use_rpd) a.push(p.fair_use_rpd + ' 次/日');
+      if (p.daily_quota_usd) a.push('$' + p.daily_quota_usd + '/日');
+      return a.length ? a.join(' · ') : '不限';
+    }
+    document.querySelectorAll('#cards-panel .tabs button').forEach((b) => {
+      b.addEventListener('click', () => {
+        cdTab = b.dataset.tab;
+        document.querySelectorAll('#cards-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
+        CD_TABS.forEach((t) => { document.getElementById('cd-tab-' + t).style.display = t === cdTab ? 'flex' : 'none'; });
+        loadCardsTab().catch((e) => cdMsg(e.message, true));
+      });
+    });
+    async function loadCardsTab() {
+      cdMsg('');
+      if (cdTab === 'plans') await loadPlans();
+      else if (cdTab === 'cards') await loadCards();
+      else if (cdTab === 'profit') await loadProfit();
+      else await loadCostModel();
+    }
+    // 套餐
+    async function loadPlans() {
+      const d = await api('/admin/api/cards/plans');
+      cdPlans = d.plans || [];
+      cdPlans.sort((a, b) => a.kind.localeCompare(b.kind) || a.price - b.price);
+      const tb = document.getElementById('cd-plans-body');
+      tb.innerHTML = '';
+      if (!cdPlans.length) { tb.innerHTML = '<tr><td colspan="13" class="muted">还没有套餐，点右上「写入预置套餐」</td></tr>'; }
+      cdPlans.forEach((p) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td class="mono">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mono">' + rmb(p.price) + '</td>' +
+          '<td>' + (p.kind === 'quota' ? '<span class="pill info">定额 $' + p.face_usd + '</span>' : '<span class="pill ok">畅饮</span>') + '</td>' +
+          '<td class="mono">' + esc(p.tier || '不限') + '</td><td class="mono">' + p.duration_hours + 'h</td>' +
+          '<td class="mono">' + p.max_concurrency + (p.degraded_concurrency && p.degraded_concurrency !== p.max_concurrency ? ' → ' + p.degraded_concurrency : '') + '</td>' +
+          '<td class="mono">' + p.rpm_limit + '</td><td class="mono">' + paceLabel(p) + '</td><td class="mono">' + capLabel(p) + '</td>' +
+          '<td class="mono">' + (p.abuse_score_threshold || '关') + '</td>' +
+          '<td>' + (p.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill warn">停用</span>') + '</td><td></td>';
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => fillPlanForm(p));
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, p.enabled ? '停用' : '启用')).addEventListener('click', async () => {
+          await api('/admin/api/cards/plans', { method: 'POST', body: JSON.stringify({ id: p.id, enabled: !p.enabled }) });
+          await loadPlans();
+        });
+        act.appendChild(el('button', { class: 'danger', type: 'button' }, '删除')).addEventListener('click', async () => {
+          if (!confirm('删除套餐 ' + p.id + '？有在用卡会被拒绝')) return;
+          try { await api('/admin/api/cards/plans/' + encodeURIComponent(p.id), { method: 'DELETE' }); await loadPlans(); }
+          catch (e) { cdMsg(e.message, true); }
+        });
+        tb.appendChild(tr);
+      });
+      const sel = document.getElementById('ci-plan');
+      sel.innerHTML = '';
+      cdPlans.filter((p) => p.enabled).forEach((p) => sel.appendChild(el('option', { value: p.id }, p.name + ' (' + rmb(p.price) + ')')));
+    }
+    function fillPlanForm(p) {
+      document.getElementById('cd-plan-add').open = true;
+      const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
+      set('cp-id', p.id); set('cp-name', p.name); set('cp-price', p.price); set('cp-kind', p.kind); set('cp-face', p.face_usd || '');
+      set('cp-tier', p.tier || ''); set('cp-dur', p.duration_hours); set('cp-conc', p.max_concurrency); set('cp-rpm', p.rpm_limit);
+      set('cp-rpd', p.fair_use_rpd); set('cp-dq', p.daily_quota_usd); set('cp-soft', p.soften_ratio); set('cp-dconc', p.degraded_concurrency);
+      set('cp-p0', p.pace_normal_tps); set('cp-p1', p.pace_soften_tps); set('cp-p2', p.pace_degraded_tps); set('cp-abuse', p.abuse_score_threshold);
+      set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
+      document.getElementById('cp-enabled').checked = !!p.enabled;
+      document.getElementById('cp-id').scrollIntoView({ block: 'center' });
+    }
+    document.getElementById('cp-reset').addEventListener('click', () => {
+      document.querySelectorAll('#cd-plan-add input, #cd-plan-add select').forEach((n) => { if (n.type === 'checkbox') n.checked = true; else n.value = ''; });
+      document.getElementById('cp-kind').value = 'unlimited';
+    });
+    document.getElementById('cp-save').addEventListener('click', async () => {
+      const g = (id) => document.getElementById(id).value.trim();
+      const num = (id) => { const v = g(id); return v === '' ? undefined : Number(v); };
+      const body = { id: g('cp-id') };
+      if (!body.id) return cdMsg('id 必填', true);
+      const isNew = !cdPlans.some((p) => p.id === body.id);
+      if (g('cp-name')) body.name = g('cp-name');
+      if (num('cp-price') != null) body.price = num('cp-price');
+      body.kind = g('cp-kind');
+      if (num('cp-face') != null) body.face_usd = num('cp-face');
+      body.tier = g('cp-tier');
+      const map = { duration_hours: 'cp-dur', max_concurrency: 'cp-conc', rpm_limit: 'cp-rpm', fair_use_rpd: 'cp-rpd', daily_quota_usd: 'cp-dq', soften_ratio: 'cp-soft', degraded_concurrency: 'cp-dconc', pace_normal_tps: 'cp-p0', pace_soften_tps: 'cp-p1', pace_degraded_tps: 'cp-p2', abuse_score_threshold: 'cp-abuse' };
+      Object.keys(map).forEach((k) => { const v = num(map[k]); if (v != null) body[k] = v; });
+      body.model_prefixes = g('cp-prefix') ? g('cp-prefix').split(',').map((s) => s.trim()).filter(Boolean) : [];
+      body.note = g('cp-note');
+      body.enabled = document.getElementById('cp-enabled').checked;
+      if (isNew && (body.name == null || body.price == null)) return cdMsg('新建套餐需要 名称 + 售价', true);
+      if (body.kind === 'quota' && isNew && !body.face_usd) return cdMsg('定额卡需要面值 $', true);
+      try {
+        await api('/admin/api/cards/plans', { method: 'POST', body: JSON.stringify(body) });
+        cdMsg((isNew ? '已创建 ' : '已更新 ') + body.id);
+        await loadPlans();
+      } catch (e) { cdMsg(e.message, true); }
+    });
+    document.getElementById('cd-seed').addEventListener('click', async () => {
+      if (!confirm('写入 10 档预置套餐？已存在的 id 不会覆盖')) return;
+      try { const d = await api('/admin/api/cards/plans/seed', { method: 'POST' }); cdMsg('写入 ' + d.written + ' 档'); await loadPlans(); }
+      catch (e) { cdMsg(e.message, true); }
+    });
+    document.getElementById('cd-refresh').addEventListener('click', () => loadCardsTab().catch((e) => cdMsg(e.message, true)));
+    // 卡
+    async function loadCards() {
+      const d = await api('/admin/api/cards');
+      const cards = (d.cards || []).sort((a, b) => (b.issued_at || 0) - (a.issued_at || 0));
+      document.getElementById('cd-cards-count').textContent = cards.length ? '(' + cards.length + ')' : '';
+      const tb = document.getElementById('cd-cards-body');
+      tb.innerHTML = '';
+      if (!cards.length) tb.innerHTML = '<tr><td colspan="14" class="muted">还没有卡</td></tr>';
+      cards.forEach((c) => {
+        const tr = document.createElement('tr');
+        const st = !c.enabled ? '<span class="pill bad">已吊销</span>' : c.expired ? '<span class="pill warn">已过期</span>' : '<span class="pill ok">有效</span>';
+        const thr = c.throttle === 'normal' ? '<span class="pill ok">normal</span>' : c.throttle === 'soften' ? '<span class="pill warn">soften</span>' : '<span class="pill bad">degraded</span>';
+        const pace = c.pace_tps ? ' <span class="muted mono">' + c.pace_tps + 't/s</span>' : '';
+        const score = c.abuse ? c.abuse.score : 0;
+        const scoreCls = score >= 55 ? 'bad' : score >= 33 ? 'warn' : '';
+        tr.innerHTML =
+          '<td class="mono" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(0, 13)) + '…</td><td>' + esc(c.plan_name || c.plan_id) + '</td><td>' + esc(c.owner || '') + '</td>' +
+          '<td class="mono">' + rmb(c.paid_rmb) + '</td><td class="mono">' + tsDate(c.expires_at) + '</td><td>' + thr + pace + '</td>' +
+          '<td class="mono">' + c.in_flight + '</td><td class="mono">' + c.day_used + (c.fair_use_rpd ? '/' + c.fair_use_rpd : '') + '</td>' +
+          '<td class="mono">' + usd(c.day_quota_usd) + '</td><td class="mono">' + rmb(c.day_cost_rmb) + '</td>' +
+          '<td class="mono">' + (c.plan_kind === 'quota' ? usd(c.face_left_usd, 2) + ' / ' + c.face_usd : '–') + '</td>' +
+          '<td class="mono ' + scoreCls + '" title="' + esc(((c.abuse && c.abuse.reasons) || []).join('; ')) + '">' + score + '</td><td>' + st + '</td><td></td>';
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '复制')).addEventListener('click', async () => { await copyText(c.card_key); cdMsg('已复制 ' + c.card_key); });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '+24h')).addEventListener('click', async () => {
+          await api('/admin/api/cards/' + c.card_key + '/extend', { method: 'POST', body: JSON.stringify({ hours: 24 }) }); await loadCards();
+        });
+        if (c.enabled) act.appendChild(el('button', { class: 'danger', type: 'button' }, '吊销')).addEventListener('click', async () => {
+          if (!confirm('吊销该卡？')) return;
+          await api('/admin/api/cards/' + c.card_key + '/revoke', { method: 'POST' }); await loadCards();
+        });
+        act.appendChild(el('button', { class: 'danger', type: 'button' }, '删')).addEventListener('click', async () => {
+          if (!confirm('删除卡记录？账本记录保留')) return;
+          await api('/admin/api/cards/' + c.card_key, { method: 'DELETE' }); await loadCards();
+        });
+        tb.appendChild(tr);
+      });
+    }
+    document.getElementById('ci-submit').addEventListener('click', async () => {
+      const body = { plan_id: document.getElementById('ci-plan').value, owner: document.getElementById('ci-owner').value.trim(), count: Number(document.getElementById('ci-count').value || 1) };
+      const paid = document.getElementById('ci-paid').value.trim();
+      if (paid !== '') body.paid_rmb = Number(paid);
+      if (!body.plan_id) return cdMsg('先选套餐', true);
+      try {
+        const d = await api('/admin/api/cards/issue', { method: 'POST', body: JSON.stringify(body) });
+        const keys = (d.issued || []).map((c) => c.card_key);
+        document.getElementById('ci-out').textContent = keys.join('\n');
+        if (keys.length) { await copyText(keys.join('\n')); cdMsg('已开 ' + keys.length + ' 张，卡号已复制'); }
+        await loadCards();
+      } catch (e) { cdMsg(e.message, true); }
+    });
+    // 利润
+    const PROFIT_COLS = {
+      plan: [['plan_id', '套餐', 'mono'], ['plan_name', '名称'], ['kind', '类型'], ['tier', '层级', 'mono'], ['cards_sold', '开卡数', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['avg_cost_per_card_rmb', '每卡成本¥', 'rmb']],
+      card: [['card_key', '卡号', 'mono'], ['plan_id', '套餐', 'mono'], ['owner', '归属'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['models', '模型', 'models']],
+      day: [['day', '日期', 'mono'], ['cards_issued', '开卡', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct']],
+    };
+    async function loadProfit() {
+      const q = new URLSearchParams();
+      const f = document.getElementById('pf-from').value.trim(), t = document.getElementById('pf-to').value.trim(), g = document.getElementById('pf-group').value;
+      if (f) q.set('from', f); if (t) q.set('to', t); q.set('group', g);
+      const d = await api('/admin/api/cards/profit?' + q.toString());
+      const T = d.totals || {};
+      document.getElementById('pk-rev').textContent = rmb(T.revenue_rmb);
+      document.getElementById('pk-cost').textContent = rmb(T.cost_rmb);
+      document.getElementById('pk-face').textContent = usd(T.face_usd, 2);
+      document.getElementById('pk-rate').textContent = Number(d.rmb_per_usd || 0).toFixed(4);
+      const pf = document.getElementById('pk-profit');
+      pf.textContent = rmb(T.profit_rmb) + ' / ' + pct(T.margin);
+      pf.className = 'v ' + ((T.profit_rmb || 0) >= 0 ? 'ok' : 'bad');
+      document.getElementById('pk-cards').textContent = T.cards || 0;
+      document.getElementById('pk-req').textContent = fmtN(T.requests);
+      document.getElementById('cd-profit-title').textContent = { plan: '按套餐', card: '按卡', day: '按天' }[g];
+      const cols = PROFIT_COLS[g];
+      document.getElementById('cd-profit-head').innerHTML = '<tr>' + cols.map((c) => '<th>' + c[1] + '</th>').join('') + '</tr>';
+      const tb = document.getElementById('cd-profit-body');
+      tb.innerHTML = '';
+      const rows = d.rows || [];
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="' + cols.length + '" class="muted">区间内无数据</td></tr>';
+      rows.forEach((r) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = cols.map((c) => {
+          const v = r[c[0]]; const k = c[2];
+          if (k === 'rmb') return '<td class="mono">' + rmb(v) + '</td>';
+          if (k === 'usd') return '<td class="mono">' + usd(v, 3) + '</td>';
+          if (k === 'pct') return '<td class="mono">' + pct(v) + '</td>';
+          if (k === 'models') return '<td class="muted" style="font-size:11px">' + (v || []).map((m) => esc(m.model) + '×' + m.requests + ' ' + usd(m.face_usd)).join('<br>') + '</td>';
+          if (k === 'mono') return '<td class="mono">' + (v == null ? '–' : String(v).length > 20 ? esc(String(v).slice(0, 13)) + '…' : esc(String(v))) + '</td>';
+          return '<td>' + (v == null ? '–' : esc(String(v))) + '</td>';
+        }).join('');
+        tb.appendChild(tr);
+      });
+    }
+    document.getElementById('cd-profit-filter').addEventListener('submit', (e) => { e.preventDefault(); loadProfit().catch((x) => cdMsg(x.message, true)); });
+    // 成本模型 + 价格表
+    function cmRecalc() {
+      const p = Number(document.getElementById('cm-price').value || 0), q = Number(document.getElementById('cm-quota').value || 0), w = Number(document.getElementById('cm-weeks').value || 0);
+      document.getElementById('cm-rate').value = q && w ? (p / (q * w)).toFixed(4) : '';
+    }
+    ['cm-price', 'cm-quota', 'cm-weeks'].forEach((id) => document.getElementById(id).addEventListener('input', cmRecalc));
+    async function loadCostModel() {
+      const d = await api('/admin/api/cards/cost-model');
+      const m = d.cost_model || {};
+      document.getElementById('cm-price').value = m.account_price_rmb; document.getElementById('cm-quota').value = m.weekly_quota_usd; document.getElementById('cm-weeks').value = m.usable_weeks;
+      document.getElementById('cm-rate').value = Number(d.rmb_per_usd || 0).toFixed(4);
+      const pt = await api('/admin/api/cards/pricing-table');
+      const tb = document.getElementById('cd-price-body');
+      tb.innerHTML = '';
+      const order = { economy: 0, standard: 1, flagship: 2 };
+      (pt.models || []).sort((a, b) => (order[a.tier] ?? 9) - (order[b.tier] ?? 9) || a.model.localeCompare(b.model)).forEach((r) => {
+        const tr = document.createElement('tr');
+        const tp = r.tier === 'economy' ? 'ok' : r.tier === 'standard' ? 'warn' : 'bad';
+        tr.innerHTML = '<td class="mono">' + esc(r.model) + '</td><td><span class="pill ' + tp + '">' + esc(r.tier) + '</span></td>' +
+          ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">' + usd(r[k], 2) + '</td>').join('');
+        tb.appendChild(tr);
+      });
+    }
+    document.getElementById('cm-save').addEventListener('click', async () => {
+      const body = { account_price_rmb: Number(document.getElementById('cm-price').value), weekly_quota_usd: Number(document.getElementById('cm-quota').value), usable_weeks: Number(document.getElementById('cm-weeks').value) };
+      try { const d = await api('/admin/api/cards/cost-model', { method: 'POST', body: JSON.stringify(body) }); cdMsg('已保存，¥/$ = ' + Number(d.rmb_per_usd).toFixed(4)); await loadCostModel(); }
+      catch (e) { cdMsg(e.message, true); }
+    });
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'settings', 'logs', 'health'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'cards', 'settings', 'logs', 'health'];
     function showPage(name) {
       // 支持 #billing/records 直达 tab
       const [base, sub] = (name || '').split('/');
@@ -1367,6 +1746,7 @@
       PAGES.forEach((p) => document.getElementById('page-' + p).classList.toggle('active', p === name));
       document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
       if (name === 'billing' && !sub) loadBilling().catch((e) => toast('bill-msg', e.message, true));
+      if (name === 'cards') loadCardsTab().catch((e) => toast('cd-msg', e.message, true));
       window.scrollTo({ top: 0 });
     }
     window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
