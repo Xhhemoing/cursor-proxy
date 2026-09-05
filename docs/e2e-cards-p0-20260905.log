@@ -1,0 +1,21 @@
+── S1: B1 定额卡在途预扣 (3 并发 × e2e.sh.215 估算 vs 面值 e2e.sh.30) ──
+  card=card-89adcc8a04e84374afd68ec406a5434b
+  codes: 502 502 402   in_flight(mid)=2
+  ✅ 1st/2nd 放行到上游(502), 3rd 被在途预扣挡下(402) — 旧版会 3 个全放
+  ✅ 在途时 in_flight=2 (402 那个未占车道)
+  ✅ 上游失败且 0 token → 不扣款 face_used=0.0 (hold 已归还)
+  ✅ 结束后 in_flight=0
+  3rd body: {"error":{"code":"card_rejected","message":"card quota exhausted ($0.00 / $0.30, $0.30 in flight)","type":"invalid_request_error"}}
+  ✅ 402 文案带 in-flight 金额
+── S2: B8 车道排队替代 429 (1 并发卡, 3 个同时到) ──
+  codes: 502 502 502   wall=27028ms  in_flight(during)=1
+  ✅ 0×429, 3 个全部排队后放行 — 旧版会有 2 个立刻 429
+  ✅ 排队期间 in_flight 恒为 1 (车道未被突破)
+  ✅ 墙钟 27028ms ≥ 17s ⇒ 逐个放行, 非并行
+── S3: 伪卡 fail-closed / 模型注册表 ──
+  ✅ 伪卡 401
+  ✅ 注册表写入 zeta-e2e (-fast ×2 倍率由单测 registry_prefix_hit_keeps_fast_multiplier 覆盖)
+── S4: B4 定额结算写 cards.db 而非重写 cards.json ──
+  ✅ cards.db / card_face_used 表已建
+
+══ RESULT: 11 passed, 0 failed ══
