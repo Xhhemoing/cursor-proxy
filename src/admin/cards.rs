@@ -68,10 +68,9 @@ fn plan_warnings(p: &CardPlan, allowed_count: usize) -> Vec<String> {
             w.push(format!("前缀 '{}' 在已知模型中无任何命中", pre));
         }
     }
-    let restricted =
-        !p.tier.is_empty() || !p.model_groups.is_empty() || !p.model_prefixes.is_empty();
+    let restricted = !p.model_groups.is_empty() || !p.model_prefixes.is_empty();
     if restricted && allowed_count == 0 {
-        w.push("当前 tier/组/前缀组合下 0 个模型可调 —— 开出去的卡会全部 403".to_string());
+        w.push("当前 组/前缀组合下 0 个模型可调 —— 开出去的卡会全部 403".to_string());
     }
     w
 }
@@ -128,7 +127,6 @@ pub struct PlanBody {
     pub price: Option<f64>,
     pub kind: Option<PlanKind>,
     pub face_usd: Option<f64>,
-    pub tier: Option<String>,
     pub duration_hours: Option<u64>,
     pub max_concurrency: Option<u32>,
     pub rpm_limit: Option<u32>,
@@ -158,22 +156,6 @@ pub async fn api_card_plan_upsert(
         )
             .into_response();
     }
-    if let Some(t) = body.tier.as_deref() {
-        if !t.is_empty()
-            && ![
-                cards::TIER_ECONOMY,
-                cards::TIER_STANDARD,
-                cards::TIER_FLAGSHIP,
-            ]
-            .contains(&t)
-        {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "tier must be economy|standard|flagship|\"\""})),
-            )
-                .into_response();
-        }
-    }
     let mut plan = state.card_store.get_plan(&id).unwrap_or_else(|| CardPlan {
         id: id.clone(),
         ..CardPlan::default()
@@ -186,7 +168,6 @@ pub async fn api_card_plan_upsert(
         price,
         kind,
         face_usd,
-        tier,
         duration_hours,
         max_concurrency,
         rpm_limit,
@@ -276,7 +257,6 @@ pub async fn api_pricing_table(State(state): State<Arc<AppState>>) -> impl IntoR
             let (i, o, c, w) = cards::model_price(&m);
             json!({
                 "model": m,
-                "tier": cards::model_tier(&m),
                 "source": if manual { "manual" } else { "builtin" },
                 "input_per_m": i, "output_per_m": o, "cache_read_per_m": c, "cache_write_per_m": w,
                 // 参考: 典型请求 (20k in / 4k out / 30k cr) 官方口径成本
@@ -284,9 +264,7 @@ pub async fn api_pricing_table(State(state): State<Arc<AppState>>) -> impl IntoR
             })
         })
         .collect();
-    Json(
-        json!({ "models": rows, "tiers": [cards::TIER_ECONOMY, cards::TIER_STANDARD, cards::TIER_FLAGSHIP] }),
-    )
+    Json(json!({ "models": rows }))
 }
 
 // ── 卡 ──
@@ -688,7 +666,6 @@ pub async fn api_cards_profit(
                         "plan_id": pid,
                         "plan_name": p.map(|p| p.name.clone()),
                         "kind": p.map(|p| p.kind),
-                        "tier": p.map(|p| p.tier.clone()),
                         "list_price": p.map(|p| p.price),
                         "cards_sold": n,
                         "revenue_rmb": rev,

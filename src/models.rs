@@ -21,9 +21,6 @@ pub struct ModelEntry {
     pub cache_read_per_m: f64,
     #[serde(default)]
     pub cache_write_per_m: f64,
-    /// economy / standard / flagship; 空 = 按内置规则推断
-    #[serde(default)]
-    pub tier: String,
     /// 是否允许调用 (false = 全局停用, 所有 key/卡都 403)
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -443,22 +440,13 @@ pub fn deny_reason(allowed_groups: &[String], model: &str) -> String {
     )
 }
 
-/// 套餐模型闸门 (tier / model_groups / model_prefixes 三合一).
+/// 套餐模型闸门 (model_groups / model_prefixes).
 /// 全部为空 = 不限; 任一非空项都必须通过. 返回 Err(人类可读原因) 表示拒绝.
 pub fn plan_allows_model(
-    tier: &str,
     groups: &[String],
     prefixes: &[String],
     model: &str,
 ) -> Result<(), String> {
-    if !tier.is_empty() && !crate::cards::tier_allows(tier, model) {
-        return Err(format!(
-            "model '{}' is tier '{}', plan allows tier '{}'",
-            model,
-            crate::cards::model_tier(model),
-            tier
-        ));
-    }
     if !prefixes.is_empty() && !prefixes.iter().any(|p| model.starts_with(p.as_str())) {
         return Err(format!(
             "model '{}' not in prefixes {:?}",
@@ -506,14 +494,13 @@ mod tests {
         ModelRegistry::empty()
     }
 
-    fn entry(m: &str, i: f64, o: f64, tier: &str) -> ModelEntry {
+    fn entry(m: &str, i: f64, o: f64, _tier: &str) -> ModelEntry {
         ModelEntry {
             model: m.into(),
             input_per_m: i,
             output_per_m: o,
             cache_read_per_m: 0.0,
             cache_write_per_m: 0.0,
-            tier: tier.into(),
             enabled: true,
             upstream: false,
             note: String::new(),
@@ -644,7 +631,6 @@ mod tests {
             output_per_m: 2.0,
             cache_read_per_m: 0.0,
             cache_write_per_m: 0.0,
-            tier: String::new(),
             enabled: true,
             upstream: false,
             note: String::new(),

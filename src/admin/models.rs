@@ -1,7 +1,7 @@
-//! 模型设置 admin API: 手动定价 / 层级 / 停用 + 模型组.
+//! 模型设置 admin API: 手动定价 / 停用 + 模型组.
 //!
 //! - `GET  /admin/api/models`                 全部: 已手动设置的 + 内置表 + 账本里出现过的模型, 标注来源
-//! - `POST /admin/api/models`                 upsert 单个 {model, input_per_m, output_per_m, cache_read_per_m, cache_write_per_m, tier, enabled, note}
+//! - `POST /admin/api/models`                 upsert 单个 {model, input_per_m, output_per_m, cache_read_per_m, cache_write_per_m, enabled, note}
 //! - `POST /admin/api/models/bulk`            整表替换 {models:[...]}
 //! - `POST /admin/api/models/import-builtin`  把内置官方表全部写成手动条目 (便于逐个改)
 //! - `DELETE /admin/api/models/:model`        删除手动条目 (回落内置)
@@ -27,10 +27,6 @@ fn bad(msg: impl Into<String>) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": msg.into()}))).into_response()
 }
 
-fn valid_tier(t: &str) -> bool {
-    t.is_empty() || [cards::TIER_ECONOMY, cards::TIER_STANDARD, cards::TIER_FLAGSHIP].contains(&t)
-}
-
 fn validate_entry(e: &ModelEntry) -> Result<(), String> {
     let m = e.model.trim();
     if m.is_empty() || m.len() > 120 {
@@ -45,9 +41,6 @@ fn validate_entry(e: &ModelEntry) -> Result<(), String> {
         if !v.is_finite() || v < 0.0 || v > 1e6 {
             return Err(format!("model '{}': prices must be 0..1e6", m));
         }
-    }
-    if !valid_tier(&e.tier) {
-        return Err(format!("model '{}': tier must be economy|standard|flagship|\"\"", m));
     }
     Ok(())
 }
@@ -82,8 +75,6 @@ fn row(model: &str, source: &str, seen: u64) -> Value {
         "output_per_m": o,
         "cache_read_per_m": c,
         "cache_write_per_m": w,
-        "tier": cards::model_tier(model),
-        "tier_manual": manual.as_ref().map(|e| e.tier.clone()).unwrap_or_default(),
         "enabled": manual.as_ref().map(|e| e.enabled).unwrap_or(true),
         "upstream": manual.as_ref().map(|e| e.upstream).unwrap_or(false),
         "note": manual.as_ref().map(|e| e.note.clone()).unwrap_or_default(),
@@ -121,7 +112,6 @@ pub async fn api_models_list(State(state): State<Arc<AppState>>) -> impl IntoRes
         "models": rows,
         "manual_count": snap.models.len(),
         "groups": snap.groups,
-        "tiers": [cards::TIER_ECONOMY, cards::TIER_STANDARD, cards::TIER_FLAGSHIP],
     }))
 }
 
@@ -132,7 +122,6 @@ pub struct EntryBody {
     pub output_per_m: Option<f64>,
     pub cache_read_per_m: Option<f64>,
     pub cache_write_per_m: Option<f64>,
-    pub tier: Option<String>,
     pub enabled: Option<bool>,
     pub note: Option<String>,
 }
@@ -154,7 +143,6 @@ pub async fn api_models_upsert(
         output_per_m: o,
         cache_read_per_m: c,
         cache_write_per_m: w,
-        tier: cards::model_tier(&model).to_string(),
         enabled: true,
         upstream: false,
         note: String::new(),
@@ -165,7 +153,6 @@ pub async fn api_models_upsert(
         output_per_m: b.output_per_m.unwrap_or(cur.output_per_m),
         cache_read_per_m: b.cache_read_per_m.unwrap_or(cur.cache_read_per_m),
         cache_write_per_m: b.cache_write_per_m.unwrap_or(cur.cache_write_per_m),
-        tier: b.tier.unwrap_or(cur.tier),
         enabled: b.enabled.unwrap_or(cur.enabled),
         upstream: cur.upstream,
         note: b.note.unwrap_or(cur.note),
@@ -228,7 +215,7 @@ pub async fn api_models_import_builtin(
     let reg = registry();
     let overwrite = q.overwrite == Some(1);
     let mut n = 0usize;
-    for (m, i, o, c, w, tier) in cards::builtin_table() {
+    for (m, i, o, c, w) in cards::builtin_table() {
         if !overwrite && reg.get_exact(&m).is_some() {
             continue;
         }
@@ -238,7 +225,6 @@ pub async fn api_models_import_builtin(
             output_per_m: o,
             cache_read_per_m: c,
             cache_write_per_m: w,
-            tier: tier.to_string(),
             enabled: true,
             upstream: false,
             note: "builtin".into(),
@@ -419,7 +405,6 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
                         "model": m,
                         "in_registry": manual,
                         "upstream": true,
-                        "tier": cards::model_tier(m),
                         "price": cards::model_price(m),
                     })
                 })
@@ -551,7 +536,6 @@ pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q
                     output_per_m: (o * 100.0).round() / 100.0,
                     cache_read_per_m: (c * 100.0).round() / 100.0,
                     cache_write_per_m: (w * 100.0).round() / 100.0,
-                    tier: cur.as_ref().map(|x| x.tier.clone()).unwrap_or_default(),
                     enabled: cur.as_ref().map(|x| x.enabled).unwrap_or(true),
                     upstream: cur.as_ref().map(|x| x.upstream).unwrap_or(false),
                     note: format!("litellm:{src}"),

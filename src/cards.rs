@@ -64,11 +64,11 @@ static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
 // 注: 纯别名行 (fable-5 / opus-5 / sonnet-5 / claude-opus-4 的 opus-5 等) 已从内置表删除 —
 // 它们上游不存在, 留在表里会被 candidate_models 列进「模型」页当幽灵. 计价不受影响:
 // model_price 走最长前缀匹配, "fable-5" 请求仍命中 "claude-fable-5" 的价格.
-/// 内置表导出 (面板「恢复默认」/「导入内置」用): (model, in, out, cr, cw, tier)
-pub fn builtin_table() -> Vec<(String, f64, f64, f64, f64, &'static str)> {
+/// 内置表导出 (面板「恢复默认」/「导入内置」用): (model, in, out, cr, cw)
+pub fn builtin_table() -> Vec<(String, f64, f64, f64, f64)> {
     PREMIUM_PRICES
         .iter()
-        .map(|(m, (i, o, c, w))| (m.to_string(), *i, *o, *c, *w, builtin_model_tier(m)))
+        .map(|(m, (i, o, c, w))| (m.to_string(), *i, *o, *c, *w))
         .collect()
 }
 
@@ -228,77 +228,6 @@ impl CostModel {
 
 // ─────────────────────────── 模型分层 ───────────────────────────
 
-/// 模型层级 (按 1 并发 $/h 烧速划分, 不按单次价格):
-/// economy ≤ $12/h · standard ≤ $24/h · flagship 其余.
-/// fable-5-1-thinking-max 单次最贵但周期 186s, 匀速下只 $10.8/h —— 所以层级要看烧速.
-pub const TIER_ECONOMY: &str = "economy";
-pub const TIER_STANDARD: &str = "standard";
-pub const TIER_FLAGSHIP: &str = "flagship";
-
-/// 默认层级表: (模型前缀, 层级). 最长前缀优先.
-static MODEL_TIERS: &[(&str, &str)] = &[
-    ("claude-fable-5-1-thinking", TIER_FLAGSHIP),
-    ("claude-fable-5-thinking", TIER_FLAGSHIP),
-    ("gpt-5.4-pro", TIER_FLAGSHIP),
-    ("gpt-5.6-cyber", TIER_FLAGSHIP),
-    ("claude-fable", TIER_STANDARD),
-    ("fable", TIER_STANDARD),
-    ("kimi-k3-max", TIER_STANDARD),
-    ("claude-opus-5-fast", TIER_STANDARD),
-    ("claude-opus-5-thinking-xhigh-fast", TIER_STANDARD),
-    ("claude-opus", TIER_ECONOMY),
-    ("opus", TIER_ECONOMY),
-    ("gpt-5.6-sol", TIER_ECONOMY),
-    ("gpt-5.6", TIER_ECONOMY),
-    ("gpt-5", TIER_ECONOMY),
-    ("kimi", TIER_ECONOMY),
-    ("grok", TIER_ECONOMY),
-    ("cursor-grok", TIER_ECONOMY),
-    ("claude-sonnet", TIER_ECONOMY),
-    ("sonnet", TIER_ECONOMY),
-    ("gemini", TIER_ECONOMY),
-    ("glm", TIER_ECONOMY),
-];
-
-/// 模型层级: 注册表手动设定优先, 否则内置前缀规则
-pub fn model_tier(model: &str) -> &'static str {
-    if let Some(e) = crate::models::registry().lookup(model) {
-        match e.tier.as_str() {
-            TIER_ECONOMY => return TIER_ECONOMY,
-            TIER_STANDARD => return TIER_STANDARD,
-            TIER_FLAGSHIP => return TIER_FLAGSHIP,
-            _ => {}
-        }
-    }
-    builtin_model_tier(model)
-}
-
-pub fn builtin_model_tier(model: &str) -> &'static str {
-    let mut best: Option<&'static str> = None;
-    let mut best_len = 0;
-    for (prefix, tier) in MODEL_TIERS {
-        if model.starts_with(prefix) && prefix.len() > best_len {
-            best = Some(tier);
-            best_len = prefix.len();
-        }
-    }
-    // 未知模型按旗舰算 (保守: 宁可让便宜卡用不了, 不让贵模型漏进便宜卡)
-    best.unwrap_or(TIER_FLAGSHIP)
-}
-
-fn tier_rank(tier: &str) -> u8 {
-    match tier {
-        TIER_ECONOMY => 0,
-        TIER_STANDARD => 1,
-        _ => 2,
-    }
-}
-
-/// 卡层级是否允许该模型: 卡 tier ≥ 模型 tier
-pub fn tier_allows(card_tier: &str, model: &str) -> bool {
-    tier_rank(card_tier) >= tier_rank(model_tier(model))
-}
-
 // ─────────────────────────── 套餐模板 ───────────────────────────
 
 /// 套餐类型
@@ -330,9 +259,6 @@ pub struct CardPlan {
     /// 定额卡面值 (官方口径 $). kind=Quota 时必填
     #[serde(default)]
     pub face_usd: f64,
-    /// 模型层级: economy / standard / flagship (卡 tier ≥ 模型 tier 才放行). 空 = 不按层级限
-    #[serde(default)]
-    pub tier: String,
     /// 有效期 (小时), 从开卡时刻计
     pub duration_hours: u64,
     /// 正常并发上限
@@ -362,10 +288,10 @@ pub struct CardPlan {
     /// 行为评分阈值: ≥ 此分进压制档 (0 = 关闭行为评分)
     #[serde(default = "default_abuse_threshold")]
     pub abuse_score_threshold: u32,
-    /// 限定的模型前缀 (空 = 不限); 与 tier 同时生效 (都要过)
+    /// 限定的模型前缀 (空 = 不限); 与 model_groups 同时生效 (都要过)
     #[serde(default)]
     pub model_prefixes: Vec<String>,
-    /// 允许访问的模型组 id (models.json groups); 空 = 不限. 与 tier / model_prefixes 同时生效 (都要过)
+    /// 允许访问的模型组 id (models.json groups); 空 = 不限. 与 model_prefixes 同时生效 (都要过)
     #[serde(default)]
     pub model_groups: Vec<String>,
     #[serde(default)]
@@ -405,7 +331,6 @@ impl Default for CardPlan {
             price: 0.0,
             kind: PlanKind::Unlimited,
             face_usd: 0.0,
-            tier: String::new(),
             duration_hours: 24,
             max_concurrency: 1,
             rpm_limit: 30,
@@ -428,12 +353,11 @@ impl Default for CardPlan {
 impl CardPlan {
     /// 预置套餐 (2026-09-05 定价, 见 docs/day-card-pricing-20260905.md §4d/§4e)
     pub fn presets() -> Vec<CardPlan> {
-        let unlimited = |id: &str, name: &str, price: f64, tier: &str, conc: u32| CardPlan {
+        let unlimited = |id: &str, name: &str, price: f64, conc: u32| CardPlan {
             id: id.into(),
             name: name.into(),
             price,
             kind: PlanKind::Unlimited,
-            tier: tier.into(),
             duration_hours: 24,
             max_concurrency: conc,
             rpm_limit: 30 * conc,
@@ -446,7 +370,6 @@ impl CardPlan {
             price,
             kind: PlanKind::Quota,
             face_usd: face,
-            tier: String::new(),
             duration_hours: 24 * 7,
             max_concurrency: 4,
             rpm_limit: 120,
@@ -456,12 +379,9 @@ impl CardPlan {
             ..CardPlan::default()
         };
         vec![
-            unlimited("day-eco-1", "畅饮·经济 1并发", 19.9, TIER_ECONOMY, 1),
-            unlimited("day-std-1", "畅饮·标准 1并发", 34.9, TIER_STANDARD, 1),
-            unlimited("day-pro-1", "畅饮·旗舰 1并发", 49.9, TIER_FLAGSHIP, 1),
-            unlimited("day-eco-2", "畅饮·经济 2并发", 35.9, TIER_ECONOMY, 2),
-            unlimited("day-std-2", "畅饮·标准 2并发", 62.9, TIER_STANDARD, 2),
-            unlimited("day-pro-2", "畅饮·旗舰 2并发", 89.9, TIER_FLAGSHIP, 2),
+            unlimited("day-1", "畅饮 1并发", 29.9, 1),
+            unlimited("day-2", "畅饮 2并发", 49.9, 2),
+            unlimited("day-4", "畅饮 4并发", 89.9, 4),
             quota("quota-50", "定额 $50", 15.0, 50.0),
             quota("quota-200", "定额 $200", 49.0, 200.0),
             quota("quota-500", "定额 $500", 99.0, 500.0),
@@ -975,7 +895,7 @@ impl CardStore {
         self.plans.iter().map(|r| r.clone()).collect()
     }
 
-    /// 该套餐当前实际可调的模型 (tier/组/前缀三合一 + 全局停用/可见性过滤).
+    /// 该套餐当前实际可调的模型 (组/前缀闸门 + 全局停用/可见性过滤).
     /// 候选 = 客户端可见清单 (注册表 enabled ∪ 上游家族基名 ∪ 无变体独立模型),
     /// 变体名不进套餐预览 —— 客户端选基名, 网关按思考强度路由 (resolve_smart_model).
     pub fn plan_models(&self, plan: &CardPlan, extra_seen: &[String]) -> Vec<Value> {
@@ -986,7 +906,6 @@ impl CardStore {
             .filter_map(|m| {
                 let enabled = !crate::models::registry().is_disabled(&m);
                 let allowed = crate::models::plan_allows_model(
-                    &plan.tier,
                     &plan.model_groups,
                     &plan.model_prefixes,
                     &m,
@@ -998,7 +917,6 @@ impl CardStore {
                 let (i, o, c, w) = model_price(&m);
                 Some(json!({
                     "model": m,
-                    "tier": model_tier(&m),
                     "source": if crate::models::registry().get_exact(&m).is_some() { "manual" } else { "builtin" },
                     "input_per_m": i, "output_per_m": o,
                     "cache_read_per_m": c, "cache_write_per_m": w,
@@ -1362,9 +1280,9 @@ impl CardStore {
             // 预扣额不超过剩余余额 (最后一笔允许把余额烧到 0, 不因估算偏大而拒绝)
             hold = Self::hold_estimate_micro(model, est_input_tok).min(face_micro - committed);
         }
-        // 模型访问三合一 (tier / 前缀 / 模型组): 全部为空 = 不限, 任一非空都要过
+        // 模型访问闸门 (前缀 / 模型组): 全部为空 = 不限, 任一非空都要过
         if let Err(reason) =
-            crate::models::plan_allows_model(&plan.tier, &plan.model_groups, &plan.model_prefixes, model)
+            crate::models::plan_allows_model(&plan.model_groups, &plan.model_prefixes, model)
         {
             return Err((403, format!("{} (plan '{}')", reason, plan.id)));
         }
@@ -1511,7 +1429,6 @@ impl CardStore {
             "plan_id": card.plan_id,
             "plan_name": plan.as_ref().map(|p| p.name.clone()),
             "plan_kind": plan.as_ref().map(|p| p.kind),
-            "tier": plan.as_ref().map(|p| p.tier.clone()),
             "enabled": card.enabled,
             "issued_at": card.issued_at,
             "expires_at": card.expires_at,
@@ -2077,19 +1994,15 @@ mod tests {
         let _ = crate::models::registry().delete_group("test-kimi-only");
     }
 
-    /// 三合一闸门: tier ∧ 前缀 ∧ 组 任一不过即拒; 全空 = 全放
+    /// 闸门: 前缀 ∧ 组 任一不过即拒; 全空 = 全放
     #[test]
     fn plan_allows_model_combination() {
         use crate::models::plan_allows_model as f;
         // 全空 = 不限
-        assert!(f("", &[], &[], "anything-at-all").is_ok());
-        // tier 单条件 (用唯一名, 避免与并行测试写入的注册表条目串扰)
-        assert!(f("standard", &[], &[], "kimi-k3").is_ok());
-        assert!(f("economy", &[], &[], "pam-flagship-zzz").is_err()); // 未知模型按旗舰算
-        assert!(f("flagship", &[], &[], "pam-flagship-zzz").is_ok());
+        assert!(f(&[], &[], "anything-at-all").is_ok());
         // 前缀单条件
-        assert!(f("", &[], &["kimi-".into()], "kimi-k3").is_ok());
-        assert!(f("", &[], &["kimi-".into()], "gpt-5.6").is_err());
+        assert!(f(&[], &["kimi-".into()], "kimi-k3").is_ok());
+        assert!(f(&[], &["kimi-".into()], "gpt-5.6").is_err());
         // 组单条件
         crate::models::registry()
             .upsert_group(crate::models::ModelGroup {
@@ -2099,12 +2012,12 @@ mod tests {
                 note: String::new(),
             })
             .unwrap();
-        assert!(f("", &["test-pam".into()], &[], "kimi-k3").is_ok());
-        assert!(f("", &["test-pam".into()], &[], "gpt-5.6").is_err());
-        // 组合: tier 过但组不过 → 拒; 三者都过 → 放
-        assert!(f("flagship", &["test-pam".into()], &["kimi-".into()], "kimi-k3").is_ok());
-        assert!(f("flagship", &["test-pam".into()], &[], "claude-opus-5").is_err());
-        assert!(f("economy", &["test-pam".into()], &["kimi-".into()], "kimi-k3").is_ok());
+        assert!(f(&["test-pam".into()], &[], "kimi-k3").is_ok());
+        assert!(f(&["test-pam".into()], &[], "gpt-5.6").is_err());
+        // 组合: 组过但前缀不过 → 拒; 两者都过 → 放
+        assert!(f(&["test-pam".into()], &["kimi-".into()], "kimi-k3").is_ok());
+        assert!(f(&["test-pam".into()], &[], "claude-opus-5").is_err());
+        assert!(f(&["test-pam".into()], &["gpt-".into()], "kimi-k3").is_err());
         let _ = crate::models::registry().delete_group("test-pam");
     }
 
@@ -2138,7 +2051,6 @@ mod tests {
                 output_per_m: 15.0,
                 cache_read_per_m: 0.3,
                 cache_write_per_m: 0.0,
-                tier: String::new(),
                 enabled: false,
                 upstream: false,
                 note: String::new(),
@@ -2243,7 +2155,6 @@ mod tests {
             output_per_m: o,
             cache_read_per_m: i / 10.0,
             cache_write_per_m: 0.0,
-            tier: "standard".into(),
             enabled: true,
             upstream: false,
             note: String::new(),
@@ -2267,42 +2178,6 @@ mod tests {
         assert!((cm.cost_rmb(200.0) - 13.0).abs() < 1e-9);
     }
 
-    #[test]
-    fn tiers_by_burn_rate() {
-        assert_eq!(model_tier("grok-4.6"), TIER_ECONOMY);
-        assert_eq!(model_tier("claude-opus-5"), TIER_ECONOMY);
-        assert_eq!(model_tier("kimi-k3-high"), TIER_ECONOMY);
-        assert_eq!(model_tier("kimi-k3-max"), TIER_STANDARD);
-        assert_eq!(model_tier("claude-fable-5"), TIER_STANDARD);
-        assert_eq!(model_tier("claude-opus-5-fast"), TIER_STANDARD);
-        assert_eq!(model_tier("claude-fable-5-1-thinking-high"), TIER_FLAGSHIP);
-        assert_eq!(model_tier("totally-unknown-model"), TIER_FLAGSHIP);
-        assert!(tier_allows(TIER_FLAGSHIP, "claude-fable-5-1-thinking-max"));
-        assert!(tier_allows(TIER_STANDARD, "claude-fable-5"));
-        assert!(!tier_allows(
-            TIER_STANDARD,
-            "claude-fable-5-1-thinking-high"
-        ));
-        assert!(!tier_allows(TIER_ECONOMY, "claude-fable-5"));
-        assert!(tier_allows(TIER_ECONOMY, "grok-4.6"));
-    }
-
-    #[test]
-    fn tier_gate_on_plan() {
-        let s = store();
-        let mut p = plan("eco");
-        p.tier = TIER_ECONOMY.into();
-        s.upsert_plan(p);
-        let c = s.issue_card("eco", "erin").unwrap();
-        assert!(s.acquire_now(&c.card_key, "grok-4.6").is_ok());
-        match s.acquire_now(&c.card_key, "claude-fable-5-1-thinking-high") {
-            Ok(_) => panic!("flagship model must be rejected on economy plan"),
-            Err((code, msg)) => {
-                assert_eq!(code, 403);
-                assert!(msg.contains("flagship"), "{}", msg);
-            }
-        }
-    }
 
     #[test]
     fn quota_card_deducts_and_exhausts() {
@@ -2430,11 +2305,10 @@ mod tests {
     fn presets_seed_and_persist() {
         let s = store();
         let n = s.seed_presets(false);
-        assert_eq!(n, 10);
+        assert_eq!(n, 7);
         assert_eq!(s.seed_presets(false), 0, "已存在不重复写");
-        let p = s.get_plan("day-std-1").unwrap();
-        assert_eq!(p.tier, TIER_STANDARD);
-        assert!((p.price - 34.9).abs() < 1e-9);
+        let p = s.get_plan("day-2").unwrap();
+        assert!((p.price - 49.9).abs() < 1e-9);
         let q = s.get_plan("quota-200").unwrap();
         assert_eq!(q.kind, PlanKind::Quota);
         assert_eq!(q.pace_normal_tps, 0);
@@ -2442,7 +2316,7 @@ mod tests {
         let path = s.path.clone();
         drop(s);
         let s2 = CardStore::open(&path, 480);
-        assert_eq!(s2.list_plans().len(), 10);
+        assert_eq!(s2.list_plans().len(), 7);
         assert!((s2.cost_model().rmb_per_usd() - 0.065).abs() < 1e-9);
     }
 

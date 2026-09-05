@@ -791,7 +791,6 @@
                   <label>output $/1M <input id="mp-out" type="number" step="0.01" min="0"></label>
                   <label>cache read $/1M <input id="mp-cr" type="number" step="0.01" min="0"></label>
                   <label>cache write $/1M <input id="mp-cw" type="number" step="0.01" min="0"></label>
-                  <label>层级 <select id="mp-tier"><option value="">自动推断</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
                   <label>备注 <input id="mp-note"></label>
                   <label class="inline"><input type="checkbox" id="mp-enabled" checked> 允许调用</label>
                 </div>
@@ -805,13 +804,12 @@
               <div class="fields">
                 <label>搜索 <input id="md-q" placeholder="模型名"></label>
                 <label>来源 <select id="md-src"><option value="">全部</option><option value="manual">手动设置</option><option value="builtin">内置</option><option value="seen">仅账本出现</option></select></label>
-                <label>层级 <select id="md-tier-f"><option value="">全部</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
               </div>
             </form>
             <div class="panel" id="md-upstream-box" style="display:none;flex:0 0 auto;margin-bottom:8px">
               <div class="ph"><h3>上游可用模型</h3></div>
               <div class="table-scroll" style="max-height:220px"><table>
-                <thead><tr><th>模型</th><th>层级</th><th>价格 in/out</th><th>状态</th><th></th></tr></thead>
+                <thead><tr><th>模型</th><th>价格 in/out</th><th>状态</th><th></th></tr></thead>
                 <tbody id="md-upstream-body"></tbody>
               </table></div>
             </div>
@@ -819,7 +817,7 @@
               <div class="ph"><h3>模型列表 <span class="muted" id="md-count"></span></h3></div>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>模型</th><th>来源</th><th>层级</th><th>input</th><th>output</th><th>cache r</th><th>cache w</th><th>30d 请求</th><th>所属组</th><th>状态</th><th></th></tr></thead>
+                  <thead><tr><th>模型</th><th>来源</th><th>input</th><th>output</th><th>cache r</th><th>cache w</th><th>30d 请求</th><th>所属组</th><th>状态</th><th></th></tr></thead>
                   <tbody id="md-body"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
@@ -963,10 +961,9 @@
                   <label id="cp-face-wrap" style="display:none">定额面值 $ <input id="cp-face" type="number" step="1" min="0" placeholder="如 200"></label>
                   <label>时长 h <input id="cp-dur" type="number" min="1" placeholder="24"></label>
                   <label>并发 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
-                  <label>模型层级 <select id="cp-tier"><option value="">不限</option><option value="economy">economy（便宜）</option><option value="standard">standard</option><option value="flagship">flagship（全模型）</option></select></label>
-                  <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限；与层级同时生效）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
+                  <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
                   <div class="span-2" style="grid-column:1/-1;font-size:12px;color:var(--muted)">
-                    模型可见性 = 层级 ∧ 模型组 ∧ 前缀（高级里）三者交集；全空 = 全部模型。
+                    模型可见性 = 模型组 ∧ 前缀（高级里）交集；全空 = 全部模型。
                     <span id="cp-mcount" class="pill info" style="display:none"></span>
                     <button type="button" class="ghost" id="cp-preview" style="margin-left:6px">预览可用模型</button>
                     <span id="cp-warn" style="color:var(--bad,#c66)"></span>
@@ -999,7 +996,7 @@
               <div class="ph"><h3>套餐列表</h3></div>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>id</th><th>名称</th><th>售价</th><th>类型</th><th>层级</th><th>时长</th><th>并发</th><th>RPM</th><th>限速 tok/s</th><th>次数/额度帽</th><th>评分阈</th><th>状态</th><th></th></tr></thead>
+                  <thead><tr><th>id</th><th>名称</th><th>售价</th><th>类型</th><th>模型组</th><th>时长</th><th>并发</th><th>RPM</th><th>限速 tok/s</th><th>次数/额度帽</th><th>评分阈</th><th>状态</th><th></th></tr></thead>
                   <tbody id="cd-plans-body"><tr><td colspan="13" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
@@ -1073,12 +1070,12 @@
               </div>
             </div>
             <div class="panel fill">
-              <div class="ph"><h3>模型价格与层级</h3><p>价格/层级的唯一编辑入口在「模型」页（手动定价即时生效，覆盖内置官方表）。此处只读展示同一数据源。</p></div>
-              <div style="padding:0 12px 8px"><a href="#models" class="pill info" style="text-decoration:none">→ 去「模型」页编辑价格 / 层级 / 模型组</a></div>
+              <div class="ph"><h3>模型价格</h3><p>价格的唯一编辑入口在「模型」页（手动定价即时生效，覆盖内置官方表）。此处只读展示同一数据源。</p></div>
+              <div style="padding:0 12px 8px"><a href="#models" class="pill info" style="text-decoration:none">→ 去「模型」页编辑价格 / 模型组</a></div>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>模型</th><th>层级</th><th>来源</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th></tr></thead>
-                  <tbody id="cd-price-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+                  <thead><tr><th>模型</th><th>来源</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th></tr></thead>
+                  <tbody id="cd-price-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -1735,7 +1732,7 @@
         tr.innerHTML =
           '<td class="mono">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mono">' + rmb(p.price) + '</td>' +
           '<td>' + (p.kind === 'quota' ? '<span class="pill info">定额 $' + p.face_usd + '</span>' : '<span class="pill ok">畅饮</span>') + '</td>' +
-          '<td class="mono">' + esc(p.tier || '不限') + ((p.model_groups || []).length ? '<br><span class="muted" style="font-size:10px">组: ' + esc(p.model_groups.join(',')) + '</span>' : '') +
+          '<td class="mono">' + ((p.model_groups || []).length ? esc(p.model_groups.join(',')) : '<span class="muted">不限</span>') +
           (p.model_count != null ? '<br><span class="muted" style="font-size:10px">可调 ' + p.model_count + ' 模型</span>' : '') +
           ((p.warnings || []).length ? '<br><span class="pill bad" style="font-size:10px" title="' + esc(p.warnings.join('；')) + '">⚠ ' + esc(p.warnings[0].slice(0, 18)) + '</span>' : '') +
           '</td><td class="mono">' + p.duration_hours + 'h</td>' +
@@ -1764,7 +1761,7 @@
       document.getElementById('cd-plan-add').open = true;
       const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
       set('cp-id', p.id); set('cp-name', p.name); set('cp-price', p.price); set('cp-kind', p.kind); set('cp-face', p.face_usd || '');
-      set('cp-tier', p.tier || ''); set('cp-dur', p.duration_hours); set('cp-conc', p.max_concurrency); set('cp-rpm', p.rpm_limit);
+      set('cp-dur', p.duration_hours); set('cp-conc', p.max_concurrency); set('cp-rpm', p.rpm_limit);
       set('cp-rpd', p.fair_use_rpd); set('cp-dq', p.daily_quota_usd); set('cp-soft', p.soften_ratio); set('cp-dconc', p.degraded_concurrency);
       set('cp-p0', p.pace_normal_tps); set('cp-p1', p.pace_soften_tps); set('cp-p2', p.pace_degraded_tps); set('cp-abuse', p.abuse_score_threshold);
       set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
@@ -1791,7 +1788,6 @@
       if (num('cp-price') != null) body.price = num('cp-price');
       body.kind = g('cp-kind');
       if (num('cp-face') != null) body.face_usd = num('cp-face');
-      body.tier = g('cp-tier');
       const map = { duration_hours: 'cp-dur', max_concurrency: 'cp-conc', rpm_limit: 'cp-rpm', fair_use_rpd: 'cp-rpd', daily_quota_usd: 'cp-dq', soften_ratio: 'cp-soft', degraded_concurrency: 'cp-dconc', pace_normal_tps: 'cp-p0', pace_soften_tps: 'cp-p1', pace_degraded_tps: 'cp-p2', abuse_score_threshold: 'cp-abuse' };
       Object.keys(map).forEach((k) => { const v = num(map[k]); if (v != null) body[k] = v; });
       body.model_prefixes = g('cp-prefix') ? g('cp-prefix').split(',').map((s) => s.trim()).filter(Boolean) : [];
@@ -1880,7 +1876,7 @@
     });
     // 利润
     const PROFIT_COLS = {
-      plan: [['plan_id', '套餐', 'mono'], ['plan_name', '名称'], ['kind', '类型'], ['tier', '层级', 'mono'], ['cards_sold', '开卡数', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['avg_cost_per_card_rmb', '每卡成本¥', 'rmb']],
+      plan: [['plan_id', '套餐', 'mono'], ['plan_name', '名称'], ['kind', '类型'], ['cards_sold', '开卡数', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['avg_cost_per_card_rmb', '每卡成本¥', 'rmb']],
       card: [['card_key', '卡号', 'mono'], ['plan_id', '套餐', 'mono'], ['owner', '归属'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['models', '模型', 'models']],
       day: [['day', '日期', 'mono'], ['cards_issued', '开卡', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct']],
     };
@@ -1935,11 +1931,9 @@
       const pt = await api('/admin/api/cards/pricing-table');
       const tb = document.getElementById('cd-price-body');
       tb.innerHTML = '';
-      const order = { economy: 0, standard: 1, flagship: 2 };
-      (pt.models || []).sort((a, b) => (order[a.tier] ?? 9) - (order[b.tier] ?? 9) || a.model.localeCompare(b.model)).forEach((r) => {
+      (pt.models || []).sort((a, b) => a.model.localeCompare(b.model)).forEach((r) => {
         const tr = document.createElement('tr');
-        const tp = r.tier === 'economy' ? 'ok' : r.tier === 'standard' ? 'warn' : 'bad';
-        tr.innerHTML = '<td class="mono">' + esc(r.model) + '</td><td><span class="pill ' + tp + '">' + esc(r.tier) + '</span></td>' +
+        tr.innerHTML = '<td class="mono">' + esc(r.model) + '</td>' +
           '<td>' + (r.source === 'manual' ? '<span class="pill info">手动</span>' : '<span class="muted">内置</span>') + '</td>' +
           ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">' + usd(r[k], 2) + '</td>').join('');
         tb.appendChild(tr);
@@ -1956,7 +1950,6 @@
     let mdModels = [];
     let mdGroups = [];
     const mdMsg = (m, err) => toast('md-msg', m, err);
-    const tierPill = (t) => '<span class="pill ' + (t === 'economy' ? 'ok' : t === 'standard' ? 'warn' : 'bad') + '">' + esc(t || '?') + '</span>';
     document.querySelectorAll('#models-panel .tabs button').forEach((b) => {
       b.addEventListener('click', () => {
         mdTab = b.dataset.tab;
@@ -1979,8 +1972,7 @@
     function renderModels() {
       const q = document.getElementById('md-q').value.trim().toLowerCase();
       const src = document.getElementById('md-src').value;
-      const tf = document.getElementById('md-tier-f').value;
-      const rows = mdModels.filter((m) => (!q || m.model.toLowerCase().includes(q)) && (!src || m.source === src) && (!tf || m.tier === tf));
+      const rows = mdModels.filter((m) => (!q || m.model.toLowerCase().includes(q)) && (!src || m.source === src));
       document.getElementById('md-count').textContent = '(' + rows.length + '/' + mdModels.length + ')';
       const tb = document.getElementById('md-body');
       tb.innerHTML = '';
@@ -1989,7 +1981,7 @@
       rows.forEach((m) => {
         const tr = document.createElement('tr');
         tr.innerHTML =
-          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td><td>' + tierPill(m.tier) + (m.tier_manual ? '' : ' <span class="muted" style="font-size:10px">auto</span>') + '</td>' +
+          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td>' +
           ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">$' + Number(m[k] || 0).toFixed(2) + '</td>').join('') +
           '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px">' + (m.groups || []).map(esc).join(', ') + '</td>' +
           '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td></td>';
@@ -2007,23 +1999,23 @@
         tb.appendChild(tr);
       });
     }
-    ['md-q', 'md-src', 'md-tier-f'].forEach((id) => document.getElementById(id).addEventListener('input', renderModels));
+    ['md-q', 'md-src'].forEach((id) => document.getElementById(id).addEventListener('input', renderModels));
     function fillModelForm(m) {
       document.getElementById('md-model-add').open = true;
       const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
       set('mp-model', m.model); set('mp-in', m.input_per_m); set('mp-out', m.output_per_m); set('mp-cr', m.cache_read_per_m); set('mp-cw', m.cache_write_per_m);
-      set('mp-tier', m.tier_manual || ''); set('mp-note', m.note);
+      set('mp-note', m.note);
       document.getElementById('mp-enabled').checked = m.enabled !== false;
       document.getElementById('mp-model').scrollIntoView({ block: 'center' });
     }
     document.getElementById('mp-reset').addEventListener('click', () => {
       ['mp-model', 'mp-in', 'mp-out', 'mp-cr', 'mp-cw', 'mp-note'].forEach((id) => { document.getElementById(id).value = ''; });
-      document.getElementById('mp-tier').value = ''; document.getElementById('mp-enabled').checked = true;
+      document.getElementById('mp-enabled').checked = true;
     });
     document.getElementById('mp-save').addEventListener('click', async () => {
       const g = (id) => document.getElementById(id).value.trim();
       const num = (id) => { const v = g(id); return v === '' ? undefined : Number(v); };
-      const body = { model: g('mp-model'), tier: g('mp-tier'), note: g('mp-note'), enabled: document.getElementById('mp-enabled').checked };
+      const body = { model: g('mp-model'), note: g('mp-note'), enabled: document.getElementById('mp-enabled').checked };
       if (!body.model) return mdMsg('模型名必填', true);
       [['input_per_m', 'mp-in'], ['output_per_m', 'mp-out'], ['cache_read_per_m', 'mp-cr'], ['cache_write_per_m', 'mp-cw']].forEach(([k, id]) => { const v = num(id); if (v != null) body[k] = v; });
       try { await api('/admin/api/models', { method: 'POST', body: JSON.stringify(body) }); mdMsg('已保存 ' + body.model); await loadModelsPage(); }
@@ -2333,7 +2325,7 @@
         tb.innerHTML = '';
         (d.models || []).forEach((m) => {
           const tr = document.createElement('tr');
-          tr.innerHTML = '<td class="mono">' + esc(m.model) + '</td><td>' + tierPill(m.tier) + '</td>' +
+          tr.innerHTML = '<td class="mono">' + esc(m.model) + '</td>' +
             '<td class="mono">$' + Number(m.price[0]).toFixed(2) + '/$' + Number(m.price[1]).toFixed(2) + '</td>' +
             '<td>' + (m.in_registry ? '<span class="muted">已有</span>' : '<span class="pill warn">未添加</span>') + '</td><td></td>';
           if (!m.in_registry) {
