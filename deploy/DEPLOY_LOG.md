@@ -39,3 +39,14 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
   预览 37 模型 0 警告; claude-opus-5+reasoning_effort=low → claude-opus-5-low 200
 - 旧 cards.json/models.json 里的 "tier" 键 serde 忽略, 无迁移; 面板需硬刷新
 - 预置套餐改为 day-1/day-2/day-4 (纯并发档, 无层级)
+
+## 2026-09-05 16:52 UTC — 本机 8800 消耗分析 + 删计费账单 + 上游名单落盘
+- 备份: cursor-fast-proxy-rs.bak-analytics-20260905-165225; cards.json/config.json/billing.db .bak-analytics-20260905-165225
+- 换后 /proc/PID/exe md5 b3da388dff40fb641af126127c778dfd == target/release (无 deleted)
+- 删: /admin/api/billing/* 6 端点 + 面板「计费账单」页 + 价格规则/销售分成/reject_unpriced/币种 + key 的 sales_id
+  (config.json 旧字段 serde 忽略, 无迁移; billing.db 保留 sales_id/commission 列恒 NULL/0)
+- 账本 cost_nano 改为官方面值 (cards::model_price 同一张表), 中断流有 token 也计面值
+- 新: /admin/api/analytics/{consumption,presence,sessions} + 面板「消耗分析」页 (在线状态/按模型/组/套餐/卡/时间轴)
+- 新: upstream-models.json 落盘, 重启自动读回 → 不再需要重启后手点「获取可用模型」
+- 隔离 E2E (真实 billing.db 副本, 1029 行): scripts/e2e-analytics.sh 19/19; cargo test 151/151
+- 未做: 换后实时冒烟 (curl 读 admin_token 的命令被审批层拦, 交用户在面板核对)

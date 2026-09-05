@@ -46,8 +46,6 @@ pub struct AddKeyBody {
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
-    pub sales_id: Option<String>,
-    #[serde(default)]
     pub rpm_limit: Option<u32>,
     #[serde(default)]
     pub max_concurrency: Option<u32>,
@@ -116,10 +114,6 @@ pub async fn api_keys_add(
         request_limit: body.request_limit,
         expires_at: body.expires_at,
         tags: normalize_tags(body.tags),
-        sales_id: body
-            .sales_id
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
         rpm_limit: body.rpm_limit,
         max_concurrency: body.max_concurrency,
         model_groups: body
@@ -195,8 +189,6 @@ pub struct PatchKeyBody {
     pub request_limit: Option<Option<u64>>,
     pub expires_at: Option<Option<i64>>,
     pub tags: Option<Vec<String>>,
-    /// Some(None) = 清除归属
-    pub sales_id: Option<Option<String>>,
     pub rpm_limit: Option<Option<u32>>,
     pub max_concurrency: Option<Option<u32>>,
     /// Some(vec![]) = 清除限制 (不限)
@@ -239,9 +231,6 @@ pub async fn api_keys_patch(
         }
         if let Some(tags) = body.tags {
             rec.tags = normalize_tags(tags);
-        }
-        if let Some(sid) = body.sales_id {
-            rec.sales_id = sid.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         }
         if let Some(rpm) = body.rpm_limit {
             rec.rpm_limit = rpm.filter(|&v| v > 0);
@@ -331,7 +320,7 @@ pub fn redacted_keys(config: &AppConfig, usage: &quota::KeyUsageStore) -> Value 
 // ─── 批量导入 / 批量编辑 / 导出 ───
 
 /// POST /admin/api/keys/import — 批量导入 API Key (JSON 数组或 CSV)
-/// CSV 列: key,name,description,token_limit,request_limit,rpm_limit,max_concurrency,expires_at,tags,sales_id
+/// CSV 列: key,name,description,token_limit,request_limit,rpm_limit,max_concurrency,expires_at,tags
 pub async fn api_keys_import(State(state): State<Arc<AppState>>, body: String) -> Response {
     let records: Vec<ApiKeyRecord> = match serde_json::from_str::<Vec<ApiKeyRecord>>(&body) {
         Ok(recs) => recs,
@@ -366,7 +355,6 @@ pub async fn api_keys_import(State(state): State<Arc<AppState>>, body: String) -
             let conc_idx = find(&["max_concurrency", "concurrency"]);
             let exp_idx = find(&["expires_at", "expires"]);
             let tags_idx = find(&["tags"]);
-            let sales_idx = find(&["sales_id", "sales"]);
 
             let mut recs = Vec::new();
             for line in lines {
@@ -414,7 +402,6 @@ pub async fn api_keys_import(State(state): State<Arc<AppState>>, body: String) -
                     request_limit: parse_u64(req_idx),
                     expires_at: parse_i64(exp_idx),
                     tags,
-                    sales_id: get(sales_idx).filter(|s| !s.is_empty()),
                     rpm_limit: parse_u32(rpm_idx),
                     max_concurrency: parse_u32(conc_idx),
                     model_groups: Vec::new(),
@@ -485,7 +472,6 @@ pub struct KeysBatchEditBody {
     pub token_limit: Option<Option<u64>>,
     pub request_limit: Option<Option<u64>>,
     pub tags: Option<Vec<String>>,
-    pub sales_id: Option<Option<String>>,
 }
 
 /// POST /admin/api/keys/batch-edit — 批量修改 key 字段
@@ -517,12 +503,6 @@ pub async fn api_keys_batch_edit(
             }
             if let Some(ref tags) = body.tags {
                 rec.tags = normalize_tags(tags.clone());
-            }
-            if let Some(ref sid) = body.sales_id {
-                rec.sales_id = sid
-                    .clone()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
             }
             updated += 1;
         }

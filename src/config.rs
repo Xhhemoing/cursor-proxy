@@ -34,7 +34,8 @@ pub struct AppConfig {
     pub proxy: crate::proxypool::ProxyPoolConfig,
 }
 
-/// 计费配置. 价格单位: 每 1M tokens 的货币金额 (最多 6 位小数, 内部转 micro 整数).
+/// 账本配置 (零售版只剩 库文件 + 时区; 价格在 models.json / 内置官方表, 收入在套餐卡).
+/// 旧字段 currency / default_commission_bps / reject_unpriced / prices / sales 已废弃, 读取时忽略.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingConfig {
     /// SQLite 账本文件
@@ -43,18 +44,6 @@ pub struct BillingConfig {
     /// 日/小时分桶所用时区偏移 (分钟), 默认 +480 = Asia/Shanghai
     #[serde(default = "default_tz_offset")]
     pub tz_offset_minutes: i32,
-    #[serde(default = "default_currency")]
-    pub currency: String,
-    /// key 未绑定销售 / 销售未配置分成比例时的默认分成 (万分比)
-    #[serde(default)]
-    pub default_commission_bps: u32,
-    /// 未匹配到价格的模型是否拒绝请求 (true = 402; false = 记 0 元并标 unpriced)
-    #[serde(default)]
-    pub reject_unpriced: bool,
-    #[serde(default)]
-    pub prices: Vec<ModelPrice>,
-    #[serde(default)]
-    pub sales: Vec<SalesRecord>,
 }
 
 impl Default for BillingConfig {
@@ -62,11 +51,6 @@ impl Default for BillingConfig {
         Self {
             db_file: default_billing_db(),
             tz_offset_minutes: default_tz_offset(),
-            currency: default_currency(),
-            default_commission_bps: 0,
-            reject_unpriced: false,
-            prices: Vec::new(),
-            sales: Vec::new(),
         }
     }
 }
@@ -76,78 +60,6 @@ fn default_billing_db() -> String {
 }
 fn default_tz_offset() -> i32 {
     480
-}
-fn default_currency() -> String {
-    "RMB".into()
-}
-
-/// CNY / 人民币 / usd 别名统一成 RMB / USD.
-pub fn normalize_currency(raw: &str) -> String {
-    let t = raw.trim();
-    if t.is_empty() {
-        return String::new();
-    }
-    if t == "人民币" || t == "¥" {
-        return "RMB".into();
-    }
-    match t.to_ascii_uppercase().as_str() {
-        "CNY" | "CNH" | "RMB" => "RMB".into(),
-        "USD" | "US$" | "$" => "USD".into(),
-        _ => t.to_string(),
-    }
-}
-
-/// 模型价格规则. `model` 支持精确名或 `prefix*` 通配, `*` 为兜底.
-/// 匹配优先级: 精确 > 最长前缀 > `*`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelPrice {
-    pub model: String,
-    /// 每 1M 输入 tokens 价格
-    pub input_per_m: f64,
-    /// 每 1M 输出 tokens 价格
-    pub output_per_m: f64,
-    /// 每 1M 缓存读 tokens 价格 (默认 0)
-    #[serde(default)]
-    pub cache_read_per_m: f64,
-    /// 每 1M 缓存写 tokens 价格 (默认 0)
-    #[serde(default)]
-    pub cache_write_per_m: f64,
-    #[serde(default)]
-    pub note: String,
-}
-
-impl ModelPrice {
-    /// 价格转 micro (1e-6) 整数; 6 位小数内无损
-    pub fn input_micro(&self) -> u64 {
-        money_to_micro(self.input_per_m)
-    }
-    pub fn output_micro(&self) -> u64 {
-        money_to_micro(self.output_per_m)
-    }
-    pub fn cache_read_micro(&self) -> u64 {
-        money_to_micro(self.cache_read_per_m)
-    }
-    pub fn cache_write_micro(&self) -> u64 {
-        money_to_micro(self.cache_write_per_m)
-    }
-}
-
-pub fn money_to_micro(v: f64) -> u64 {
-    if !v.is_finite() || v <= 0.0 {
-        return 0;
-    }
-    (v * 1_000_000.0).round() as u64
-}
-
-/// 销售人员 / 渠道
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SalesRecord {
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    /// 分成比例 (万分比, 1500 = 15%)
-    #[serde(default)]
-    pub commission_bps: u32,
 }
 
 fn default_host() -> String {
@@ -160,7 +72,7 @@ fn default_backend() -> String {
     "https://api2.cursor.sh".into()
 }
 fn default_timeout() -> u64 {
-    120  // 思考超时控制: 120s 强制返回, 避免算法设计等场景 243s 过长
+    120 // 思考超时控制: 120s 强制返回, 避免算法设计等场景 243s 过长
 }
 fn default_log_file() -> String {
     "proxy.log".into()
@@ -194,9 +106,6 @@ pub struct ApiKeyRecord {
     /// 标签 (客户/渠道/项目等), 用于账单筛选
     #[serde(default)]
     pub tags: Vec<String>,
-    /// 归属销售 id (对应 billing.sales[].id)
-    #[serde(default)]
-    pub sales_id: Option<String>,
     /// 每分钟请求数限制 (RPM); None = 不限
     #[serde(default)]
     pub rpm_limit: Option<u32>,
@@ -219,7 +128,6 @@ impl ApiKeyRecord {
             request_limit: None,
             expires_at: None,
             tags: Vec::new(),
-            sales_id: None,
             rpm_limit: None,
             max_concurrency: None,
             model_groups: Vec::new(),
@@ -296,10 +204,6 @@ impl AppConfig {
         if let Ok(backend) = std::env::var("CFP_BACKEND") {
             config.backend = backend;
         }
-        config.billing.currency = normalize_currency(&config.billing.currency);
-        if config.billing.currency.is_empty() {
-            config.billing.currency = default_currency();
-        }
         Ok(config)
     }
 
@@ -313,9 +217,7 @@ impl AppConfig {
             "default_model": self.default_model,
             "max_concurrency_per_account": self.max_concurrency_per_account,
             "acquire_wait_ms": self.acquire_wait_ms,
-            "billing_currency": self.billing.currency,
             "billing_tz_offset_minutes": self.billing.tz_offset_minutes,
-            "billing_price_rules": self.billing.prices.len(),
             "api_key_count": self.api_keys.len(),
             "admin_auth": !self.admin_token.is_empty() || !self.api_keys.is_empty(),
             "proxy_enabled": self.proxy.enabled,
@@ -590,15 +492,5 @@ mod tests {
             assert_eq!(view["api_key_count"], 1);
             assert!(view.get("api_keys").is_none());
         });
-    }
-
-    #[test]
-    fn currency_aliases_unify_to_rmb() {
-        assert_eq!(normalize_currency("cny"), "RMB");
-        assert_eq!(normalize_currency("CNY"), "RMB");
-        assert_eq!(normalize_currency("人民币"), "RMB");
-        assert_eq!(normalize_currency("RMB"), "RMB");
-        assert_eq!(normalize_currency("usd"), "USD");
-        assert_eq!(normalize_currency(""), "");
     }
 }

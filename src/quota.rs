@@ -516,7 +516,6 @@ pub fn key_public(index: usize, rec: &ApiKeyRecord, used_tokens: u64, used_reque
         "max_concurrency": rec.max_concurrency,
         "model_groups": rec.model_groups,
         "tags": rec.tags,
-        "sales_id": rec.sales_id,
         "used_tokens": used_tokens,
         "used_requests": used_requests,
         "tokens_remaining": rec.token_limit.map(|lim| lim.saturating_sub(used_tokens)),
@@ -618,7 +617,6 @@ mod tests {
             request_limit: Some(2),
             expires_at: None,
             tags: vec![],
-            sales_id: None,
             rpm_limit: None,
             max_concurrency: None,
             model_groups: Vec::new(),
@@ -646,7 +644,6 @@ mod tests {
             request_limit: None,
             expires_at: Some(1_000_000_000), // 2001 年, 已过期
             tags: vec![],
-            sales_id: None,
             rpm_limit: None,
             max_concurrency: None,
             model_groups: Vec::new(),

@@ -1,9 +1,9 @@
 //! 管理面板: 内嵌页面 + 查看/调整 API.
 //!
-//! 拆分为 accounts / keys / settings 三个子模块.
+//! 子模块: accounts / keys / settings / cards / models / analytics …
 
 pub mod accounts;
-pub mod billing;
+pub mod analytics;
 pub mod cards;
 pub mod events;
 pub mod health_api;
@@ -21,7 +21,7 @@ pub async fn admin_page() -> impl IntoResponse {
 
 // Re-export 便于 main.rs 路由注册
 pub use accounts::*;
-pub use billing::*;
+pub use analytics::*;
 pub use cards::*;
 pub use events::*;
 pub use health_api::*;

@@ -97,6 +97,18 @@ pub fn model_price(model: &str) -> (f64, f64, f64, f64) {
     builtin_model_price(model)
 }
 
+/// 模型是否有「已知」价格 (注册表命中 或 内置表精确/前缀命中); false = 走了兜底价.
+/// 账本用它给 `priced` 打标, 面板「消耗分析」把 false 的行标成「估算」.
+pub fn model_price_known(model: &str) -> bool {
+    if crate::models::registry().lookup(model).is_some() {
+        return true;
+    }
+    let base = model.strip_suffix("-fast").unwrap_or(model);
+    PREMIUM_PRICES
+        .iter()
+        .any(|(n, _)| *n == base || base.starts_with(n))
+}
+
 /// 内置官方价格表查询 (精确 > 最长前缀 > 兜底), `-fast` 变体 ×2
 pub fn builtin_model_price(model: &str) -> (f64, f64, f64, f64) {
     let fast = model.ends_with("-fast");
@@ -679,14 +691,49 @@ impl CardStore {
             upstream: std::sync::RwLock::new(vec![]),
         };
         store.load();
+        store.load_upstream_names();
         store
     }
 
-    /// 上游模型名单 (可见性判定用); /admin/api/models/upstream 拉取后更新
+    /// 上游模型名单 (可见性 + 智能路由用); /admin/api/models/upstream 拉取后更新并落盘
+    /// (`upstream-models.json`, 与 cards.json 同目录), 重启时 `open` 自动读回 —— 之前是纯内存,
+    /// 每次重启都要人工再点一次「获取可用模型」, 否则 /v1/models 只剩注册表条目.
     pub fn set_upstream_names(&self, names: Vec<String>) {
         if let Ok(mut g) = self.upstream.write() {
-            *g = names;
+            *g = names.clone();
         }
+        let p = self.upstream_path();
+        let data = json!({ "fetched_at": now_unix(), "models": names });
+        if let Ok(text) = serde_json::to_string_pretty(&data) {
+            if let Err(e) = crate::config::atomic_write(&p, &text) {
+                tracing::warn!(event = "upstream_models_save", error = %e, "persist failed");
+            }
+        }
+    }
+    fn upstream_path(&self) -> std::path::PathBuf {
+        self.path.with_file_name("upstream-models.json")
+    }
+    fn load_upstream_names(&self) {
+        let Ok(text) = std::fs::read_to_string(self.upstream_path()) else {
+            return;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            return;
+        };
+        let names: Vec<String> = v["models"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        if !names.is_empty() {
+            if let Ok(mut g) = self.upstream.write() {
+                *g = names;
+            }
+        }
+    }
+    /// 上游名单最近一次拉取时间 (unix 秒), 无文件 = None
+    pub fn upstream_fetched_at(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.upstream_path()).ok()?;
+        serde_json::from_str::<Value>(&text).ok()?["fetched_at"].as_u64()
     }
     pub fn upstream_names(&self) -> Vec<String> {
         self.upstream.read().map(|g| g.clone()).unwrap_or_default()
@@ -2299,6 +2346,22 @@ mod tests {
             TokenPacer::estimate_tokens(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#),
             0.0
         );
+    }
+
+    #[test]
+    fn upstream_names_persist_across_reopen() {
+        let dir = std::env::temp_dir().join(format!("cfp-up-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cards.json");
+        {
+            let s = CardStore::open(&path, 480);
+            assert!(s.upstream_names().is_empty());
+            s.set_upstream_names(vec!["claude-opus-5-high".into(), "kimi-k3-max".into()]);
+            assert!(s.upstream_fetched_at().is_some());
+        }
+        let s2 = CardStore::open(&path, 480);
+        assert_eq!(s2.upstream_names(), vec!["claude-opus-5-high".to_string(), "kimi-k3-max".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

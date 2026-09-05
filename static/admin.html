@@ -291,7 +291,7 @@
         <a href="#pool" data-page="pool">号池<span class="badge" id="nav-pool-badge"></span></a>
         <a href="#proxies" data-page="proxies">IP 代理池<span class="badge" id="nav-proxy-badge"></span></a>
         <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
-        <a href="#billing" data-page="billing">计费账单</a>
+        <a href="#analytics" data-page="analytics">消耗分析<span class="badge" id="nav-analytics-badge"></span></a>
         <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
         <a href="#models" data-page="models">模型<span class="badge" id="nav-models-badge"></span></a>
         <div class="grp">观测</div>
@@ -324,7 +324,7 @@
         <div class="stats">
           <div class="stat"><div class="l">账号</div><div class="v" id="k-total">–</div><div class="s">可用 <b class="ok" id="k-avail">–</b> · 冷却 <b class="warn" id="k-cooling">–</b></div></div>
           <div class="stat"><div class="l">额度剩余</div><div class="v" id="ov-quota-left">–</div><div class="s" id="ov-quota-sub">号池合计</div></div>
-          <div class="stat"><div class="l">今日收入</div><div class="v ok" id="ov-cost">–</div><div class="s">分成 <b class="warn" id="ov-comm">–</b> <span id="ov-cur"></span></div></div>
+          <div class="stat"><div class="l">今日消耗 (面值)</div><div class="v" id="ov-face">–</div><div class="s">成本 <b class="warn" id="ov-cost-rmb">–</b> · 在线 <b class="mono" id="ov-online-now">–</b> 人</div></div>
           <div class="stat"><div class="l">套餐卡利润</div><div class="v" id="ov-card-profit">–</div><div class="s">今日 · 毛利 <b class="mono" id="ov-card-margin">–</b></div></div>
           <div class="stat"><div class="l">今日请求</div><div class="v" id="ov-req">–</div><div class="s">错误率 <b id="ov-err-rate">–</b></div></div>
           <div class="stat"><div class="l">延迟 p50 / p90</div><div class="v sm" id="ov-lat">–</div><div class="s">日志缓冲区</div></div>
@@ -341,7 +341,7 @@
           </div>
           <div style="display:flex;flex-direction:column;gap:10px;min-height:0">
             <div class="panel" style="margin-bottom:0;flex:0 0 auto">
-              <div class="ph"><h3>今日按模型</h3><p>请求 / 金额</p></div>
+              <div class="ph"><h3>今日按模型</h3><p>请求 / 面值 $ / $每在线小时</p></div>
               <div class="table-scroll" style="max-height:180px"><table><tbody id="ov-models-body"><tr><td class="muted">–</td></tr></tbody></table></div>
             </div>
             <div class="panel fill" id="overview-log" style="margin-bottom:0">
@@ -579,7 +579,6 @@
               <label>并发限制 <input id="f-key-conc" type="number" min="0" placeholder="空=不限"></label>
               <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
               <label>标签 <input id="f-key-tags" placeholder="逗号分隔, 如 vip,项目A"></label>
-              <label>归属销售 <select id="f-key-sales"><option value="">（无）</option></select></label>
               <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限）<div id="f-key-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
               <div><button type="submit">追加</button></div>
             </form>
@@ -627,113 +626,60 @@
         </dialog>
       </section>
 
-      <!-- ================= 计费 ================= -->
-      <section class="page page-fill" id="page-billing">
+      <!-- ================= 消耗分析 ================= -->
+      <section class="page page-fill" id="page-analytics">
         <div class="page-head">
-          <div><h2>计费账单</h2><p>金额整数存储、单价按请求快照，改价不影响历史</p></div>
+          <div><h2>消耗分析</h2><p>面值 = 官方口径逐条重算 · 成本 = 面值 × 成本模型 · 在线时长按每个用户的请求节奏自动切段</p></div>
           <div class="actions">
-            <span class="seg"><button type="button" id="bf-today">今日</button><button type="button" id="bf-yesterday">昨日</button><button type="button" id="bf-month">本月</button></span>
-            <button type="button" class="ghost" id="bf-export">导出 CSV</button>
+            <span class="seg"><button type="button" id="an-today">今日</button><button type="button" id="an-7d">7 天</button><button type="button" id="an-30d">30 天</button></span>
+            <button type="button" class="ghost" id="an-refresh">刷新</button>
           </div>
         </div>
-        <div id="billing-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
+        <div id="an-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
           <div class="tabs">
-            <button type="button" class="active" data-tab="summary">汇总</button>
-            <button type="button" data-tab="records">明细</button>
-            <button type="button" data-tab="pricing">价格 / 销售</button>
+            <button type="button" class="active" data-tab="presence">在线状态</button>
+            <button type="button" data-tab="model">按模型</button>
+            <button type="button" data-tab="group">按模型组</button>
+            <button type="button" data-tab="plan">按套餐</button>
+            <button type="button" data-tab="key">按卡</button>
+            <button type="button" data-tab="hourly">时间轴</button>
           </div>
-
-          <form id="bill-filter" class="filter">
+          <form id="an-filter" class="filter">
             <div class="fields">
-              <label>起 <input id="bf-from" placeholder="YYYY-MM-DD / YYYY-MM-DD HH"></label>
-              <label>止（含） <input id="bf-to" placeholder="YYYY-MM-DD / YYYY-MM-DD HH"></label>
-              <label>分组 <select id="bf-group">
-                <option value="day">按天</option><option value="hour">按小时</option>
-                <option value="key">按 key</option><option value="sales">按销售</option>
-                <option value="model">按模型</option><option value="tag">按标签</option>
-                <option value="account">按账号</option><option value="none">合计</option>
-              </select></label>
-              <label>Key <input id="bf-key" placeholder="前缀 / 名称"></label>
-              <label>销售 <select id="bf-sales"><option value="">全部</option></select></label>
-              <label>标签 <select id="bf-tag"><option value="">全部</option></select></label>
-              <label>模型 <input id="bf-model" placeholder="精确或 claude-*"></label>
-              <label>状态 <select id="bf-status"><option value="">全部</option><option value="200">成功</option><option value="502">上游失败</option><option value="504">超时</option><option value="500">内部错误</option></select></label>
-              <label class="wide">搜索 <input id="bf-q" placeholder="req_id / 名称 / IP / 标签"></label>
-              <label class="inline"><input type="checkbox" id="bf-unpriced"> 只看未定价</label>
+              <label>起 <input id="an-from" placeholder="YYYY-MM-DD"></label>
+              <label>止（含） <input id="an-to" placeholder="YYYY-MM-DD"></label>
+              <label>范围 <select id="an-scope"><option value="cards">只看套餐卡</option><option value="all">全部 (含 API key)</option></select></label>
+              <label>会话间隔 s <input id="an-gap" type="number" min="0" placeholder="0=自适应"></label>
+              <label>卡 / key <input id="an-key" placeholder="card-… 精确匹配"></label>
             </div>
             <div class="foot">
-              <span class="info" id="bill-msg"></span>
+              <span class="info" id="an-msg"></span>
               <button type="submit">查询</button>
             </div>
           </form>
-
-          <div id="bill-tab-summary" style="display:flex;flex:1;min-height:0;flex-direction:column">
-            <div class="stat-strip">
-              <div><div class="l">金额 <span id="bk-cur"></span></div><div class="v" id="bk-cost">–</div><div class="s">按快照单价汇总</div></div>
-              <div><div class="l">销售分成</div><div class="v warn" id="bk-comm">–</div><div class="s">按各 key 归属销售比例</div></div>
-              <div><div class="l">请求 / TOKENS</div><div class="v"><span id="bk-req">–</span></div><div class="s">输入 <b class="mono" id="bk-in">–</b> · 输出 <b class="mono" id="bk-out">–</b></div></div>
-            </div>
-            <div class="panel fill">
-              <div class="ph"><h3 id="bill-sum-title">按日汇总</h3></div>
-              <div class="table-scroll">
-                <table>
-                  <thead><tr><th>分组</th><th class="barcell"></th><th class="num">请求</th><th class="num">成功</th><th class="num">输入 tok</th><th class="num">输出 tok</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="money">金额</th><th class="money">分成</th><th class="num">未定价</th></tr></thead>
-                  <tbody id="bill-sum-body"></tbody>
-                </table>
-              </div>
+          <div class="stat-strip">
+            <div><div class="l">面值</div><div class="v" id="an-face">–</div><div class="s">成本 <b class="warn" id="an-cost">–</b></div></div>
+            <div><div class="l">$ / 在线小时</div><div class="v" id="an-uph">–</div><div class="s">¥ <b class="mono" id="an-rph">–</b> · 忙时 $/h <b class="mono" id="an-ubh">–</b></div></div>
+            <div><div class="l">在线时长</div><div class="v sm" id="an-online">–</div><div class="s">忙时 <b class="mono" id="an-busy">–</b> · 时段 <b class="mono" id="an-sess">–</b></div></div>
+            <div><div class="l">请求 / 用户</div><div class="v sm" id="an-req">–</div><div class="s">扫描 <b class="mono" id="an-rows">–</b> 行 <span id="an-trunc" class="bad"></span></div></div>
+          </div>
+          <div class="panel fill" id="an-tab-table">
+            <div class="ph"><h3 id="an-title">在线状态</h3><p id="an-sub"></p></div>
+            <div class="table-scroll">
+              <table class="nowrap">
+                <thead id="an-head"></thead>
+                <tbody id="an-body"><tr><td class="muted">加载中…</td></tr></tbody>
+              </table>
             </div>
           </div>
-
-          <div id="bill-tab-records" style="display:none;flex:1;min-height:0;flex-direction:column">
-            <div class="panel fill">
-              <div class="table-scroll">
-                <table class="nowrap">
-                  <thead><tr><th>时间</th><th>req_id</th><th>Key</th><th>销售</th><th>模型</th><th>账号</th><th class="num">in / out</th><th class="num">缓存 读 / 写</th><th class="money">单价 /M</th><th class="money">金额</th><th class="money">分成</th><th>状态</th><th class="num">耗时</th><th>标签</th></tr></thead>
-                  <tbody id="bill-rec-body"></tbody>
-                </table>
-              </div>
-              <div class="foot-row"><div class="pagination" id="bill-pager"></div></div>
+          <div class="panel fill" id="an-sessions" style="display:none">
+            <div class="ph"><h3>在线时段 <span class="mono muted" id="an-sess-key"></span></h3><button type="button" class="ghost" id="an-sess-close">返回</button></div>
+            <div class="table-scroll">
+              <table class="nowrap">
+                <thead><tr><th>开始</th><th>结束</th><th class="num">时长</th><th class="num">请求</th><th class="num">面值 $</th><th class="num">$/h</th><th class="num">忙时占比</th><th>模型</th></tr></thead>
+                <tbody id="an-sess-body"></tbody>
+              </table>
             </div>
-          </div>
-
-          <div id="bill-tab-pricing" style="display:none">
-            <div class="panel">
-              <div class="ph"><h3>计费参数</h3><p>保存后立即对新请求生效</p></div>
-              <div class="pb form-grid">
-                <label>币种 <input id="pr-currency"></label>
-                <label>时区偏移（分钟） <input id="pr-tz" type="number"></label>
-                <label>默认分成 % <input id="pr-bps" type="number" min="0" max="100" step="0.01"></label>
-                <label class="inline"><input type="checkbox" id="pr-reject"> 未定价模型拒绝请求 (402)</label>
-              </div>
-            </div>
-            <div>
-              <div class="panel">
-                <div class="ph"><h3>模型价格表</h3><p>单价为每 1M tokens。模型名可填精确名（如 <code>claude-sonnet-4-6</code>）、前缀通配（<code>claude-opus-*</code>）或 <code>*</code> 兜底；匹配优先级 精确 &gt; 最长前缀 &gt; <code>*</code>。缓存读/写留 0 表示不单独计价。</p></div>
-                <div class="table-scroll" style="max-height:none">
-                  <table class="edit">
-                    <thead><tr><th style="min-width:220px">模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">缓存写</th><th>备注</th><th></th></tr></thead>
-                    <tbody id="pr-price-body"></tbody>
-                  </table>
-                </div>
-                <datalist id="model-list"></datalist>
-                <div class="pb" style="padding-top:12px"><button type="button" class="ghost sm" id="pr-add-price">+ 添加模型</button> <button type="button" class="ghost sm" id="pr-add-claude">+ 一键填入 Claude 全系标价</button></div>
-              </div>
-              <div class="panel">
-                <div class="ph"><h3>销售 / 渠道</h3><p>分成按百分比填写（15 = 15%）。API key 上选择归属销售后，该 key 的每笔账单按此比例算分成；未绑定的用上面的默认分成。</p></div>
-                <div class="table-scroll" style="max-height:none">
-                  <table class="edit">
-                    <thead><tr><th style="min-width:140px">销售 ID</th><th>姓名</th><th class="num">分成 %</th><th></th></tr></thead>
-                    <tbody id="pr-sales-body"></tbody>
-                  </table>
-                </div>
-                <div class="pb" style="padding-top:12px"><button type="button" class="ghost sm" id="pr-add-sales">+ 添加销售</button></div>
-              </div>
-            </div>
-            <div class="toolbar">
-              <button type="button" id="pr-save">保存全部</button>
-              <p class="toast" id="pr-msg" style="margin:0">改价只影响之后的请求；历史账单已快照当时单价。</p>
-            </div>
-            <p class="toast" id="bill-writer"></p>
           </div>
         </div>
       </section>
@@ -884,14 +830,14 @@
           <div><div class="l">错误率</div><div class="v" id="lk-rate">–</div><div class="s" id="lk-status">–</div></div>
           <div><div class="l">延迟 p50 / p90 / p99</div><div class="v sm" id="lk-lat">–</div><div class="s">平均 <b class="mono" id="lk-avg">–</b> · 最大 <b class="mono" id="lk-max">–</b></div></div>
           <div><div class="l">TOKENS</div><div class="v sm" id="lk-tok">–</div><div class="s">输入(含缓存) / 输出</div></div>
-          <div><div class="l">计费金额</div><div class="v" id="lk-cost">–</div><div class="s">筛选范围内已入账</div></div>
+          <div><div class="l">面值 $</div><div class="v" id="lk-cost">–</div><div class="s">官方口径 · 缓冲区内</div></div>
         </div>
         <div class="grid-2" style="flex:1;min-height:0;grid-template-columns:1fr 300px">
           <div class="panel fill">
             <div class="ph"><h3>日志 <span class="muted" id="lg-count"></span></h3></div>
             <div class="table-scroll">
               <table id="lg-table">
-                <thead><tr><th>时间</th><th>状态</th><th>身份</th><th>模型</th><th>账号</th><th>tokens</th><th>金额</th><th>延迟</th><th>IP</th><th></th></tr></thead>
+                <thead><tr><th>时间</th><th>状态</th><th>身份</th><th>模型</th><th>账号</th><th>tokens</th><th>面值 $</th><th>延迟</th><th>IP</th><th></th></tr></thead>
                 <tbody id="lg-body"><tr><td colspan="10" class="muted">加载中…</td></tr></tbody>
               </table>
             </div>
@@ -1463,8 +1409,7 @@
         tr.appendChild(el('td', { class: 'text' }, nd || '—'));
         const tsTd = el('td');
         (k.tags || []).forEach((t) => tsTd.appendChild(el('span', { class: 'tag' }, t)));
-        if (k.sales_id) tsTd.appendChild(el('span', { class: 'pill info' }, salesName(k.sales_id)));
-        if (!(k.tags || []).length && !k.sales_id) tsTd.textContent = '—';
+        if (!(k.tags || []).length) tsTd.textContent = '—';
         (k.model_groups || []).forEach((g) => tsTd.appendChild(el('span', { class: 'pill info', style: 'margin-left:4px;font-size:10px;padding:1px 6px', title: '模型组' }, '组:' + g)));
         tr.appendChild(tsTd);
         tr.appendChild(el('td', { class: 'num' }, fmtN(k.used_tokens) + ' tok / ' + fmtN(k.used_requests) + ' req'));
@@ -1507,8 +1452,6 @@
           if (conc === null) return;
           const tags = prompt('标签（逗号分隔，空=无）', (k.tags || []).join(','));
           if (tags === null) return;
-          const sid = prompt('归属销售 id（空=无）可选: ' + salesList.map((s) => s.id).join(', '), k.sales_id || '');
-          if (sid === null) return;
           await ensureGroups();
           const mg = prompt('可用模型组 id（逗号分隔，空=不限）可选: ' + mdGroups.map((g) => g.id).join(', '), (k.model_groups || []).join(','));
           if (mg === null) return;
@@ -1522,7 +1465,6 @@
                 request_limit: r.trim() === '' ? null : Number(r),
                 expires_at: exp.trim() === '' ? null : (Number(exp) === 0 ? null : Number(exp)),
                 tags: splitTags(tags),
-                sales_id: sid.trim() === '' ? null : sid.trim(),
                 rpm_limit: rpm.trim() === '' ? null : (Number(rpm) === 0 ? null : Number(rpm)),
                 max_concurrency: conc.trim() === '' ? null : (Number(conc) === 0 ? null : Number(conc)),
                 model_groups: mg.split(',').map((s) => s.trim()).filter(Boolean),
@@ -1655,8 +1597,7 @@
       kv.replaceChildren();
       [['版本', 'v' + settings.version], ['监听', settings.host + ':' + settings.port], ['上游', settings.backend],
        ['已配置上游', (settings.upstreams || []).join(', ')], ['排队等待', settings.acquire_wait_ms + ' ms'],
-       ['计费币种', settings.billing_currency], ['计费时区', '+' + (settings.billing_tz_offset_minutes / 60) + 'h'],
-       ['价格规则', String(settings.billing_price_rules)], ['API key 数', String(settings.api_key_count)]]
+       ['账本时区', '+' + (settings.billing_tz_offset_minutes / 60) + 'h'], ['API key 数', String(settings.api_key_count)]]
         .forEach(([k, v]) => { kv.appendChild(el('dt', null, k)); kv.appendChild(el('dd', null, v == null ? '—' : String(v))); });
       setLive(true);
       loadOverviewBilling().catch(() => {});
@@ -1676,13 +1617,28 @@
     }
     async function loadOverviewBilling() {
       const d = localDate(new Date());
-      const r = await api('/admin/api/billing/summary?group=none&from=' + d + '&to=' + d);
-      const t = r.total || {};
-      document.getElementById('ov-cost').textContent = t.cost || '0.00';
-      document.getElementById('ov-comm').textContent = t.commission || '0.00';
+      const r = await api('/admin/api/analytics/consumption?scope=all&from=' + d + '&to=' + d);
+      const t = r.totals || {};
+      document.getElementById('ov-face').textContent = '$' + Number(t.face_usd || 0).toFixed(2);
+      document.getElementById('ov-cost-rmb').textContent = '¥' + Number(t.cost_rmb || 0).toFixed(2);
       document.getElementById('ov-req').textContent = fmtN(t.requests);
-      document.getElementById('ov-tok').textContent = fmtN((t.input_tokens || 0) + (t.output_tokens || 0));
-      document.getElementById('ov-cur').textContent = r.currency ? '(' + r.currency + ')' : '';
+      const tb = document.getElementById('ov-models-body');
+      if (tb) {
+        tb.innerHTML = '';
+        const rows = (r.by_model || []).slice(0, 10);
+        if (!rows.length) tb.innerHTML = '<tr><td class="muted">今日暂无</td></tr>';
+        rows.forEach((m) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td class="mono" style="font-size:11px">' + esc(m.model || '') + '</td><td class="mono">' + fmtN(m.requests) + '</td><td class="mono">$' + Number(m.face_usd || 0).toFixed(2) + '</td><td class="mono muted">' + (m.usd_per_online_hour == null ? '–' : '$' + Number(m.usd_per_online_hour).toFixed(1) + '/h') + '</td>';
+          tb.appendChild(tr);
+        });
+      }
+      try {
+        const pz = await api('/admin/api/analytics/presence');
+        document.getElementById('ov-online-now').textContent = String(pz.online || 0);
+        const b = document.getElementById('nav-analytics-badge');
+        if (b) b.textContent = pz.online ? String(pz.online) : '';
+      } catch (_) {}
     }
     // innerHTML 只拼接 esc() 转义后的服务端字段与固定模板, 数值直接 Number() 格式化
     // ---------- 套餐卡 ----------
@@ -2147,7 +2103,7 @@
         tr.innerHTML = '<td class="mono muted">' + t + '</td><td><span class="pill ' + (ok ? 'ok' : 'bad') + '">' + esc(String(l.status || '')) + '</span>' + (l.stream ? ' <span class="muted" style="font-size:10px">SSE</span>' : '') + '</td>' +
           '<td>' + who + '</td><td class="mono">' + esc(l.model || '') + '</td><td class="mono">' + esc(l.account || '') + '</td>' +
           '<td class="mono" title="in ' + (l.input_tokens || 0) + ' · out ' + (l.output_tokens || 0) + ' · cr ' + (l.cache_read_tokens || 0) + ' · cw ' + (l.cache_write_tokens || 0) + '">' + fmtN(l.total_tokens) + '</td>' +
-          '<td class="mono">' + (l.priced === false ? '<span class="warn" title="未定价">–</span>' : esc(String(l.cost || ''))) + '</td>' +
+          '<td class="mono">' + (l.priced === false ? '<span class="warn" title="不在价格表, 按兜底价估算">~' + esc(String(l.cost || '')) + '</span>' : esc(String(l.cost || ''))) + '</td>' +
           '<td class="mono ' + (lat >= 60000 ? 'bad' : lat >= 20000 ? 'warn' : '') + '">' + fmtLat(lat) + '</td><td class="mono muted">' + esc(l.client_ip || '') + '</td><td></td>';
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button', title: '详情' }, '…')).addEventListener('click', () => {
@@ -2296,20 +2252,6 @@
         const el = document.getElementById('ov-lat');
         if (el) el.textContent = fmtLat(L.p50_ms) + ' / ' + fmtLat(L.p90_ms);
       } catch (_) {}
-      try {
-        const m = await api('/admin/api/billing/summary?group=model&from=' + d + '&to=' + d);
-        const tb = document.getElementById('ov-models-body');
-        if (tb) {
-          tb.innerHTML = '';
-          const rows = (m.rows || []).slice(0, 10);
-          if (!rows.length) tb.innerHTML = '<tr><td class="muted">今日暂无</td></tr>';
-          rows.forEach((r) => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = '<td class="mono" style="font-size:11px">' + esc(r.model || '') + '</td><td class="mono">' + fmtN(r.requests) + '</td><td class="mono muted">' + esc(String(r.cost || '')) + '</td>';
-            tb.appendChild(tr);
-          });
-        }
-      } catch (_) {}
     }
 
     // ---------- 模型页: 上游可用模型 + litellm 同步 ----------
@@ -2348,20 +2290,202 @@
         await loadModelsPage();
       } catch (e) { mdMsg(e.message, true); }
     });
+    // ---------- 消耗分析 ----------
+    let anTab = 'presence';
+    let anData = null;
+    const anMsg = (m, err) => toast('an-msg', m, err);
+    const fUsd = (v, d) => v == null ? '–' : '$' + Number(v).toFixed(d == null ? 2 : d);
+    const fRmb = (v) => v == null ? '–' : '¥' + Number(v).toFixed(2);
+    const fHrs = (h) => { h = Number(h || 0); return h >= 1 ? h.toFixed(1) + 'h' : Math.round(h * 60) + 'm'; };
+    const fAgo = (s) => s == null ? '–' : s < 60 ? s + 's' : s < 3600 ? Math.round(s / 60) + 'm' : (s / 3600).toFixed(1) + 'h';
+    const fTs = (ms) => ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '–';
+    const shortKey = (k) => k && k.startsWith('card-') ? '<span class="pill info" title="' + esc(k) + '">卡 ' + esc(k.slice(5, 11)) + '</span>' : '<span class="mono">' + esc(k || '') + '</span>';
+    function anQuery() {
+      const q = new URLSearchParams();
+      const g = (id) => document.getElementById(id).value.trim();
+      if (g('an-from')) q.set('from', g('an-from'));
+      if (g('an-to')) q.set('to', g('an-to'));
+      q.set('scope', g('an-scope') || 'cards');
+      if (g('an-gap') && Number(g('an-gap')) > 0) q.set('gap', g('an-gap'));
+      if (g('an-key')) q.set('key', g('an-key'));
+      return q;
+    }
+    document.querySelectorAll('#an-panel .tabs button').forEach((b) => {
+      b.addEventListener('click', () => {
+        anTab = b.dataset.tab;
+        document.querySelectorAll('#an-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
+        document.getElementById('an-sessions').style.display = 'none';
+        document.getElementById('an-tab-table').style.display = '';
+        loadAnalytics().catch((e) => anMsg(e.message, true));
+      });
+    });
+    function setRange(days) {
+      const to = localDate(new Date());
+      const from = localDate(new Date(Date.now() - (days - 1) * 86400000));
+      document.getElementById('an-from').value = from; document.getElementById('an-to').value = to;
+      loadAnalytics().catch((e) => anMsg(e.message, true));
+    }
+    document.getElementById('an-today').addEventListener('click', () => setRange(1));
+    document.getElementById('an-7d').addEventListener('click', () => setRange(7));
+    document.getElementById('an-30d').addEventListener('click', () => setRange(30));
+    document.getElementById('an-refresh').addEventListener('click', () => loadAnalytics().catch((e) => anMsg(e.message, true)));
+    document.getElementById('an-filter').addEventListener('submit', (e) => { e.preventDefault(); loadAnalytics().catch((e) => anMsg(e.message, true)); });
+    document.getElementById('an-sess-close').addEventListener('click', () => {
+      document.getElementById('an-sessions').style.display = 'none';
+      document.getElementById('an-tab-table').style.display = '';
+    });
+    function anHead(cols) {
+      document.getElementById('an-head').innerHTML = '<tr>' + cols.map((c) => '<th' + (c[1] ? ' class="' + c[1] + '"' : '') + '>' + c[0] + '</th>').join('') + '</tr>';
+    }
+    function anTotals(t, d) {
+      document.getElementById('an-face').textContent = fUsd(t.face_usd);
+      document.getElementById('an-cost').textContent = fRmb(t.cost_rmb);
+      document.getElementById('an-uph').textContent = t.usd_per_online_hour == null ? '–' : fUsd(t.usd_per_online_hour, 1);
+      document.getElementById('an-rph').textContent = t.rmb_per_online_hour == null ? '–' : Number(t.rmb_per_online_hour).toFixed(2);
+      document.getElementById('an-ubh').textContent = t.usd_per_busy_hour == null ? '–' : Number(t.usd_per_busy_hour).toFixed(1);
+      document.getElementById('an-online').textContent = fHrs(t.online_hours);
+      document.getElementById('an-busy').textContent = fHrs(t.busy_hours);
+      document.getElementById('an-sess').textContent = fmtN(t.sessions);
+      document.getElementById('an-req').textContent = fmtN(t.requests) + ' / ' + fmtN(t.users);
+      document.getElementById('an-rows').textContent = fmtN(d.rows_scanned);
+      document.getElementById('an-trunc').textContent = d.truncated ? '（已截断, 请缩短时间窗）' : '';
+    }
+    const AGG_COLS = [['请求', 'num'], ['错误', 'num'], ['用户', 'num'], ['面值 $', 'num'], ['成本 ¥', 'num'], ['$/请求', 'num'], ['在线', 'num'], ['忙时', 'num'], ['时段', 'num'], ['$/在线h', 'num'], ['¥/在线h', 'num'], ['tokens in/out/cr', 'num']];
+    function aggCells(r) {
+      return '<td class="mono">' + fmtN(r.requests) + '</td><td class="mono ' + (r.errors ? 'bad' : 'muted') + '">' + fmtN(r.errors) + '</td><td class="mono">' + fmtN(r.users) + '</td>' +
+        '<td class="mono">' + fUsd(r.face_usd) + '</td><td class="mono">' + fRmb(r.cost_rmb) + '</td><td class="mono muted">' + fUsd(r.avg_face_per_req, 4) + '</td>' +
+        '<td class="mono">' + fHrs(r.online_hours) + '</td><td class="mono muted">' + fHrs(r.busy_hours) + '</td><td class="mono muted">' + fmtN(r.sessions) + '</td>' +
+        '<td class="mono"><b>' + (r.usd_per_online_hour == null ? '–' : Number(r.usd_per_online_hour).toFixed(2)) + '</b></td><td class="mono">' + (r.rmb_per_online_hour == null ? '–' : Number(r.rmb_per_online_hour).toFixed(2)) + '</td>' +
+        '<td class="mono muted" style="font-size:11px">' + fmtN(r.input_tokens) + ' / ' + fmtN(r.output_tokens) + ' / ' + fmtN(r.cache_read_tokens) + '</td>';
+    }
+    async function loadAnalytics() {
+      anMsg('');
+      const tb = document.getElementById('an-body');
+      if (anTab === 'presence') return loadPresence();
+      const d = await api('/admin/api/analytics/consumption?' + anQuery().toString());
+      anData = d;
+      anTotals(d.totals || {}, d);
+      document.getElementById('an-sub').textContent = '会话间隔: ' + (d.gap_mode === 'auto' ? '按每个用户节奏自适应 (5–30 分钟)' : d.gap_secs + ' 秒固定') + ' · ¥' + Number(d.rmb_per_usd || 0).toFixed(3) + '/面值$';
+      tb.innerHTML = '';
+      let rows = [];
+      if (anTab === 'model') {
+        document.getElementById('an-title').textContent = '按模型';
+        anHead([['模型', ''], ['组', '']].concat(AGG_COLS));
+        rows = d.by_model || [];
+        rows.forEach((r) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td class="mono">' + esc(r.model) + (r.priced === false ? ' <span class="pill warn" title="不在价格表, 按兜底价估算">估算</span>' : '') + '</td><td>' + (r.groups || []).map((g) => '<span class="pill info" style="font-size:10px">' + esc(g) + '</span>').join(' ') + '</td>' + aggCells(r);
+          tb.appendChild(tr);
+        });
+      } else if (anTab === 'group') {
+        document.getElementById('an-title').textContent = '按模型组';
+        anHead([['模型组', '']].concat(AGG_COLS));
+        rows = d.by_group || [];
+        rows.forEach((r) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td>' + esc(r.group_name || r.group_id) + ' <span class="mono muted" style="font-size:10px">' + esc(r.group_id) + '</span></td>' + aggCells(r);
+          tb.appendChild(tr);
+        });
+      } else if (anTab === 'plan') {
+        document.getElementById('an-title').textContent = '按套餐';
+        anHead([['套餐', ''], ['售价', 'num'], ['时长/并发', 'num'], ['卡均面值', 'num'], ['卡均在线', 'num']].concat(AGG_COLS));
+        rows = d.by_plan || [];
+        rows.forEach((r) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td>' + esc(r.plan_name || r.plan_id) + ' <span class="mono muted" style="font-size:10px">' + esc(r.plan_id) + '</span></td>' +
+            '<td class="mono">' + (r.list_price == null ? '–' : fRmb(r.list_price)) + '</td><td class="mono muted">' + (r.duration_hours == null ? '–' : r.duration_hours + 'h / ' + r.max_concurrency) + '</td>' +
+            '<td class="mono">' + fUsd(r.avg_face_per_card) + '</td><td class="mono">' + (r.avg_online_hours_per_card == null ? '–' : fHrs(r.avg_online_hours_per_card)) + '</td>' + aggCells(r);
+          tb.appendChild(tr);
+        });
+      } else if (anTab === 'key') {
+        document.getElementById('an-title').textContent = '按卡 / key';
+        anHead([['卡 / key', ''], ['归属', ''], ['套餐', ''], ['实收', 'num'], ['毛利', 'num']].concat(AGG_COLS).concat([['', '']]));
+        rows = d.by_key || [];
+        rows.forEach((r) => {
+          const tr = document.createElement('tr');
+          const profit = r.profit_rmb;
+          tr.innerHTML = '<td>' + shortKey(r.key_name) + '</td><td>' + esc(r.owner || '') + '</td><td>' + esc(r.plan_name || r.plan_id || '') + '</td>' +
+            '<td class="mono">' + (r.paid_rmb == null ? '–' : fRmb(r.paid_rmb)) + '</td><td class="mono ' + (profit == null ? 'muted' : profit >= 0 ? 'ok' : 'bad') + '">' + (profit == null ? '–' : fRmb(profit)) + '</td>' + aggCells(r) + '<td></td>';
+          tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '时段')).addEventListener('click', () => loadSessions(r.key_name));
+          tb.appendChild(tr);
+        });
+      } else if (anTab === 'hourly') {
+        document.getElementById('an-title').textContent = '时间轴 (按小时)';
+        anHead([['小时', ''], ['活跃用户', 'num'], ['', 'barcell'], ['请求', 'num'], ['面值 $', 'num']]);
+        rows = d.hourly || [];
+        const maxU = Math.max(1, ...rows.map((r) => r.active_users || 0));
+        rows.slice().reverse().forEach((r) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td class="mono">' + esc(r.hour) + '</td><td class="mono">' + r.active_users + '</td><td class="barcell"><div class="qbar"><i class="ok" style="width:' + Math.round(r.active_users / maxU * 100) + '%"></i></div></td><td class="mono">' + fmtN(r.requests) + '</td><td class="mono">' + fUsd(r.face_usd) + '</td>';
+          tb.appendChild(tr);
+        });
+      }
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="16" class="muted">范围内无数据</td></tr>';
+    }
+    async function loadPresence() {
+      const d = await api('/admin/api/analytics/presence');
+      document.getElementById('an-title').textContent = '在线状态';
+      document.getElementById('an-sub').textContent = '在线 = 在飞或 ' + Math.round(d.window_secs / 60) + ' 分钟内有请求 · 空闲 = 30 分钟内有请求 · 每 10 秒刷新';
+      const b = document.getElementById('nav-analytics-badge'); if (b) b.textContent = d.online ? String(d.online) : '';
+      document.getElementById('an-req').textContent = d.online + ' 在线 / ' + d.idle + ' 空闲 / ' + d.total + ' 总';
+      const rows = d.rows || [];
+      const face = rows.reduce((a, r) => a + (r.today_face_usd || 0), 0);
+      const cost = rows.reduce((a, r) => a + (r.today_cost_rmb || 0), 0);
+      const oh = rows.reduce((a, r) => a + (r.today_online_hours || 0), 0);
+      document.getElementById('an-face').textContent = fUsd(face);
+      document.getElementById('an-cost').textContent = fRmb(cost);
+      document.getElementById('an-online').textContent = fHrs(oh);
+      document.getElementById('an-uph').textContent = oh > 0 ? fUsd(face / oh, 1) : '–';
+      document.getElementById('an-rph').textContent = oh > 0 ? (cost / oh).toFixed(2) : '–';
+      document.getElementById('an-ubh').textContent = '–'; document.getElementById('an-busy').textContent = '–';
+      document.getElementById('an-sess').textContent = fmtN(rows.reduce((a, r) => a + (r.today_sessions || 0), 0));
+      document.getElementById('an-rows').textContent = fmtN(rows.reduce((a, r) => a + (r.today_requests || 0), 0)); document.getElementById('an-trunc').textContent = '';
+      anHead([['状态', ''], ['卡 / key', ''], ['归属', ''], ['套餐', ''], ['在飞', 'num'], ['最近活动', 'num'], ['本次在线', ''], ['今日请求', 'num'], ['今日面值', 'num'], ['今日成本', 'num'], ['今日在线', 'num'], ['今日模型', ''], ['', '']]);
+      const tb = document.getElementById('an-body'); tb.innerHTML = '';
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="13" class="muted">今日无活动、无有效卡</td></tr>';
+      rows.forEach((r) => {
+        const tr = document.createElement('tr');
+        const pz = r.presence === 'online' ? '<span class="pill ok">在线</span>' : r.presence === 'idle' ? '<span class="pill warn">空闲</span>' : '<span class="pill">离线</span>';
+        const cur = r.current_session_start_ms ? fTs(r.current_session_start_ms).slice(11, 16) + ' 起 · ' + r.current_session_requests + ' 请求 · ' + fUsd(r.current_session_face_usd) : '–';
+        const models = Object.entries(r.models_today || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([m, n]) => '<span class="mono" style="font-size:10px" title="' + esc(m) + '">' + esc(m.length > 22 ? m.slice(0, 20) + '…' : m) + '×' + n + '</span>').join(' ');
+        tr.innerHTML = '<td>' + pz + (r.throttle && r.throttle !== 'normal' ? ' <span class="pill warn">' + esc(r.throttle) + '</span>' : '') + '</td><td>' + shortKey(r.key_name) + '</td><td>' + esc(r.owner || '') + '</td><td>' + esc(r.plan_name || r.plan_id || '') + '</td>' +
+          '<td class="mono">' + r.in_flight + '</td><td class="mono muted">' + fAgo(r.idle_secs) + '前</td><td class="muted" style="font-size:11px">' + cur + '</td>' +
+          '<td class="mono">' + fmtN(r.today_requests) + (r.today_errors ? ' <span class="bad">(' + r.today_errors + ' 错)</span>' : '') + '</td><td class="mono">' + fUsd(r.today_face_usd) + '</td><td class="mono">' + fRmb(r.today_cost_rmb) + '</td><td class="mono">' + fHrs(r.today_online_hours) + ' <span class="muted">/' + r.today_sessions + '段</span></td><td>' + models + '</td><td></td>';
+        tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '时段')).addEventListener('click', () => loadSessions(r.key_name));
+        tb.appendChild(tr);
+      });
+    }
+    async function loadSessions(key) {
+      const q = anQuery(); q.set('key', key); q.delete('scope');
+      const d = await api('/admin/api/analytics/sessions?' + q.toString());
+      document.getElementById('an-tab-table').style.display = 'none';
+      document.getElementById('an-sessions').style.display = '';
+      document.getElementById('an-sess-key').textContent = key + ' · ' + (d.totals.sessions || 0) + ' 段 · 在线 ' + fHrs(d.totals.online_hours) + ' · ' + fUsd(d.totals.face_usd) + (d.totals.usd_per_online_hour == null ? '' : ' · $' + Number(d.totals.usd_per_online_hour).toFixed(2) + '/h') + ' · 间隔 ' + Math.round(d.gap_secs) + 's';
+      const tb = document.getElementById('an-sess-body'); tb.innerHTML = '';
+      if (!(d.sessions || []).length) tb.innerHTML = '<tr><td colspan="8" class="muted">范围内无请求</td></tr>';
+      (d.sessions || []).forEach((s) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="mono">' + esc(s.start) + '</td><td class="mono">' + esc(s.end.slice(11)) + '</td><td class="mono">' + fHrs(s.secs / 3600) + '</td><td class="mono">' + s.requests + (s.errors ? ' <span class="bad">(' + s.errors + ')</span>' : '') + '</td><td class="mono">' + fUsd(s.face_usd) + '</td><td class="mono">' + (s.usd_per_hour == null ? '–' : Number(s.usd_per_hour).toFixed(2)) + '</td><td class="mono muted">' + Math.round((s.busy_ratio || 0) * 100) + '%</td>' +
+          '<td style="font-size:11px">' + (s.models || []).map((m) => '<span class="mono">' + esc(m.model) + '</span>×' + m.requests).join(', ') + '</td>';
+        tb.appendChild(tr);
+      });
+    }
+    setInterval(() => { if (location.hash.startsWith('#analytics') && anTab === 'presence' && document.getElementById('an-sessions').style.display === 'none') loadPresence().catch(() => {}); }, 10000);
+
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'cards', 'models', 'settings', 'logs', 'health'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'analytics', 'cards', 'models', 'settings', 'logs', 'health'];
     function showPage(name) {
-      // 支持 #billing/records 直达 tab
+      // 支持 #analytics/presence 直达 tab
       const [base, sub] = (name || '').split('/');
       name = base;
       if (!PAGES.includes(name)) name = 'overview';
-      if (name === 'billing' && sub) {
-        const b = document.querySelector('#billing-panel .tabs button[data-tab="' + sub + '"]');
+      if (name === 'analytics' && sub) {
+        const b = document.querySelector('#an-panel .tabs button[data-tab="' + sub + '"]');
         if (b && !b.classList.contains('active')) { b.click(); }
       }
       PAGES.forEach((p) => document.getElementById('page-' + p).classList.toggle('active', p === name));
       document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
-      if (name === 'billing' && !sub) loadBilling().catch((e) => toast('bill-msg', e.message, true));
+      if (name === 'analytics' && !sub) loadAnalytics().catch((e) => toast('an-msg', e.message, true));
       if (name === 'cards') { ensureGroups().then(refreshGroupPickers); loadCardsTab().catch((e) => toast('cd-msg', e.message, true)); }
       if (name === 'models') loadModelsPage().catch((e) => toast('md-msg', e.message, true));
       if (name === 'logs') { lgLastId = 0; loadLogsPage(true).catch((e) => toast('lg-msg', e.message, true)); }
@@ -2475,7 +2599,6 @@
             request_limit: rlim === '' ? null : Number(rlim),
             expires_at: exp,
             tags: splitTags(document.getElementById('f-key-tags').value),
-            sales_id: document.getElementById('f-key-sales').value || null,
             rpm_limit: document.getElementById('f-key-rpm').value.trim() === '' ? null : Number(document.getElementById('f-key-rpm').value),
             max_concurrency: document.getElementById('f-key-conc').value.trim() === '' ? null : Number(document.getElementById('f-key-conc').value),
             model_groups: pickedGroups(document.getElementById('f-key-groups')),
@@ -2648,263 +2771,10 @@
       toast('acc-msg', '批量删除完成: ' + ids.length + ' 个');
       await loadAll();
     });
-    // ===================== 计费 =====================
-    let salesList = [];
-    function salesName(id) { const s = salesList.find((x) => x.id === id); return s ? (s.name || s.id) : id; }
+    // ===================== 通用小工具 (原计费模块遗留) =====================
     function splitTags(s) { return (s || '').split(/[,，]/).map((x) => x.trim()).filter(Boolean); }
     function fmtN(n) { return Number(n || 0).toLocaleString('en-US'); }
     function localDate(d) { const p = (n) => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
-    let billTab = 'summary';
-    let billPage = 0;
-    const BILL_PAGE = 50;
-
-    document.querySelectorAll('#billing-panel .tabs button').forEach((b) => {
-      b.addEventListener('click', () => {
-        billTab = b.dataset.tab;
-        document.querySelectorAll('#billing-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
-        ['summary', 'records', 'pricing'].forEach((t) => {
-          const n = document.getElementById('bill-tab-' + t);
-          n.style.display = t === billTab ? (t === 'pricing' ? '' : 'flex') : 'none';
-          if (t !== 'pricing') n.style.flexDirection = 'column';
-        });
-        document.getElementById('bill-filter').style.display = billTab === 'pricing' ? 'none' : '';
-        if (billTab === 'pricing') loadPricing().catch((e) => toast('pr-msg', e.message, true));
-        else loadBilling().catch((e) => toast('bill-msg', e.message, true));
-      });
-    });
-
-    function billQuery() {
-      const q = new URLSearchParams();
-      const g = (id) => document.getElementById(id).value.trim();
-      if (g('bf-from')) q.set('from', g('bf-from'));
-      if (g('bf-to')) q.set('to', g('bf-to'));
-      if (g('bf-key')) q.set('key', g('bf-key'));
-      if (g('bf-sales')) q.set('sales', g('bf-sales'));
-      if (g('bf-tag')) q.set('tag', g('bf-tag'));
-      if (g('bf-model')) q.set('model', g('bf-model'));
-      if (g('bf-status')) q.set('status', g('bf-status'));
-      if (g('bf-q')) q.set('q', g('bf-q'));
-      if (document.getElementById('bf-unpriced').checked) q.set('unpriced', '1');
-      return q;
-    }
-
-    async function loadBilling() {
-      if (billTab === 'summary') {
-        const q = billQuery(); q.set('group', document.getElementById('bf-group').value);
-        const d = await api('/admin/api/billing/summary?' + q.toString());
-        const t = d.total || {};
-        document.getElementById('bk-req').textContent = fmtN(t.requests);
-        document.getElementById('bk-in').textContent = fmtN(t.input_tokens);
-        document.getElementById('bk-out').textContent = fmtN(t.output_tokens) + ((t.cache_read_tokens || t.cache_write_tokens) ? ' · 缓存 ' + fmtN(t.cache_read_tokens) + '/' + fmtN(t.cache_write_tokens) : '');
-        document.getElementById('bk-cost').textContent = t.cost || '0.00';
-        document.getElementById('bk-comm').textContent = t.commission || '0.00';
-        document.getElementById('bk-cur').textContent = d.currency ? '(' + d.currency + ')' : '';
-        const body = document.getElementById('bill-sum-body');
-        body.replaceChildren();
-        const titles = { day: '按日汇总', hour: '按小时汇总', key: '按 Key 汇总', sales: '按销售汇总', model: '按模型汇总', tag: '按标签汇总', account: '按账号汇总', none: '合计' };
-        document.getElementById('bill-sum-title').textContent = titles[d.group] || '汇总';
-        if (!(d.rows || []).length) {
-          const tr = el('tr'); const td = el('td', { colspan: '11' }, '无数据'); td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
-        }
-        const maxCost = Math.max(1, ...(d.rows || []).map((r) => Number(r.cost_nano || 0)));
-        (d.rows || []).forEach((r) => {
-          const tr = el('tr');
-          let g = r.group;
-          if (d.group === 'key') g = (r.key_prefix || '') + '… ' + (r.key_name || '');
-          if (d.group === 'sales') g = r.group ? (r.group + (r.sales_name ? ' / ' + r.sales_name : '')) : '(未归属)';
-          if (g === '') g = '(空)';
-          tr.appendChild(el('td', null, g));
-          const bc = el('td', { class: 'barcell' }); const bar = el('div', { class: 'bar' }); const fill = el('i');
-          fill.style.width = Math.max(1, Math.round(Number(r.cost_nano || 0) / maxCost * 100)) + '%'; bar.appendChild(fill); bc.appendChild(bar); tr.appendChild(bc);
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.requests)));
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.ok)));
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.input_tokens)));
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.output_tokens)));
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.cache_read_tokens)));
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.cache_write_tokens)));
-          tr.appendChild(el('td', { class: 'money' }, r.cost));
-          tr.appendChild(el('td', { class: 'money' }, r.commission));
-          const up = el('td', { class: 'num' }, String(r.unpriced || 0)); if (r.unpriced) up.classList.add('bad');
-          tr.appendChild(up);
-          body.appendChild(tr);
-        });
-        toast('bill-msg', '时区偏移 ' + (d.tz_offset_minutes / 60) + 'h · ' + (d.rows || []).length + ' 行');
-      } else if (billTab === 'records') {
-        const q = billQuery(); q.set('limit', String(BILL_PAGE)); q.set('offset', String(billPage * BILL_PAGE));
-        const d = await api('/admin/api/billing/records?' + q.toString());
-        const body = document.getElementById('bill-rec-body');
-        body.replaceChildren();
-        if (!(d.rows || []).length) {
-          const tr = el('tr'); const td = el('td', { colspan: '13' }, '无数据'); td.className = 'empty'; tr.appendChild(td); body.appendChild(tr);
-        }
-        (d.rows || []).forEach((r) => {
-          const tr = el('tr');
-          tr.appendChild(el('td', null, r.ts));
-          tr.appendChild(el('td', { title: r.req_id }, r.req_id.slice(0, 14) + '…'));
-          tr.appendChild(el('td', { title: r.key_hash }, r.key_prefix + '… ' + (r.key_name || '')));
-          tr.appendChild(el('td', null, r.sales_id ? salesName(r.sales_id) + ' ' + (r.commission_bps / 100) + '%' : '—'));
-          tr.appendChild(el('td', null, r.model));
-          tr.appendChild(el('td', null, r.account));
-          tr.appendChild(el('td', { class: 'num' }, fmtN(r.input_tokens) + ' / ' + fmtN(r.output_tokens)));
-          tr.appendChild(el('td', { class: 'num' }, (r.cache_read_tokens || r.cache_write_tokens) ? fmtN(r.cache_read_tokens) + ' / ' + fmtN(r.cache_write_tokens) : '—'));
-          const pr = el('td', { class: 'money', title: '缓存读 ' + r.cache_read_price_per_m + ' / 缓存写 ' + r.cache_write_price_per_m }, r.priced ? (r.input_price_per_m + ' / ' + r.output_price_per_m) : '未定价');
-          if (!r.priced) pr.className = 'money bad';
-          tr.appendChild(pr);
-          tr.appendChild(el('td', { class: 'money' }, r.cost));
-          tr.appendChild(el('td', { class: 'money' }, r.commission));
-          const st = el('td'); st.appendChild(el('span', { class: 'pill ' + (r.status === 200 ? 'ok' : 'bad') }, String(r.status) + (r.stream ? ' 流' : '')));
-          tr.appendChild(st);
-          tr.appendChild(el('td', { class: 'num' }, r.latency_ms + 'ms'));
-          const tg = el('td'); (r.tags || []).forEach((t) => tg.appendChild(el('span', { class: 'tag' }, t)));
-          tr.appendChild(tg);
-          body.appendChild(tr);
-        });
-        const pager = document.getElementById('bill-pager');
-        pager.replaceChildren();
-        const pages = Math.max(1, Math.ceil((d.total || 0) / BILL_PAGE));
-        const prev = el('button', { type: 'button' }, '‹'); prev.disabled = billPage === 0;
-        prev.addEventListener('click', () => { billPage--; loadBilling(); });
-        const next = el('button', { type: 'button' }, '›'); next.disabled = billPage >= pages - 1;
-        next.addEventListener('click', () => { billPage++; loadBilling(); });
-        pager.appendChild(prev);
-        pager.appendChild(el('span', { class: 'page-info' }, (billPage + 1) + ' / ' + pages + ' 页 · 共 ' + fmtN(d.total) + ' 条'));
-        pager.appendChild(next);
-        toast('bill-msg', '');
-      }
-    }
-
-    async function loadBillingMeta() {
-      try {
-        const [pr, tg] = await Promise.all([api('/admin/api/billing/pricing'), api('/admin/api/billing/tags')]);
-        salesList = pr.sales || [];
-        const fill = (id, items, label, keepBlank) => {
-          const sel = document.getElementById(id); const cur = sel.value;
-          sel.replaceChildren(el('option', { value: '' }, keepBlank));
-          items.forEach((it) => sel.appendChild(el('option', { value: typeof it === 'string' ? it : it.id }, label(it))));
-          sel.value = cur;
-        };
-        fill('bf-sales', salesList, (s) => s.id + (s.name ? ' / ' + s.name : ''), '全部');
-        fill('f-key-sales', salesList, (s) => s.id + (s.name ? ' / ' + s.name : ''), '（无）');
-        fill('bf-tag', tg.tags || [], (t) => t, '全部');
-      } catch (e) { /* 面板可能未鉴权 */ }
-    }
-
-    const CLAUDE_LIST_PRICES = [
-      { model: 'kimi-k3',        input_per_m: 1,    output_per_m: 4,   cache_read_per_m: 0.1,   cache_write_per_m: 0,     note: '1M 窗口' },
-      { model: 'kimi-k3-*',      input_per_m: 1,    output_per_m: 4,   cache_read_per_m: 0.1,   cache_write_per_m: 0,     note: '1M 窗口' },
-      { model: 'claude-opus-4-6',   input_per_m: 15,   output_per_m: 75,  cache_read_per_m: 1.5,   cache_write_per_m: 18.75, note: '公开标价' },
-      { model: 'claude-opus-*',     input_per_m: 15,   output_per_m: 75,  cache_read_per_m: 1.5,   cache_write_per_m: 18.75, note: '公开标价' },
-      { model: 'claude-sonnet-4-6', input_per_m: 3,    output_per_m: 15,  cache_read_per_m: 0.3,   cache_write_per_m: 3.75,  note: '公开标价' },
-      { model: 'claude-sonnet-*',   input_per_m: 3,    output_per_m: 15,  cache_read_per_m: 0.3,   cache_write_per_m: 3.75,  note: '公开标价' },
-      { model: 'claude-haiku-*',    input_per_m: 0.8,  output_per_m: 4,   cache_read_per_m: 0.08,  cache_write_per_m: 1,     note: '公开标价' },
-    ];
-    function numInput(val, opts) {
-      const i = el('input', Object.assign({ type: 'number', min: '0', step: 'any', inputmode: 'decimal' }, opts || {}));
-      i.value = (val == null || val === '') ? '' : String(val);
-      return i;
-    }
-    function priceRow(r) {
-      r = r || {};
-      const tr = el('tr');
-      const m = el('input', { list: 'model-list', placeholder: '如 claude-sonnet-4-6 / claude-opus-* / *', spellcheck: 'false' }); m.value = r.model || '';
-      const tdm = el('td'); tdm.appendChild(m); tr.appendChild(tdm);
-      const cells = [
-        ['input_per_m', r.input_per_m], ['output_per_m', r.output_per_m],
-        ['cache_read_per_m', r.cache_read_per_m || 0], ['cache_write_per_m', r.cache_write_per_m || 0],
-      ];
-      cells.forEach(([k, v]) => { const td = el('td', { class: 'num' }); td.appendChild(numInput(v, { 'data-k': k, placeholder: '0' })); tr.appendChild(td); });
-      const note = el('input', { placeholder: '可选' }); note.value = r.note || '';
-      const tdn = el('td'); tdn.appendChild(note); tr.appendChild(tdn);
-      const del = el('button', { type: 'button', class: 'del', title: '删除此行' }, '✕'); del.addEventListener('click', () => tr.remove());
-      const tdd = el('td'); tdd.appendChild(del); tr.appendChild(tdd);
-      tr._get = () => ({
-        model: m.value.trim(),
-        input_per_m: Number(tr.querySelector('[data-k=input_per_m]').value || 0),
-        output_per_m: Number(tr.querySelector('[data-k=output_per_m]').value || 0),
-        cache_read_per_m: Number(tr.querySelector('[data-k=cache_read_per_m]').value || 0),
-        cache_write_per_m: Number(tr.querySelector('[data-k=cache_write_per_m]').value || 0),
-        note: note.value.trim(),
-      });
-      return tr;
-    }
-    function salesRow(r) {
-      r = r || {};
-      const tr = el('tr');
-      const id = el('input', { placeholder: '如 alice', spellcheck: 'false' }); id.value = r.id || '';
-      const name = el('input', { placeholder: '显示名' }); name.value = r.name || '';
-      const pct = numInput(r.commission_bps != null ? (r.commission_bps / 100) : '', { max: '100', placeholder: '15' });
-      [id, name].forEach((i) => { const td = el('td'); td.appendChild(i); tr.appendChild(td); });
-      const tdp = el('td', { class: 'num' }); tdp.appendChild(pct); tr.appendChild(tdp);
-      const del = el('button', { type: 'button', class: 'del', title: '删除此行' }, '✕'); del.addEventListener('click', () => tr.remove());
-      const tdd = el('td'); tdd.appendChild(del); tr.appendChild(tdd);
-      tr._get = () => ({ id: id.value.trim(), name: name.value.trim(), commission_bps: Math.round(Number(pct.value || 0) * 100) });
-      return tr;
-    }
-    function collectRows(tbodyId) {
-      return Array.from(document.getElementById(tbodyId).children).map((tr) => tr._get());
-    }
-    document.getElementById('pr-add-price').addEventListener('click', () => { const tr = priceRow(); document.getElementById('pr-price-body').appendChild(tr); tr.querySelector('input').focus(); });
-    document.getElementById('pr-add-sales').addEventListener('click', () => { const tr = salesRow(); document.getElementById('pr-sales-body').appendChild(tr); tr.querySelector('input').focus(); });
-    document.getElementById('pr-add-claude').addEventListener('click', () => {
-      const have = new Set(collectRows('pr-price-body').map((r) => r.model));
-      CLAUDE_LIST_PRICES.filter((r) => !have.has(r.model)).forEach((r) => document.getElementById('pr-price-body').appendChild(priceRow(r)));
-      toast('pr-msg', '已填入 Anthropic 公开标价，请按实际售价修改后保存');
-    });
-    async function fillModelList() {
-      try {
-        const d = await api('/admin/api/billing/summary?group=model');
-        const dl = document.getElementById('model-list'); dl.replaceChildren();
-        const seen = new Set((d.rows || []).map((r) => r.group));
-        ['*', 'kimi-k3', 'kimi-k3-*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*', 'gpt-*'].forEach((m) => seen.add(m));
-        Array.from(seen).sort().forEach((m) => dl.appendChild(el('option', { value: m })));
-      } catch (e) {}
-    }
-    async function loadPricing() {
-      const d = await api('/admin/api/billing/pricing');
-      salesList = d.sales || [];
-      document.getElementById('pr-currency').value = d.currency || 'RMB';
-      document.getElementById('pr-tz').value = d.tz_offset_minutes;
-      document.getElementById('pr-bps').value = (d.default_commission_bps || 0) / 100;
-      document.getElementById('pr-reject').checked = !!d.reject_unpriced;
-      const pb = document.getElementById('pr-price-body'); pb.replaceChildren();
-      (d.prices || []).forEach((r) => pb.appendChild(priceRow(r)));
-      if (!(d.prices || []).length) pb.appendChild(priceRow());
-      const sb = document.getElementById('pr-sales-body'); sb.replaceChildren();
-      (d.sales || []).forEach((r) => sb.appendChild(salesRow(r)));
-      fillModelList();
-      try {
-        const st = await api('/admin/api/billing/stats');
-        document.getElementById('bill-writer').textContent = '账本 ' + st.db_file + ' · ' + (st.db_bytes / 1024 / 1024).toFixed(1) + ' MB · 已写 ' + fmtN(st.written) + ' · 待写 ' + st.pending + ' · 重复忽略 ' + st.ignored_duplicates + ' · 失败 ' + st.failed;
-      } catch (e) {}
-    }
-    document.getElementById('pr-save').addEventListener('click', async () => {
-      const prices = collectRows('pr-price-body').filter((r) => r.model);
-      const sales = collectRows('pr-sales-body').filter((r) => r.id);
-      const dupM = prices.map((r) => r.model).find((m, i, a) => a.indexOf(m) !== i);
-      if (dupM) { toast('pr-msg', '模型重复: ' + dupM, true); return; }
-      const dupS = sales.map((r) => r.id).find((m, i, a) => a.indexOf(m) !== i);
-      if (dupS) { toast('pr-msg', '销售 ID 重复: ' + dupS, true); return; }
-      try {
-        await api('/admin/api/billing/pricing', { method: 'POST', body: JSON.stringify({
-          currency: document.getElementById('pr-currency').value,
-          tz_offset_minutes: Number(document.getElementById('pr-tz').value),
-          default_commission_bps: Math.round(Number(document.getElementById('pr-bps').value || 0) * 100),
-          reject_unpriced: document.getElementById('pr-reject').checked,
-          prices, sales,
-        }) });
-        toast('pr-msg', '已保存，立即对新请求生效');
-        await loadPricing(); await loadBillingMeta();
-      } catch (e) { toast('pr-msg', e.message, true); }
-    });
-    document.getElementById('bill-filter').addEventListener('submit', (e) => { e.preventDefault(); billPage = 0; loadBilling().catch((er) => toast('bill-msg', er.message, true)); });
-    document.getElementById('bf-today').addEventListener('click', () => { const d = localDate(new Date()); document.getElementById('bf-from').value = d; document.getElementById('bf-to').value = d; billPage = 0; loadBilling(); });
-    document.getElementById('bf-yesterday').addEventListener('click', () => { const d = localDate(new Date(Date.now() - 86400000)); document.getElementById('bf-from').value = d; document.getElementById('bf-to').value = d; billPage = 0; loadBilling(); });
-    document.getElementById('bf-month').addEventListener('click', () => { const n = new Date(); document.getElementById('bf-from').value = localDate(new Date(n.getFullYear(), n.getMonth(), 1)); document.getElementById('bf-to').value = localDate(n); billPage = 0; loadBilling(); });
-    document.getElementById('bf-export').addEventListener('click', () => {
-      const q = billQuery(); const tok = new URLSearchParams(location.search).get('token'); if (tok) q.set('token', tok);
-      window.open('/admin/api/billing/export?' + q.toString(), '_blank');
-    });
-    loadBillingMeta().then(() => { if (location.hash === '#billing') return loadBilling(); }).catch(() => {});
 
     let pxDraft = { nodes: [], rules: [] };
     function renderProxies(data) {

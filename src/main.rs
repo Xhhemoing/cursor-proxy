@@ -9,6 +9,7 @@
 //! 上游: Cursor InferenceService/Stream (Connect 协议, hyper + rustls).
 
 mod admin;
+mod analytics;
 mod audit;
 mod billing;
 mod cards;
@@ -236,8 +237,6 @@ async fn main() -> anyhow::Result<()> {
     info!(
         event = "billing_init",
         db = %config.billing.db_file,
-        price_rules = config.billing.prices.len(),
-        sales = config.billing.sales.len(),
         tz_offset_minutes = config.billing.tz_offset_minutes,
         "billing ledger ready"
     );
@@ -515,20 +514,18 @@ async fn main() -> anyhow::Result<()> {
             "/admin/api/settings",
             get(admin::api_settings_get).post(admin::api_settings_patch),
         )
+        // 消耗分析 (模型/模型组/套餐/卡 × 在线时长)
         .route(
-            "/admin/api/billing/records",
-            get(admin::api_billing_records),
+            "/admin/api/analytics/consumption",
+            get(admin::api_analytics_consumption),
         )
         .route(
-            "/admin/api/billing/summary",
-            get(admin::api_billing_summary),
+            "/admin/api/analytics/presence",
+            get(admin::api_analytics_presence),
         )
-        .route("/admin/api/billing/export", get(admin::api_billing_export))
-        .route("/admin/api/billing/tags", get(admin::api_billing_tags))
-        .route("/admin/api/billing/stats", get(admin::api_billing_stats))
         .route(
-            "/admin/api/billing/pricing",
-            get(admin::api_pricing_get).post(admin::api_pricing_patch),
+            "/admin/api/analytics/sessions",
+            get(admin::api_analytics_sessions),
         )
         // 套餐卡
         .route(
@@ -1375,8 +1372,8 @@ async fn inference_handler_inner(
         }
     }
 
-    // 计费上下文: 此刻快照单价与分成, 贯穿整个请求
-    let mut bctx = billing::BillingCtx::from_key(&config.billing, key_rec, &model);
+    // 账本上下文: 此刻快照官方面值单价 (注册表 > 内置表), 贯穿整个请求
+    let mut bctx = billing::BillingCtx::from_key(key_rec, &model);
     if card_permit.is_some() {
         // 卡请求: 账本 key_name 记卡号, 供 /admin/api/cards/report|profit 按卡汇总
         bctx.key_name = card_key_for_log.clone();
@@ -1384,18 +1381,7 @@ async fn inference_handler_inner(
         bctx.key_prefix = card_key_for_log.chars().take(13).collect();
     }
     if !bctx.quote.priced {
-        if config.billing.reject_unpriced {
-            return Err((
-                StatusCode::PAYMENT_REQUIRED,
-                Json(openai_error(
-                    &format!("model '{}' has no price configured", model),
-                    "model_unpriced",
-                    402,
-                )),
-            )
-                .into_response());
-        }
-        warn!(event = "billing_unpriced", req_id = %request_id, model = %model, "no price rule matched; billed 0");
+        warn!(event = "billing_unpriced", req_id = %request_id, model = %model, "model not in any price table; face value uses fallback price");
     }
 
     // 提取 session_id 用于会话一致性 + Cursor conversationId（缓存命中依赖二者同号）
