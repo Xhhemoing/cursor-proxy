@@ -1236,11 +1236,16 @@ impl TokenPacer {
 
     /// 估算一帧 SSE 里的输出 token 数: 只数 content/text/thinking 字段的值
     pub fn estimate_tokens(sse_frame: &str) -> f64 {
+        // ASCII ≈ 4 字符/token (kimi 实测 712 tok ↔ 3/char 高估 1.5×); 非 ASCII (中日韩等) ≈ 1 token/字符 (opus 实测 219 汉字 = 246 tokens).
+        // 只按 chars/3 会把中文低估 3 倍, pacer 形同虚设 (本机实测 48 tok/s 未被压到 25).
+        let mut est = 0.0f64;
         let mut chars = 0usize;
         for key in [
             "\"content\":\"",
             "\"text\":\"",
             "\"thinking\":\"",
+            "\"reasoning_content\":\"",
+            "\"reasoning\":\"",
             "\"partial_json\":\"",
         ] {
             let mut rest = sse_frame;
@@ -1264,11 +1269,15 @@ impl TokenPacer {
                         break;
                     }
                 }
-                chars += after[..end].chars().count();
+                let seg = &after[..end];
+                for c in seg.chars() {
+                    chars += 1;
+                    est += if c.is_ascii() { 0.25 } else { 1.0 };
+                }
                 rest = &after[end..];
             }
         }
-        (chars as f64 / 3.0).max(if chars > 0 { 1.0 } else { 0.0 })
+        est.max(if chars > 0 { 1.0 } else { 0.0 })
     }
 
     /// 放一帧: 返回需要等待的时长 (调用方 sleep). 首帧/无内容帧不等待.
@@ -1535,6 +1544,23 @@ mod tests {
     }
 
     #[test]
+    fn estimate_tokens_cjk_vs_ascii() {
+        // 12 个 ASCII ≈ 3 token; 13 个汉字 ≈ 13 token
+        let ascii = TokenPacer::estimate_tokens(
+            r#"data: {"choices":[{"delta":{"content":"hello world!"}}]}"#,
+        );
+        let cjk = TokenPacer::estimate_tokens(
+            r#"data: {"choices":[{"delta":{"content":"太阳系是以太阳为中心的天体"}}]}"#,
+        );
+        assert!((ascii - 3.0).abs() < 0.01, "{ascii}");
+        assert!((cjk - 13.0).abs() < 0.01, "{cjk}");
+        assert_eq!(
+            TokenPacer::estimate_tokens(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#),
+            0.0
+        );
+    }
+
+    #[test]
     fn pacer_math() {
         let mut p = TokenPacer::new(10).unwrap();
         // 1s burst: 前 10 token 不等
@@ -1547,7 +1573,7 @@ mod tests {
         let t = TokenPacer::estimate_tokens(
             r#"data: {"choices":[{"delta":{"content":"hello world foo"}}]}"#,
         );
-        assert!((t - 5.0).abs() < 0.01, "{}", t);
+        assert!((t - 3.75).abs() < 0.01, "{}", t); // 15 ASCII × 0.25
         assert_eq!(
             TokenPacer::estimate_tokens(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#),
             0.0
