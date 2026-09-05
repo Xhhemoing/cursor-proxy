@@ -23,3 +23,7 @@ static/admin.html.bak*
 src.bak.*/
 deploy-*.sh
 deploy-*.py
+
+# leftover secret backups (filename not always matched by accounts.json.bak*)
+accounts.json.bak.*
+.deployed-commit-local
