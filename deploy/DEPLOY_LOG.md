@@ -31,3 +31,11 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
   claude-opus-5+low→-low, +high→-high, gpt-5.6-sol→-low, 变体全名透传, 全 200
 - 注意: 智能路由依赖内存里的上游名单, 重启后需重新点「获取可用模型」;
   名单为空时行为同旧版 (原样透传, 不路由)
+
+## 2026-09-05 15:05 UTC — 本机 8800 删除 tier 机制 (9cbb3e2)
+- 备份: cursor-fast-proxy-rs.bak-untier-20260905-145*; cards.json/models.json .bak-untier-*
+- 换后 /proc/PID/exe md5 53c1636229288068523164f87847413a == target/release
+- 实测: /v1/models 37 家族基名; 5 个存量套餐 (quota-*/day50) 无 tier 字段、
+  预览 37 模型 0 警告; claude-opus-5+reasoning_effort=low → claude-opus-5-low 200
+- 旧 cards.json/models.json 里的 "tier" 键 serde 忽略, 无迁移; 面板需硬刷新
+- 预置套餐改为 day-1/day-2/day-4 (纯并发档, 无层级)
