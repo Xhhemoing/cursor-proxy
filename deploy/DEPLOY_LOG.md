@@ -23,3 +23,11 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 实测: /v1/models 213 个 = 上游 212 + kimi-k3 (网关别名, 显式保留); 幽灵 0
 - 注意: 可见性名单在内存, 重启后需重新点「获取可用模型」; 未拉时 /v1/models 只有注册表条目+default+kimi-k3
 - 隔离 E2E: scripts/e2e-models-visibility.sh 7/7
+
+## 2026-09-05 14:20 UTC — 本机 8800 智能思考强度路由 (a463094)
+- 备份: cursor-fast-proxy-rs.bak-smart-20260905-141*
+- 换后 /proc/PID/exe md5 f6139c8443897247eaa718cba4f7981a == target/release
+- 实测: /v1/models 213 → 37 家族基名; 路由日志 proxy.log 实锤
+  claude-opus-5+low→-low, +high→-high, gpt-5.6-sol→-low, 变体全名透传, 全 200
+- 注意: 智能路由依赖内存里的上游名单, 重启后需重新点「获取可用模型」;
+  名单为空时行为同旧版 (原样透传, 不路由)
