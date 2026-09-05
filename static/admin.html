@@ -289,6 +289,7 @@
         <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
         <a href="#billing" data-page="billing">计费账单</a>
         <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
+        <a href="#models" data-page="models">模型<span class="badge" id="nav-models-badge"></span></a>
         <div class="grp">观测</div>
         <a href="#overview" data-page="overview">概览</a>
         <a href="#health" data-page="health">健康诊断<span class="badge" id="nav-health-badge"></span></a>
@@ -563,6 +564,7 @@
               <label>过期时间 <input id="f-key-exp" type="datetime-local" step="1"></label>
               <label>标签 <input id="f-key-tags" placeholder="逗号分隔, 如 vip,项目A"></label>
               <label>归属销售 <select id="f-key-sales"><option value="">（无）</option></select></label>
+              <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限）<div id="f-key-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
               <div><button type="submit">追加</button></div>
             </form>
           </div>
@@ -745,12 +747,143 @@
         </div>
       </section>
 
-      <!-- ================= 日志 ================= -->
+      <!-- ================= 模型 ================= -->
+      <section class="page page-fill" id="page-models">
+        <div class="page-head">
+          <div><h2>模型</h2><p>手动定价 / 层级 / 停用 · 模型组（供 API Key 与套餐限定可访问范围）</p></div>
+          <div class="actions">
+            <button type="button" class="ghost" id="md-import-builtin">导入内置价格表</button>
+            <button type="button" class="ghost" id="md-refresh">刷新</button>
+          </div>
+        </div>
+        <div id="models-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
+          <div class="tabs">
+            <button type="button" class="active" data-tab="prices">定价 / 层级</button>
+            <button type="button" data-tab="groups">模型组</button>
+          </div>
+          <div class="info" id="md-msg" style="min-height:18px;margin-bottom:6px"></div>
+
+          <div id="md-tab-prices" style="display:flex;flex:1;min-height:0;flex-direction:column">
+            <details class="add" id="md-model-add">
+              <summary>新增 / 编辑模型（同名即覆盖；名字也当前缀用，如 <code>claude-opus</code> 匹配所有 opus 变体，精确名优先）</summary>
+              <div class="body">
+                <div class="form-grid">
+                  <label>模型名 <input id="mp-model" placeholder="claude-opus-5"></label>
+                  <label>input $/1M <input id="mp-in" type="number" step="0.01" min="0"></label>
+                  <label>output $/1M <input id="mp-out" type="number" step="0.01" min="0"></label>
+                  <label>cache read $/1M <input id="mp-cr" type="number" step="0.01" min="0"></label>
+                  <label>cache write $/1M <input id="mp-cw" type="number" step="0.01" min="0"></label>
+                  <label>层级 <select id="mp-tier"><option value="">自动推断</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
+                  <label>备注 <input id="mp-note"></label>
+                  <label class="inline"><input type="checkbox" id="mp-enabled" checked> 允许调用</label>
+                </div>
+                <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
+                  <button type="button" class="ghost" id="mp-reset">清空</button>
+                  <button type="button" id="mp-save">保存</button>
+                </div>
+              </div>
+            </details>
+            <form class="filter" id="md-filter" onsubmit="return false">
+              <div class="fields">
+                <label>搜索 <input id="md-q" placeholder="模型名"></label>
+                <label>来源 <select id="md-src"><option value="">全部</option><option value="manual">手动设置</option><option value="builtin">内置</option><option value="seen">仅账本出现</option></select></label>
+                <label>层级 <select id="md-tier-f"><option value="">全部</option><option value="economy">economy</option><option value="standard">standard</option><option value="flagship">flagship</option></select></label>
+              </div>
+            </form>
+            <div class="panel fill">
+              <div class="ph"><h3>模型列表 <span class="muted" id="md-count"></span></h3></div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>模型</th><th>来源</th><th>层级</th><th>input</th><th>output</th><th>cache r</th><th>cache w</th><th>30d 请求</th><th>所属组</th><th>状态</th><th></th></tr></thead>
+                  <tbody id="md-body"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div id="md-tab-groups" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <details class="add" id="md-group-add" open>
+              <summary>新建 / 编辑模型组（成员一行一个或逗号分隔；支持结尾 <code>*</code> 通配，如 <code>kimi-*</code>；单独 <code>*</code> = 全部）</summary>
+              <div class="body">
+                <div class="form-grid">
+                  <label>组 id <input id="mg-id" placeholder="cheap"></label>
+                  <label>名称 <input id="mg-name" placeholder="经济模型"></label>
+                  <label class="span-2">备注 <input id="mg-note"></label>
+                  <label class="span-2" style="grid-column:1/-1">成员 <textarea id="mg-members" rows="3" style="width:100%;font-family:var(--mono);font-size:12px" placeholder="kimi-*&#10;grok-4.6&#10;claude-opus-5"></textarea></label>
+                </div>
+                <div class="toolbar" style="margin-top:10px;justify-content:space-between">
+                  <span class="muted" id="mg-preview"></span>
+                  <span><button type="button" class="ghost" id="mg-reset">清空</button> <button type="button" id="mg-save">保存组</button></span>
+                </div>
+              </div>
+            </details>
+            <div class="panel fill">
+              <div class="ph"><h3>模型组 <span class="muted" id="mg-count"></span></h3></div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>id</th><th>名称</th><th>成员规则</th><th>命中已知模型</th><th>被引用</th><th></th></tr></thead>
+                  <tbody id="mg-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 请求日志 ================= -->
       <section class="page page-fill" id="page-logs">
         <div class="page-head">
-          <div><h2>请求日志</h2><p>最近 40 条 · 内存 ring buffer</p></div>
+          <div><h2>请求日志</h2><p>内存 ring buffer 最近 2000 条 · 含失败请求 · 实时追加</p></div>
+          <div class="actions">
+            <span class="seg"><button type="button" id="lg-live" class="active">实时</button><button type="button" id="lg-pause">暂停</button></span>
+            <button type="button" class="ghost" id="lg-export-csv">导出 CSV</button>
+            <button type="button" class="ghost" id="lg-export-jsonl">导出 JSONL</button>
+            <button type="button" class="danger" id="lg-clear">清空缓冲</button>
+          </div>
         </div>
-        <div class="panel fill" style="display:flex;flex-direction:column;flex:1;min-height:0;margin-bottom:0"><div class="log" id="log-body"></div></div>
+        <form class="filter" id="lg-filter">
+          <div class="fields">
+            <label>搜索 <input id="lg-q" placeholder="req_id / 模型 / 账号 / key / IP"></label>
+            <label>身份 <select id="lg-kind"><option value="">全部</option><option value="key">API Key</option><option value="card">套餐卡</option><option value="anon">匿名</option></select></label>
+            <label>Key / 卡 <input id="lg-key" placeholder="名称或卡号片段"></label>
+            <label>模型 <input id="lg-model" list="lg-model-list" placeholder="精确名"></label><datalist id="lg-model-list"></datalist>
+            <label>账号 <input id="lg-account" placeholder="精确 id"></label>
+            <label>结果 <select id="lg-ok"><option value="">全部</option><option value="true">成功</option><option value="false">失败</option></select></label>
+            <label>状态码 <input id="lg-status" type="number" min="100" max="599" placeholder="如 502"></label>
+            <label>流式 <select id="lg-stream"><option value="">全部</option><option value="true">SSE</option><option value="false">非流式</option></select></label>
+            <label>延迟 ≥ ms <input id="lg-minlat" type="number" min="0" placeholder="如 30000"></label>
+            <label>条数 <select id="lg-n"><option>100</option><option>200</option><option selected>300</option><option>500</option></select></label>
+          </div>
+          <div class="foot"><span class="info" id="lg-msg"></span><button type="button" class="ghost" id="lg-reset">重置</button><button type="submit">筛选</button></div>
+        </form>
+        <div class="stat-strip" style="grid-template-columns:repeat(5,1fr)">
+          <div><div class="l">请求</div><div class="v" id="lk-count">–</div><div class="s">成功 <b class="ok" id="lk-ok">–</b> · 失败 <b class="bad" id="lk-err">–</b></div></div>
+          <div><div class="l">错误率</div><div class="v" id="lk-rate">–</div><div class="s" id="lk-status">–</div></div>
+          <div><div class="l">延迟 p50 / p90 / p99</div><div class="v sm" id="lk-lat">–</div><div class="s">平均 <b class="mono" id="lk-avg">–</b> · 最大 <b class="mono" id="lk-max">–</b></div></div>
+          <div><div class="l">TOKENS</div><div class="v sm" id="lk-tok">–</div><div class="s">输入(含缓存) / 输出</div></div>
+          <div><div class="l">计费金额</div><div class="v" id="lk-cost">–</div><div class="s">筛选范围内已入账</div></div>
+        </div>
+        <div class="grid-2" style="flex:1;min-height:0;grid-template-columns:1fr 300px">
+          <div class="panel fill">
+            <div class="ph"><h3>日志 <span class="muted" id="lg-count"></span></h3></div>
+            <div class="table-scroll">
+              <table id="lg-table">
+                <thead><tr><th>时间</th><th>状态</th><th>身份</th><th>模型</th><th>账号</th><th>tokens</th><th>金额</th><th>延迟</th><th>IP</th><th></th></tr></thead>
+                <tbody id="lg-body"><tr><td colspan="10" class="muted">加载中…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto">
+            <div class="panel" style="margin:0"><div class="ph"><h3>按模型</h3></div><div class="table-scroll" style="max-height:220px"><table><tbody id="lg-by-model"></tbody></table></div></div>
+            <div class="panel" style="margin:0"><div class="ph"><h3>按 Key / 卡</h3></div><div class="table-scroll" style="max-height:220px"><table><tbody id="lg-by-key"></tbody></table></div></div>
+            <div class="panel" style="margin:0"><div class="ph"><h3>按账号（失败数）</h3></div><div class="table-scroll" style="max-height:220px"><table><tbody id="lg-by-account"></tbody></table></div></div>
+          </div>
+        </div>
+        <dialog id="lg-detail" style="max-width:720px;width:90vw">
+          <h3 style="margin:0 0 8px;font-size:14px">请求详情</h3>
+          <pre id="lg-detail-body" class="mono" style="white-space:pre-wrap;font-size:12px;max-height:60vh;overflow:auto;margin:0 0 10px"></pre>
+          <div class="toolbar" style="justify-content:flex-end"><button type="button" class="ghost" id="lg-detail-copy">复制 JSON</button><button type="button" id="lg-detail-close">关闭</button></div>
+        </dialog>
       </section>
 
       <!-- ================= 健康诊断 ================= -->
@@ -816,6 +949,7 @@
                   <label>匀速 degraded <input id="cp-p2" type="number" min="0" placeholder="0=不限速"></label>
                   <label>行为评分阈值 <input id="cp-abuse" type="number" min="0" max="100" placeholder="55, 0=关"></label>
                   <label>模型前缀 <input id="cp-prefix" placeholder="逗号分隔, 空=不限"></label>
+                  <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限；与层级同时生效）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
                   <label class="span-2">备注 <input id="cp-note"></label>
                   <label class="inline"><input type="checkbox" id="cp-enabled" checked> 启用</label>
                 </div>
@@ -1268,7 +1402,9 @@
         await loadAll();
       } catch (err) { toast('key-msg', '批量编辑失败: ' + err.message, true); }
     });
+    let lastKeys = [];
     function renderKeys(data) {
+      lastKeys = data.keys || [];
       const body = document.getElementById('key-body');
       body.replaceChildren();
       (data.keys || []).forEach((k) => {
@@ -1283,6 +1419,7 @@
         (k.tags || []).forEach((t) => tsTd.appendChild(el('span', { class: 'tag' }, t)));
         if (k.sales_id) tsTd.appendChild(el('span', { class: 'pill info' }, salesName(k.sales_id)));
         if (!(k.tags || []).length && !k.sales_id) tsTd.textContent = '—';
+        (k.model_groups || []).forEach((g) => tsTd.appendChild(el('span', { class: 'pill info', style: 'margin-left:4px;font-size:10px;padding:1px 6px', title: '模型组' }, '组:' + g)));
         tr.appendChild(tsTd);
         tr.appendChild(el('td', { class: 'num' }, fmtN(k.used_tokens) + ' tok / ' + fmtN(k.used_requests) + ' req'));
         const rpmTd = el('td', { class: 'num' });
@@ -1326,6 +1463,9 @@
           if (tags === null) return;
           const sid = prompt('归属销售 id（空=无）可选: ' + salesList.map((s) => s.id).join(', '), k.sales_id || '');
           if (sid === null) return;
+          await ensureGroups();
+          const mg = prompt('可用模型组 id（逗号分隔，空=不限）可选: ' + mdGroups.map((g) => g.id).join(', '), (k.model_groups || []).join(','));
+          if (mg === null) return;
           try {
             await api('/admin/api/keys/' + k.index, {
               method: 'POST',
@@ -1339,6 +1479,7 @@
                 sales_id: sid.trim() === '' ? null : sid.trim(),
                 rpm_limit: rpm.trim() === '' ? null : (Number(rpm) === 0 ? null : Number(rpm)),
                 max_concurrency: conc.trim() === '' ? null : (Number(conc) === 0 ? null : Number(conc)),
+                model_groups: mg.split(',').map((s) => s.trim()).filter(Boolean),
               }),
             });
             toast('key-msg', '已保存');
@@ -1376,10 +1517,10 @@
       }
     }
     function renderLogs(logs) {
-      renderLogsInto(document.getElementById('log-body'), logs);
       renderLogsInto(document.getElementById('log-body-ov'), (logs || []).slice(0, 12));
     }
     function renderLogsInto(box, logs) {
+      if (!box) return;
       box.replaceChildren();
       if (!logs || !logs.length) {
         box.appendChild(el('div', { class: 'empty' }, '还没有请求'));
@@ -1543,7 +1684,7 @@
         tr.innerHTML =
           '<td class="mono">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mono">' + rmb(p.price) + '</td>' +
           '<td>' + (p.kind === 'quota' ? '<span class="pill info">定额 $' + p.face_usd + '</span>' : '<span class="pill ok">畅饮</span>') + '</td>' +
-          '<td class="mono">' + esc(p.tier || '不限') + '</td><td class="mono">' + p.duration_hours + 'h</td>' +
+          '<td class="mono">' + esc(p.tier || '不限') + ((p.model_groups || []).length ? '<br><span class="muted" style="font-size:10px">组: ' + esc(p.model_groups.join(',')) + '</span>' : '') + '</td><td class="mono">' + p.duration_hours + 'h</td>' +
           '<td class="mono">' + p.max_concurrency + (p.degraded_concurrency && p.degraded_concurrency !== p.max_concurrency ? ' → ' + p.degraded_concurrency : '') + '</td>' +
           '<td class="mono">' + p.rpm_limit + '</td><td class="mono">' + paceLabel(p) + '</td><td class="mono">' + capLabel(p) + '</td>' +
           '<td class="mono">' + (p.abuse_score_threshold || '关') + '</td>' +
@@ -1573,6 +1714,7 @@
       set('cp-rpd', p.fair_use_rpd); set('cp-dq', p.daily_quota_usd); set('cp-soft', p.soften_ratio); set('cp-dconc', p.degraded_concurrency);
       set('cp-p0', p.pace_normal_tps); set('cp-p1', p.pace_soften_tps); set('cp-p2', p.pace_degraded_tps); set('cp-abuse', p.abuse_score_threshold);
       set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
+      renderGroupPicker(document.getElementById('cp-groups'), p.model_groups || []);
       document.getElementById('cp-enabled').checked = !!p.enabled;
       document.getElementById('cp-id').scrollIntoView({ block: 'center' });
     }
@@ -1594,6 +1736,7 @@
       const map = { duration_hours: 'cp-dur', max_concurrency: 'cp-conc', rpm_limit: 'cp-rpm', fair_use_rpd: 'cp-rpd', daily_quota_usd: 'cp-dq', soften_ratio: 'cp-soft', degraded_concurrency: 'cp-dconc', pace_normal_tps: 'cp-p0', pace_soften_tps: 'cp-p1', pace_degraded_tps: 'cp-p2', abuse_score_threshold: 'cp-abuse' };
       Object.keys(map).forEach((k) => { const v = num(map[k]); if (v != null) body[k] = v; });
       body.model_prefixes = g('cp-prefix') ? g('cp-prefix').split(',').map((s) => s.trim()).filter(Boolean) : [];
+      body.model_groups = pickedGroups(document.getElementById('cp-groups'));
       body.note = g('cp-note');
       body.enabled = document.getElementById('cp-enabled').checked;
       if (isNew && (body.name == null || body.price == null)) return cdMsg('新建套餐需要 名称 + 售价', true);
@@ -1732,8 +1875,285 @@
       try { const d = await api('/admin/api/cards/cost-model', { method: 'POST', body: JSON.stringify(body) }); cdMsg('已保存，¥/$ = ' + Number(d.rmb_per_usd).toFixed(4)); await loadCostModel(); }
       catch (e) { cdMsg(e.message, true); }
     });
+    // ---------- 模型 (定价 / 层级 / 模型组) ----------
+    // innerHTML 只拼接 esc() 转义后的服务端字段与固定模板
+    let mdTab = 'prices';
+    let mdModels = [];
+    let mdGroups = [];
+    const mdMsg = (m, err) => toast('md-msg', m, err);
+    const tierPill = (t) => '<span class="pill ' + (t === 'economy' ? 'ok' : t === 'standard' ? 'warn' : 'bad') + '">' + esc(t || '?') + '</span>';
+    document.querySelectorAll('#models-panel .tabs button').forEach((b) => {
+      b.addEventListener('click', () => {
+        mdTab = b.dataset.tab;
+        document.querySelectorAll('#models-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
+        ['prices', 'groups'].forEach((t) => { document.getElementById('md-tab-' + t).style.display = t === mdTab ? 'flex' : 'none'; });
+        loadModelsPage().catch((e) => mdMsg(e.message, true));
+      });
+    });
+    async function loadModelsPage() {
+      mdMsg('');
+      const d = await api('/admin/api/models');
+      mdModels = d.models || [];
+      const g = await api('/admin/api/models/groups');
+      mdGroups = g.groups || [];
+      renderModels();
+      renderGroups();
+      refreshGroupPickers();
+      document.getElementById('nav-models-badge').textContent = d.manual_count ? String(d.manual_count) : '';
+    }
+    function renderModels() {
+      const q = document.getElementById('md-q').value.trim().toLowerCase();
+      const src = document.getElementById('md-src').value;
+      const tf = document.getElementById('md-tier-f').value;
+      const rows = mdModels.filter((m) => (!q || m.model.toLowerCase().includes(q)) && (!src || m.source === src) && (!tf || m.tier === tf));
+      document.getElementById('md-count').textContent = '(' + rows.length + '/' + mdModels.length + ')';
+      const tb = document.getElementById('md-body');
+      tb.innerHTML = '';
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="11" class="muted">无匹配</td></tr>';
+      const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', seen: '<span class="pill warn">未定价</span>' };
+      rows.forEach((m) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td class="mono">' + esc(m.model) + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td><td>' + tierPill(m.tier) + (m.tier_manual ? '' : ' <span class="muted" style="font-size:10px">auto</span>') + '</td>' +
+          ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">$' + Number(m[k] || 0).toFixed(2) + '</td>').join('') +
+          '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px">' + (m.groups || []).map(esc).join(', ') + '</td>' +
+          '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td></td>';
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => fillModelForm(m));
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, m.enabled ? '停用' : '启用')).addEventListener('click', async () => {
+          await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: !m.enabled }) });
+          await loadModelsPage();
+        });
+        if (m.source === 'manual') act.appendChild(el('button', { class: 'danger', type: 'button' }, '删')).addEventListener('click', async () => {
+          if (!confirm('删除手动条目 ' + m.model + '？将回落到内置价格')) return;
+          await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
+          await loadModelsPage();
+        });
+        tb.appendChild(tr);
+      });
+    }
+    ['md-q', 'md-src', 'md-tier-f'].forEach((id) => document.getElementById(id).addEventListener('input', renderModels));
+    function fillModelForm(m) {
+      document.getElementById('md-model-add').open = true;
+      const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
+      set('mp-model', m.model); set('mp-in', m.input_per_m); set('mp-out', m.output_per_m); set('mp-cr', m.cache_read_per_m); set('mp-cw', m.cache_write_per_m);
+      set('mp-tier', m.tier_manual || ''); set('mp-note', m.note);
+      document.getElementById('mp-enabled').checked = m.enabled !== false;
+      document.getElementById('mp-model').scrollIntoView({ block: 'center' });
+    }
+    document.getElementById('mp-reset').addEventListener('click', () => {
+      ['mp-model', 'mp-in', 'mp-out', 'mp-cr', 'mp-cw', 'mp-note'].forEach((id) => { document.getElementById(id).value = ''; });
+      document.getElementById('mp-tier').value = ''; document.getElementById('mp-enabled').checked = true;
+    });
+    document.getElementById('mp-save').addEventListener('click', async () => {
+      const g = (id) => document.getElementById(id).value.trim();
+      const num = (id) => { const v = g(id); return v === '' ? undefined : Number(v); };
+      const body = { model: g('mp-model'), tier: g('mp-tier'), note: g('mp-note'), enabled: document.getElementById('mp-enabled').checked };
+      if (!body.model) return mdMsg('模型名必填', true);
+      [['input_per_m', 'mp-in'], ['output_per_m', 'mp-out'], ['cache_read_per_m', 'mp-cr'], ['cache_write_per_m', 'mp-cw']].forEach(([k, id]) => { const v = num(id); if (v != null) body[k] = v; });
+      try { await api('/admin/api/models', { method: 'POST', body: JSON.stringify(body) }); mdMsg('已保存 ' + body.model); await loadModelsPage(); }
+      catch (e) { mdMsg(e.message, true); }
+    });
+    document.getElementById('md-import-builtin').addEventListener('click', async () => {
+      if (!confirm('把内置官方价格表全部导入为手动条目？已有手动条目不覆盖')) return;
+      try { const d = await api('/admin/api/models/import-builtin', { method: 'POST' }); mdMsg('导入 ' + d.written + ' 个'); await loadModelsPage(); }
+      catch (e) { mdMsg(e.message, true); }
+    });
+    document.getElementById('md-refresh').addEventListener('click', () => loadModelsPage().catch((e) => mdMsg(e.message, true)));
+    // 模型组
+    function groupUsage(id) {
+      const keys = (lastKeys || []).filter((k) => (k.model_groups || []).includes(id)).map((k) => k.name || k.prefix);
+      const plans = (cdPlans || []).filter((p) => (p.model_groups || []).includes(id)).map((p) => p.id);
+      return { keys, plans };
+    }
+    function renderGroups() {
+      document.getElementById('mg-count').textContent = '(' + mdGroups.length + ')';
+      const tb = document.getElementById('mg-body');
+      tb.innerHTML = '';
+      if (!mdGroups.length) tb.innerHTML = '<tr><td colspan="6" class="muted">还没有模型组。建一个后，可在 API Key / 套餐里限定「只能用这些组」</td></tr>';
+      mdGroups.forEach((g) => {
+        const u = groupUsage(g.id);
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="mono">' + esc(g.id) + '</td><td>' + esc(g.name) + '</td>' +
+          '<td class="mono" style="font-size:11px">' + (g.members || []).map(esc).join('<br>') + '</td>' +
+          '<td class="mono" style="font-size:11px" title="' + esc((g.resolved_known || []).join('\n')) + '">' + (g.resolved_known || []).length + ' 个: ' + esc((g.resolved_known || []).slice(0, 4).join(', ')) + ((g.resolved_known || []).length > 4 ? ' …' : '') + '</td>' +
+          '<td style="font-size:11px">' + (u.keys.length ? 'key: ' + esc(u.keys.join(', ')) : '') + (u.plans.length ? (u.keys.length ? '<br>' : '') + '套餐: ' + esc(u.plans.join(', ')) : '') + (!u.keys.length && !u.plans.length ? '<span class="muted">—</span>' : '') + '</td><td></td>';
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => {
+          document.getElementById('mg-id').value = g.id; document.getElementById('mg-name').value = g.name; document.getElementById('mg-note').value = g.note || '';
+          document.getElementById('mg-members').value = (g.members || []).join('\n'); previewGroup();
+          document.getElementById('mg-id').scrollIntoView({ block: 'center' });
+        });
+        act.appendChild(el('button', { class: 'danger', type: 'button' }, '删')).addEventListener('click', async () => {
+          if (!confirm('删除模型组 ' + g.id + '？被 key/套餐引用时会拒绝')) return;
+          try { await api('/admin/api/models/groups/' + encodeURIComponent(g.id), { method: 'DELETE' }); await loadModelsPage(); }
+          catch (e) { mdMsg(e.message, true); }
+        });
+        tb.appendChild(tr);
+      });
+    }
+    function parseMembers() { return document.getElementById('mg-members').value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean); }
+    function previewGroup() {
+      const pats = parseMembers();
+      const match = (p, m) => p === '*' || (p.endsWith('*') ? m.startsWith(p.slice(0, -1)) : p === m);
+      const hit = mdModels.filter((m) => pats.some((p) => match(p, m.model))).map((m) => m.model);
+      document.getElementById('mg-preview').textContent = pats.length ? '命中 ' + hit.length + ' 个已知模型' + (hit.length ? ': ' + hit.slice(0, 6).join(', ') + (hit.length > 6 ? ' …' : '') : '') : '';
+    }
+    document.getElementById('mg-members').addEventListener('input', previewGroup);
+    document.getElementById('mg-reset').addEventListener('click', () => { ['mg-id', 'mg-name', 'mg-note', 'mg-members'].forEach((id) => { document.getElementById(id).value = ''; }); previewGroup(); });
+    document.getElementById('mg-save').addEventListener('click', async () => {
+      const body = { id: document.getElementById('mg-id').value.trim(), name: document.getElementById('mg-name').value.trim(), note: document.getElementById('mg-note').value.trim(), members: parseMembers() };
+      if (!body.id) return mdMsg('组 id 必填', true);
+      if (!body.members.length) return mdMsg('至少一个成员', true);
+      try { await api('/admin/api/models/groups', { method: 'POST', body: JSON.stringify(body) }); mdMsg('已保存组 ' + body.id); await loadModelsPage(); }
+      catch (e) { mdMsg(e.message, true); }
+    });
+    // 模型组选择器 (key 表单 / 套餐表单): 复选框列表
+    function renderGroupPicker(box, selected) {
+      box.replaceChildren();
+      if (!mdGroups.length) { box.appendChild(el('span', { class: 'muted' }, '（无模型组，去「模型 → 模型组」创建；空 = 不限）')); return; }
+      mdGroups.forEach((g) => {
+        const lab = el('label', { class: 'inline', style: 'margin-right:10px;white-space:nowrap' });
+        const cb = el('input', { type: 'checkbox', value: g.id });
+        cb.checked = (selected || []).includes(g.id);
+        lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + g.name + ' (' + g.id + ')'));
+        box.appendChild(lab);
+      });
+    }
+    function pickedGroups(box) { return Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map((c) => c.value); }
+    async function ensureGroups() { if (!mdGroups.length) { try { mdGroups = (await api('/admin/api/models/groups')).groups || []; } catch (e) {} } }
+    function refreshGroupPickers() {
+      renderGroupPicker(document.getElementById('f-key-groups'), pickedGroups(document.getElementById('f-key-groups')));
+      renderGroupPicker(document.getElementById('cp-groups'), pickedGroups(document.getElementById('cp-groups')));
+    }
+
+    // ---------- 请求日志 ----------
+    let lgLive = true;
+    let lgLastId = 0;
+    let lgRows = [];
+    let lgTimer = null;
+    const lgMsg = (m, err) => toast('lg-msg', m, err);
+    function lgParams() {
+      const q = new URLSearchParams();
+      const v = (id) => document.getElementById(id).value.trim();
+      if (v('lg-q')) q.set('q', v('lg-q'));
+      if (v('lg-kind')) q.set('kind', v('lg-kind'));
+      if (v('lg-key')) q.set('key', v('lg-key'));
+      if (v('lg-model')) q.set('model', v('lg-model'));
+      if (v('lg-account')) q.set('account', v('lg-account'));
+      if (v('lg-ok')) q.set('ok', v('lg-ok'));
+      if (v('lg-status')) q.set('status', v('lg-status'));
+      if (v('lg-stream')) q.set('stream', v('lg-stream'));
+      if (v('lg-minlat')) q.set('min_latency_ms', v('lg-minlat'));
+      return q;
+    }
+    async function loadLogsPage(full) {
+      const n = document.getElementById('lg-n').value || '300';
+      const q = lgParams();
+      q.set('n', n);
+      if (!full && lgLastId > 0) q.set('after', String(lgLastId));
+      const [d, st] = await Promise.all([api('/admin/api/logs?' + q.toString()), api('/admin/api/logs/stats?' + lgParams().toString())]);
+      const incoming = d.logs || [];
+      if (d.incremental && !full) { if (incoming.length) lgRows = [...incoming, ...lgRows].slice(0, Number(n)); }
+      else lgRows = incoming;
+      if (d.max_id) lgLastId = d.max_id;
+      renderLogTable();
+      renderLogStats(st);
+      const dl = document.getElementById('lg-model-list');
+      dl.replaceChildren();
+      (st.by_model || []).forEach((m) => dl.appendChild(el('option', { value: m.name })));
+    }
+    function fmtLat(ms) { ms = Number(ms || 0); return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms'; }
+    function renderLogTable() {
+      const tb = document.getElementById('lg-body');
+      document.getElementById('lg-count').textContent = lgRows.length ? '(' + lgRows.length + ')' : '';
+      tb.innerHTML = '';
+      if (!lgRows.length) { tb.innerHTML = '<tr><td colspan="10" class="muted">无匹配日志</td></tr>'; return; }
+      const p2 = (n) => String(n).padStart(2, '0');
+      lgRows.forEach((l) => {
+        const tr = document.createElement('tr');
+        const d = l.ts ? new Date(l.ts) : null;
+        const t = d && !isNaN(d) ? p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) : '';
+        const ok = Number(l.status) === 200;
+        const who = l.kind === 'card' ? '<span class="pill info" title="' + esc(l.key_name || '') + '">卡 ' + esc(String(l.key_name || '').slice(5, 11)) + '</span>' : l.kind === 'anon' ? '<span class="muted">匿名</span>' : '<span class="mono" title="' + esc(l.key_prefix || '') + '">' + esc(l.key_name || l.key_prefix || '') + '</span>';
+        const lat = Number(l.latency_ms || 0);
+        tr.innerHTML = '<td class="mono muted">' + t + '</td><td><span class="pill ' + (ok ? 'ok' : 'bad') + '">' + esc(String(l.status || '')) + '</span>' + (l.stream ? ' <span class="muted" style="font-size:10px">SSE</span>' : '') + '</td>' +
+          '<td>' + who + '</td><td class="mono">' + esc(l.model || '') + '</td><td class="mono">' + esc(l.account || '') + '</td>' +
+          '<td class="mono" title="in ' + (l.input_tokens || 0) + ' · out ' + (l.output_tokens || 0) + ' · cr ' + (l.cache_read_tokens || 0) + ' · cw ' + (l.cache_write_tokens || 0) + '">' + fmtN(l.total_tokens) + '</td>' +
+          '<td class="mono">' + (l.priced === false ? '<span class="warn" title="未定价">–</span>' : esc(String(l.cost || ''))) + '</td>' +
+          '<td class="mono ' + (lat >= 60000 ? 'bad' : lat >= 20000 ? 'warn' : '') + '">' + fmtLat(lat) + '</td><td class="mono muted">' + esc(l.client_ip || '') + '</td><td></td>';
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button', title: '详情' }, '…')).addEventListener('click', () => {
+          document.getElementById('lg-detail-body').textContent = JSON.stringify(l, null, 2);
+          document.getElementById('lg-detail').showModal();
+        });
+        tr.addEventListener('dblclick', () => { document.getElementById('lg-q').value = l.req_id || ''; loadLogsPage(true).catch((e) => lgMsg(e.message, true)); });
+        tb.appendChild(tr);
+      });
+    }
+    function renderLogStats(s) {
+      document.getElementById('lk-count').textContent = fmtN(s.count);
+      document.getElementById('lk-ok').textContent = fmtN(s.ok);
+      document.getElementById('lk-err').textContent = fmtN(s.errors);
+      const rate = document.getElementById('lk-rate');
+      rate.textContent = ((s.error_rate || 0) * 100).toFixed(1) + '%';
+      rate.className = 'v ' + (s.error_rate > 0.1 ? 'bad' : s.error_rate > 0.02 ? 'warn' : 'ok');
+      document.getElementById('lk-status').textContent = (s.by_status || []).map((x) => x.status + '×' + x.count).join(' · ') || '–';
+      const L = s.latency || {};
+      document.getElementById('lk-lat').textContent = fmtLat(L.p50_ms) + ' / ' + fmtLat(L.p90_ms) + ' / ' + fmtLat(L.p99_ms);
+      document.getElementById('lk-avg').textContent = fmtLat(L.avg_ms);
+      document.getElementById('lk-max').textContent = fmtLat(L.max_ms);
+      document.getElementById('lk-tok').textContent = fmtN(s.tokens_in) + ' / ' + fmtN(s.tokens_out);
+      document.getElementById('lk-cost').textContent = s.cost || '0';
+      const fill = (id, rows, f) => {
+        const tb = document.getElementById(id);
+        tb.innerHTML = '';
+        if (!rows || !rows.length) { tb.innerHTML = '<tr><td class="muted">—</td></tr>'; return; }
+        rows.slice(0, 12).forEach((r) => { const tr = document.createElement('tr'); tr.innerHTML = f(r); tr.style.cursor = 'pointer'; tr.addEventListener('click', () => f.onClick && f.onClick(r)); tb.appendChild(tr); });
+      };
+      const fm = (r) => '<td class="mono" style="font-size:11px">' + esc(r.name || '') + '</td><td class="mono">' + r.requests + '</td><td class="mono ' + (r.errors ? 'bad' : 'muted') + '">' + (r.errors || 0) + '✗</td><td class="mono muted">' + esc(String(r.cost || '')) + '</td>';
+      fm.onClick = (r) => { document.getElementById('lg-model').value = r.name; loadLogsPage(true); };
+      fill('lg-by-model', s.by_model, fm);
+      const fk = (r) => '<td class="mono" style="font-size:11px" title="' + esc(r.name || '') + '">' + esc(String(r.name || '').length > 22 ? String(r.name).slice(0, 18) + '…' : r.name || '') + '</td><td class="mono">' + r.requests + '</td><td class="mono ' + (r.errors ? 'bad' : 'muted') + '">' + (r.errors || 0) + '✗</td><td class="mono muted">' + esc(String(r.cost || '')) + '</td>';
+      fk.onClick = (r) => { document.getElementById('lg-key').value = r.name; loadLogsPage(true); };
+      fill('lg-by-key', s.by_key, fk);
+      const fa = (r) => '<td class="mono" style="font-size:11px">' + esc(r.name || '') + '</td><td class="mono">' + r.requests + '</td><td class="mono ' + (r.errors ? 'bad' : 'muted') + '">' + (r.errors || 0) + '✗</td>';
+      fa.onClick = (r) => { document.getElementById('lg-account').value = r.name; loadLogsPage(true); };
+      fill('lg-by-account', s.by_account, fa);
+    }
+    function lgSetLive(on) {
+      lgLive = on;
+      document.getElementById('lg-live').classList.toggle('active', on);
+      document.getElementById('lg-pause').classList.toggle('active', !on);
+      if (lgTimer) { clearInterval(lgTimer); lgTimer = null; }
+      if (on) lgTimer = setInterval(() => { if (location.hash.slice(1).split('/')[0] === 'logs') loadLogsPage(false).catch(() => {}); }, 3000);
+    }
+    document.getElementById('lg-live').addEventListener('click', () => lgSetLive(true));
+    document.getElementById('lg-pause').addEventListener('click', () => lgSetLive(false));
+    document.getElementById('lg-filter').addEventListener('submit', (e) => { e.preventDefault(); lgLastId = 0; loadLogsPage(true).catch((x) => lgMsg(x.message, true)); });
+    document.getElementById('lg-reset').addEventListener('click', () => {
+      ['lg-q', 'lg-key', 'lg-model', 'lg-account', 'lg-status', 'lg-minlat'].forEach((id) => { document.getElementById(id).value = ''; });
+      ['lg-kind', 'lg-ok', 'lg-stream'].forEach((id) => { document.getElementById(id).value = ''; });
+      lgLastId = 0; loadLogsPage(true).catch((x) => lgMsg(x.message, true));
+    });
+    function lgExport(fmt) {
+      const q = lgParams(); q.set('format', fmt);
+      const tok = new URLSearchParams(location.search).get('token');
+      if (tok) q.set('token', tok);
+      window.open('/admin/api/logs/export?' + q.toString(), '_blank');
+    }
+    document.getElementById('lg-export-csv').addEventListener('click', () => lgExport('csv'));
+    document.getElementById('lg-export-jsonl').addEventListener('click', () => lgExport('jsonl'));
+    document.getElementById('lg-clear').addEventListener('click', async () => {
+      if (!confirm('清空面板日志缓冲？磁盘 proxy.log 与账本不受影响')) return;
+      try { const d = await api('/admin/api/logs', { method: 'DELETE' }); lgMsg('已清空 ' + d.cleared + ' 条'); lgRows = []; lgLastId = 0; await loadLogsPage(true); }
+      catch (e) { lgMsg(e.message, true); }
+    });
+    document.getElementById('lg-detail-close').addEventListener('click', () => document.getElementById('lg-detail').close());
+    document.getElementById('lg-detail-copy').addEventListener('click', async () => { await copyText(document.getElementById('lg-detail-body').textContent); lgMsg('已复制'); });
+    lgSetLive(true);
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'cards', 'settings', 'logs', 'health'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'billing', 'cards', 'models', 'settings', 'logs', 'health'];
     function showPage(name) {
       // 支持 #billing/records 直达 tab
       const [base, sub] = (name || '').split('/');
@@ -1746,7 +2166,10 @@
       PAGES.forEach((p) => document.getElementById('page-' + p).classList.toggle('active', p === name));
       document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
       if (name === 'billing' && !sub) loadBilling().catch((e) => toast('bill-msg', e.message, true));
-      if (name === 'cards') loadCardsTab().catch((e) => toast('cd-msg', e.message, true));
+      if (name === 'cards') { ensureGroups().then(refreshGroupPickers); loadCardsTab().catch((e) => toast('cd-msg', e.message, true)); }
+      if (name === 'models') loadModelsPage().catch((e) => toast('md-msg', e.message, true));
+      if (name === 'logs') { lgLastId = 0; loadLogsPage(true).catch((e) => toast('lg-msg', e.message, true)); }
+      if (name === 'keys') ensureGroups().then(refreshGroupPickers);
       window.scrollTo({ top: 0 });
     }
     window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
@@ -1859,6 +2282,7 @@
             sales_id: document.getElementById('f-key-sales').value || null,
             rpm_limit: document.getElementById('f-key-rpm').value.trim() === '' ? null : Number(document.getElementById('f-key-rpm').value),
             max_concurrency: document.getElementById('f-key-conc').value.trim() === '' ? null : Number(document.getElementById('f-key-conc').value),
+            model_groups: pickedGroups(document.getElementById('f-key-groups')),
           }),
         });
         document.getElementById('f-key').value = '';
@@ -2640,7 +3064,7 @@
     // 日志 prepend (新日志插入顶部, 保持最多 40 条)
     function prependLog(entry) {
       // 主日志页 + 概览页日志
-      ['log-body', 'log-body-ov'].forEach((id) => {
+      ['log-body-ov'].forEach((id) => {
         const box = document.getElementById(id);
         if (!box) return;
         // 移除 "还没有请求" 空状态

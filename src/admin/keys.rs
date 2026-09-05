@@ -51,6 +51,9 @@ pub struct AddKeyBody {
     pub rpm_limit: Option<u32>,
     #[serde(default)]
     pub max_concurrency: Option<u32>,
+    /// 允许的模型组 id; 空 = 不限
+    #[serde(default)]
+    pub model_groups: Vec<String>,
 }
 
 /// 标签规范化: 去空白/去空/去重, 最多 20 个, 每个 ≤ 32 字符
@@ -119,6 +122,12 @@ pub async fn api_keys_add(
             .filter(|s| !s.is_empty()),
         rpm_limit: body.rpm_limit,
         max_concurrency: body.max_concurrency,
+        model_groups: body
+            .model_groups
+            .into_iter()
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect(),
     };
     let snapshot = {
         let mut config = state.config.lock();
@@ -190,6 +199,8 @@ pub struct PatchKeyBody {
     pub sales_id: Option<Option<String>>,
     pub rpm_limit: Option<Option<u32>>,
     pub max_concurrency: Option<Option<u32>>,
+    /// Some(vec![]) = 清除限制 (不限)
+    pub model_groups: Option<Vec<String>>,
 }
 
 /// POST /admin/api/keys/:index — 改名/描述/限额/启用/过期
@@ -237,6 +248,13 @@ pub async fn api_keys_patch(
         }
         if let Some(mc) = body.max_concurrency {
             rec.max_concurrency = mc.filter(|&v| v > 0);
+        }
+        if let Some(g) = body.model_groups {
+            rec.model_groups = g
+                .into_iter()
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
         }
         let prefix: String = rec.key.chars().take(8).collect();
         (config.clone(), prefix)
@@ -399,6 +417,7 @@ pub async fn api_keys_import(State(state): State<Arc<AppState>>, body: String) -
                     sales_id: get(sales_idx).filter(|s| !s.is_empty()),
                     rpm_limit: parse_u32(rpm_idx),
                     max_concurrency: parse_u32(conc_idx),
+                    model_groups: Vec::new(),
                 });
             }
             if recs.is_empty() {

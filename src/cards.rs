@@ -64,11 +64,33 @@ static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
     ("grok-4.6", (2.00, 6.00, 0.50, 0.00)),
     ("cursor-grok-4.6", (2.00, 6.00, 0.50, 0.00)),
 ];
+/// 内置表导出 (面板「恢复默认」/「导入内置」用): (model, in, out, cr, cw, tier)
+pub fn builtin_table() -> Vec<(String, f64, f64, f64, f64, &'static str)> {
+    PREMIUM_PRICES
+        .iter()
+        .map(|(m, (i, o, c, w))| (m.to_string(), *i, *o, *c, *w, builtin_model_tier(m)))
+        .collect()
+}
+
 /// 兜底价 (未知模型按 opus 档)
 const FALLBACK_PRICE: (f64, f64, f64, f64) = (5.0, 25.0, 0.5, 6.25);
 
-/// 查模型价格 (精确 > 最长前缀 > 兜底), `-fast` 变体 ×2
+/// 查模型价格: 注册表手动定价优先 (models.json, 面板可改), 否则内置官方表.
+/// 注册表命中时按其原值 (不再自动 ×2 `-fast`, 手动定价即所见即所得).
 pub fn model_price(model: &str) -> (f64, f64, f64, f64) {
+    if let Some(e) = crate::models::registry().lookup(model) {
+        return (
+            e.input_per_m,
+            e.output_per_m,
+            e.cache_read_per_m,
+            e.cache_write_per_m,
+        );
+    }
+    builtin_model_price(model)
+}
+
+/// 内置官方价格表查询 (精确 > 最长前缀 > 兜底), `-fast` 变体 ×2
+pub fn builtin_model_price(model: &str) -> (f64, f64, f64, f64) {
     let fast = model.ends_with("-fast");
     let base = model.strip_suffix("-fast").unwrap_or(model);
     let mut p = if let Some((_, p)) = PREMIUM_PRICES.iter().find(|(n, _)| *n == base) {
@@ -195,7 +217,20 @@ static MODEL_TIERS: &[(&str, &str)] = &[
     ("glm", TIER_ECONOMY),
 ];
 
+/// 模型层级: 注册表手动设定优先, 否则内置前缀规则
 pub fn model_tier(model: &str) -> &'static str {
+    if let Some(e) = crate::models::registry().lookup(model) {
+        match e.tier.as_str() {
+            TIER_ECONOMY => return TIER_ECONOMY,
+            TIER_STANDARD => return TIER_STANDARD,
+            TIER_FLAGSHIP => return TIER_FLAGSHIP,
+            _ => {}
+        }
+    }
+    builtin_model_tier(model)
+}
+
+pub fn builtin_model_tier(model: &str) -> &'static str {
     let mut best: Option<&'static str> = None;
     let mut best_len = 0;
     for (prefix, tier) in MODEL_TIERS {
@@ -287,6 +322,9 @@ pub struct CardPlan {
     /// 限定的模型前缀 (空 = 不限); 与 tier 同时生效 (都要过)
     #[serde(default)]
     pub model_prefixes: Vec<String>,
+    /// 允许访问的模型组 id (models.json groups); 空 = 不限. 与 tier / model_prefixes 同时生效 (都要过)
+    #[serde(default)]
+    pub model_groups: Vec<String>,
     #[serde(default)]
     pub note: String,
     /// 是否启用
@@ -337,6 +375,7 @@ impl Default for CardPlan {
             pace_degraded_tps: default_pace_degraded(),
             abuse_score_threshold: default_abuse_threshold(),
             model_prefixes: vec![],
+            model_groups: vec![],
             note: String::new(),
             enabled: true,
         }
@@ -973,6 +1012,17 @@ impl CardStore {
                 ),
             ));
         }
+        // 模型组 (models.json)
+        if !crate::models::registry().allowed_by_groups(&plan.model_groups, model) {
+            return Err((
+                403,
+                format!(
+                    "{} (plan '{}')",
+                    crate::models::deny_reason(&plan.model_groups, model),
+                    plan.id
+                ),
+            ));
+        }
         let rt = self.runtime(key);
         let ds = self.roll_day(&rt, now);
 
@@ -1352,6 +1402,31 @@ mod tests {
         }
         // pace 0 → 不建 pacer
         assert!(TokenPacer::new(0).is_none());
+    }
+
+    #[test]
+    fn plan_model_groups_gate() {
+        // 全局注册表 (进程级单例): 建一个只含 kimi 的组
+        crate::models::registry()
+            .upsert_group(crate::models::ModelGroup {
+                id: "test-kimi-only".into(),
+                name: "kimi".into(),
+                members: vec!["kimi-*".into()],
+                note: String::new(),
+            })
+            .unwrap();
+        let s = store();
+        let mut p = plan("mg");
+        p.fair_use_rpd = 0;
+        p.model_groups = vec!["test-kimi-only".into()];
+        s.upsert_plan(p);
+        let c = s.issue_card("mg", "hank").unwrap();
+        assert!(s.acquire(&c.card_key, "kimi-k3-high").is_ok());
+        match s.acquire(&c.card_key, "claude-opus-5") {
+            Err((403, msg)) => assert!(msg.contains("model groups"), "{msg}"),
+            other => panic!("expected 403, got {:?}", other.map(|_| ())),
+        }
+        let _ = crate::models::registry().delete_group("test-kimi-only");
     }
 
     #[test]

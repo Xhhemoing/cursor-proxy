@@ -202,6 +202,37 @@ pub struct BillingRecord {
 }
 
 impl BillingRecord {
+    /// 面板「请求日志」条目 (与旧 log_entry 字段兼容, 多了 key/费用/失败状态)
+    pub fn to_log_entry(&self) -> serde_json::Value {
+        let is_card = self.key_name.starts_with("card-");
+        serde_json::json!({
+            "ts": chrono::DateTime::from_timestamp_millis(self.ts_ms)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default(),
+            "req_id": self.req_id,
+            "model": self.model,
+            "account": self.account,
+            "key_name": self.key_name,
+            "key_prefix": self.key_prefix,
+            "kind": if is_card { "card" } else if self.key_name == "(no auth)" { "anon" } else { "key" },
+            "sales_id": self.sales_id,
+            "tags": self.tags,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "total_tokens": self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens,
+            "cost": fmt_money(self.cost_nano),
+            "cost_nano": self.cost_nano,
+            "priced": self.priced,
+            "latency_ms": self.latency_ms,
+            "status": self.status,
+            "ok": self.status == 200,
+            "stream": self.stream,
+            "client_ip": self.client_ip,
+        })
+    }
+
     /// 由上下文 + 结果构造一条账单, 金额在此处一次算定
     #[allow(clippy::too_many_arguments)]
     pub fn build(
@@ -272,6 +303,8 @@ enum Msg {
 pub struct Ledger {
     tx: mpsc::Sender<Msg>,
     db_path: PathBuf,
+    /// 请求日志 ring buffer 镜像: 每条账单 (含失败) 同步进面板「请求日志」, 带 key/卡归属
+    log_mirror: Option<Arc<crate::logbuf::LogBuffer>>,
     /// 已入队未落盘
     pending: Arc<AtomicU64>,
     /// 累计落盘
@@ -348,6 +381,7 @@ impl Ledger {
         Ok(Self {
             tx,
             db_path,
+            log_mirror: None,
             pending,
             written,
             ignored,
@@ -355,8 +389,17 @@ impl Ledger {
         })
     }
 
+    /// 绑定请求日志 ring buffer: 之后每条 record() 都镜像一份进面板日志
+    pub fn with_log_mirror(mut self, buf: Arc<crate::logbuf::LogBuffer>) -> Self {
+        self.log_mirror = Some(buf);
+        self
+    }
+
     /// 请求路径: 一次 send, 不阻塞
     pub fn record(&self, rec: BillingRecord) {
+        if let Some(buf) = &self.log_mirror {
+            buf.push(rec.to_log_entry());
+        }
         self.pending.fetch_add(1, Ordering::Relaxed);
         if self.tx.send(Msg::Record(Box::new(rec))).is_err() {
             self.pending.fetch_sub(1, Ordering::Relaxed);

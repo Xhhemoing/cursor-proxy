@@ -77,6 +77,7 @@ pub struct PlanBody {
     pub pace_degraded_tps: Option<u32>,
     pub abuse_score_threshold: Option<u32>,
     pub model_prefixes: Option<Vec<String>>,
+    pub model_groups: Option<Vec<String>>,
     pub note: Option<String>,
     pub enabled: Option<bool>,
 }
@@ -134,6 +135,7 @@ pub async fn api_card_plan_upsert(
         pace_degraded_tps,
         abuse_score_threshold,
         model_prefixes,
+        model_groups,
         note,
         enabled
     );

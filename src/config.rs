@@ -203,6 +203,9 @@ pub struct ApiKeyRecord {
     /// 并发请求数限制; None = 不限
     #[serde(default)]
     pub max_concurrency: Option<u32>,
+    /// 允许访问的模型组 id 列表 (models.json groups); 空 = 不限
+    #[serde(default)]
+    pub model_groups: Vec<String>,
 }
 
 impl ApiKeyRecord {
@@ -219,6 +222,7 @@ impl ApiKeyRecord {
             sales_id: None,
             rpm_limit: None,
             max_concurrency: None,
+            model_groups: Vec::new(),
         }
     }
 

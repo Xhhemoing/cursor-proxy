@@ -8,6 +8,7 @@ pub mod cards;
 pub mod events;
 pub mod health_api;
 pub mod keys;
+pub mod models;
 pub mod proxies;
 pub mod settings;
 
@@ -25,5 +26,6 @@ pub use cards::*;
 pub use events::*;
 pub use health_api::*;
 pub use keys::*;
+pub use models::*;
 pub use proxies::*;
 pub use settings::*;

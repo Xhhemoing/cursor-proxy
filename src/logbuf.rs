@@ -102,6 +102,25 @@ impl LogBuffer {
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
     }
+
+    /// 清空面板缓冲 (磁盘日志文件不动)
+    pub fn clear(&self) -> usize {
+        let mut e = self.entries.lock().unwrap();
+        let n = e.len();
+        e.clear();
+        n
+    }
+
+    /// 全部匹配 (不截断), 供统计/导出
+    pub fn query_all(&self, filter: &LogFilter) -> Vec<serde_json::Value> {
+        let entries = self.entries.lock().unwrap();
+        entries
+            .iter()
+            .rev()
+            .filter(|e| filter.matches(e))
+            .cloned()
+            .collect()
+    }
 }
 
 fn log_max_bytes() -> u64 {
@@ -228,6 +247,16 @@ pub struct LogFilter {
     pub status: Option<u16>,
     pub stream: Option<bool>,
     pub client_ip: Option<String>,
+    /// key 名 / 卡号 / key 前缀 (子串, 不区分大小写)
+    pub key: Option<String>,
+    /// key | card | anon
+    pub kind: Option<String>,
+    /// Some(true) = 只看成功, Some(false) = 只看失败
+    pub ok: Option<bool>,
+    /// 延迟下限 (ms)
+    pub min_latency_ms: Option<u64>,
+    /// 全文子串搜索 (req_id / model / account / key / ip), 不区分大小写
+    pub q: Option<String>,
     pub limit: usize,
 }
 
@@ -239,7 +268,7 @@ impl LogFilter {
         }
     }
 
-    fn matches(&self, entry: &serde_json::Value) -> bool {
+    pub fn matches(&self, entry: &serde_json::Value) -> bool {
         if let Some(ref m) = self.model {
             if entry.get("model").and_then(|v| v.as_str()) != Some(m) {
                 return false;
@@ -265,6 +294,45 @@ impl LogFilter {
                 return false;
             }
         }
+        let s = |k: &str| {
+            entry
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+        if let Some(ref k) = self.key {
+            let k = k.to_ascii_lowercase();
+            if !s("key_name").contains(&k) && !s("key_prefix").contains(&k) {
+                return false;
+            }
+        }
+        if let Some(ref kind) = self.kind {
+            if s("kind") != kind.to_ascii_lowercase() {
+                return false;
+            }
+        }
+        if let Some(ok) = self.ok {
+            let st = entry.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+            if (st == 200) != ok {
+                return false;
+            }
+        }
+        if let Some(min) = self.min_latency_ms {
+            if entry.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(0) < min {
+                return false;
+            }
+        }
+        if let Some(ref q) = self.q {
+            let q = q.to_ascii_lowercase();
+            if !q.is_empty()
+                && !["req_id", "model", "account", "key_name", "key_prefix", "client_ip"]
+                    .iter()
+                    .any(|k| s(k).contains(&q))
+            {
+                return false;
+            }
+        }
         true
     }
 }
@@ -279,6 +347,36 @@ impl Default for LogBuffer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn filter_key_kind_ok_q() {
+        let buf = LogBuffer::new(10);
+        buf.push(json!({"status":200,"kind":"key","key_name":"Alice","key_prefix":"sk-aaa","model":"kimi-k3","latency_ms":100,"client_ip":"1.1.1.1","req_id":"r1"}));
+        buf.push(json!({"status":403,"kind":"card","key_name":"card-xyz","key_prefix":"card-xyz","model":"claude-opus-5","latency_ms":5,"client_ip":"2.2.2.2","req_id":"r2"}));
+        buf.push(json!({"status":502,"kind":"anon","key_name":"(no auth)","key_prefix":"","model":"kimi-k3","latency_ms":30000,"client_ip":"3.3.3.3","req_id":"r3"}));
+        let mut f = LogFilter::new();
+        f.key = Some("alice".into()); // 不区分大小写
+        assert_eq!(buf.query(&f).len(), 1);
+        let mut f = LogFilter::new();
+        f.kind = Some("card".into());
+        assert_eq!(buf.query(&f)[0]["req_id"], "r2");
+        let mut f = LogFilter::new();
+        f.ok = Some(false);
+        assert_eq!(buf.query(&f).len(), 2);
+        let mut f = LogFilter::new();
+        f.min_latency_ms = Some(20_000);
+        assert_eq!(buf.query(&f)[0]["req_id"], "r3");
+        let mut f = LogFilter::new();
+        f.q = Some("2.2.2".into());
+        assert_eq!(buf.query(&f).len(), 1);
+        let mut f = LogFilter::new();
+        f.model = Some("kimi-k3".into());
+        f.ok = Some(true);
+        assert_eq!(buf.query(&f).len(), 1);
+        assert_eq!(buf.query_all(&LogFilter::new()).len(), 3);
+        assert_eq!(buf.clear(), 3);
+        assert_eq!(buf.len(), 0);
+    }
 
     #[test]
     fn recent_is_newest_first_and_caps() {

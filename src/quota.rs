@@ -467,6 +467,7 @@ pub fn key_public(index: usize, rec: &ApiKeyRecord, used_tokens: u64, used_reque
         "request_limit": rec.request_limit,
         "rpm_limit": rec.rpm_limit,
         "max_concurrency": rec.max_concurrency,
+        "model_groups": rec.model_groups,
         "tags": rec.tags,
         "sales_id": rec.sales_id,
         "used_tokens": used_tokens,
@@ -573,6 +574,7 @@ mod tests {
             sales_id: None,
             rpm_limit: None,
             max_concurrency: None,
+            model_groups: Vec::new(),
         };
         assert!(check_key_limits(&rec, 10, 1).is_ok());
         assert!(check_key_limits(&rec, 100, 1)
@@ -600,6 +602,7 @@ mod tests {
             sales_id: None,
             rpm_limit: None,
             max_concurrency: None,
+            model_groups: Vec::new(),
         };
         assert!(rec.is_expired());
         assert!(check_key_limits(&rec, 0, 0)

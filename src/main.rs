@@ -19,6 +19,7 @@ mod health;
 mod kvv;
 mod logbuf;
 mod metrics;
+mod models;
 mod pool;
 mod protocol;
 mod proxypool;
@@ -187,14 +188,26 @@ async fn main() -> anyhow::Result<()> {
         info!(event = "upstream", kind = "openai", url = %openai_url, "openai upstream configured");
     }
 
+    // 模型注册表 (手动定价 + 模型组), 与 billing.db 同目录
+    let model_registry = models::init(
+        &std::path::Path::new(&config.billing.db_file).with_file_name("models.json"),
+    );
+    info!(
+        event = "models_init",
+        models = model_registry.snapshot().models.len(),
+        groups = model_registry.snapshot().groups.len(),
+        "model registry ready"
+    );
+
+    let log_buffer = std::sync::Arc::new(logbuf::LogBuffer::with_persist(
+        2000,
+        std::path::PathBuf::from(&config.log_file),
+    ));
     let state = Arc::new(AppState {
         config: config::ConfigCell::new(config.clone()),
         pool,
         cursor,
-        log_buffer: std::sync::Arc::new(logbuf::LogBuffer::with_persist(
-            1000,
-            std::path::PathBuf::from(&config.log_file),
-        )),
+        log_buffer: log_buffer.clone(),
         upstreams,
         key_usage: std::sync::Arc::new(quota::KeyUsageStore::new()),
         metrics: std::sync::Arc::new(metrics::Metrics::new()),
@@ -205,7 +218,9 @@ async fn main() -> anyhow::Result<()> {
                 .expect("/dev/null must open")
         })),
         rate_limiter: std::sync::Arc::new(ratelimit::RateLimiter::new()),
-        ledger: std::sync::Arc::new(billing::Ledger::open(&config.billing.db_file)?),
+        ledger: std::sync::Arc::new(
+            billing::Ledger::open(&config.billing.db_file)?.with_log_mirror(log_buffer.clone()),
+        ),
         proxies,
         cursor_factory,
         key_semaphores: dashmap::DashMap::new(),
@@ -490,7 +505,12 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_accounts_batch_edit),
         )
         .route("/admin/api/rpm", get(admin::api_rpm_dashboard))
-        .route("/admin/api/logs", get(admin::api_logs_recent))
+        .route(
+            "/admin/api/logs",
+            get(admin::api_logs_recent).delete(admin::api_logs_clear),
+        )
+        .route("/admin/api/logs/stats", get(admin::api_logs_stats))
+        .route("/admin/api/logs/export", get(admin::api_logs_export))
         .route(
             "/admin/api/settings",
             get(admin::api_settings_get).post(admin::api_settings_patch),
@@ -524,6 +544,29 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_card_plans_seed),
         )
         .route("/admin/api/cards/presets", get(admin::api_card_presets))
+        // 模型设置: 手动定价 / 层级 / 停用 + 模型组
+        .route(
+            "/admin/api/models",
+            get(admin::api_models_list).post(admin::api_models_upsert),
+        )
+        .route("/admin/api/models/bulk", post(admin::api_models_bulk))
+        .route(
+            "/admin/api/models/import-builtin",
+            post(admin::api_models_import_builtin),
+        )
+        .route("/admin/api/models/resolve", get(admin::api_models_resolve))
+        .route(
+            "/admin/api/models/groups",
+            get(admin::api_groups_list).post(admin::api_groups_upsert),
+        )
+        .route(
+            "/admin/api/models/groups/:id",
+            axum::routing::delete(admin::api_groups_delete),
+        )
+        .route(
+            "/admin/api/models/:model",
+            axum::routing::delete(admin::api_models_delete),
+        )
         .route(
             "/admin/api/cards/cost-model",
             get(admin::api_cost_model_get).post(admin::api_cost_model_set),
@@ -986,7 +1029,83 @@ fn dialect_terminal(dialect: Dialect, model: &str) -> String {
     }
 }
 
+/// 入口包装: 闸门层 (鉴权/额度/并发/模型组) 拒绝的请求不会进账本, 这里补一条到面板「请求日志」,
+/// 否则 401/403/429 在日志里完全看不见 (E2E 时发现).
 async fn inference_handler(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    addr: std::net::SocketAddr,
+    body: Value,
+    dialect: Dialect,
+) -> Result<Response, Response> {
+    let started = Instant::now();
+    let raw_token = extract_token(&headers);
+    let req_model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let client_ip = addr.ip().to_string();
+    let st = state.clone();
+    let mut res = inference_handler_inner(state, headers, addr, body, dialect).await;
+    if let Err(resp) = res {
+        let code = resp.status().as_u16();
+        // 拒绝响应体很小 (openai_error JSON): 读出来取 message 作原因, 再原样重建响应
+        let (parts, body) = resp.into_parts();
+        let bytes = axum::body::to_bytes(body, 64 * 1024)
+            .await
+            .unwrap_or_default();
+        let reason = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/message")
+                    .or_else(|| v.get("error"))
+                    .and_then(|m| m.as_str().map(|x| x.to_string()))
+            })
+            .unwrap_or_default();
+        res = Err(Response::from_parts(parts, axum::body::Body::from(bytes)));
+        if (400..500).contains(&code) {
+            // 识别身份: 卡 / key 名 / 匿名 (不记录完整 key)
+            let (kind, key_name, key_prefix) = if raw_token.starts_with("card-") {
+                ("card", raw_token.clone(), raw_token.chars().take(13).collect::<String>())
+            } else if raw_token.is_empty() {
+                ("anon", "(no auth)".to_string(), String::new())
+            } else {
+                let cfg = st.config.load();
+                let name = cfg
+                    .api_keys
+                    .iter()
+                    .find(|k| k.key == raw_token)
+                    .map(|k| k.name.clone())
+                    .unwrap_or_else(|| "(unknown key)".to_string());
+                ("key", name, raw_token.chars().take(8).collect::<String>())
+            };
+            st.log_buffer.push(serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "req_id": format!("rej-{}", uuid::Uuid::new_v4().simple()),
+                "model": req_model,
+                "account": "",
+                "key_name": key_name,
+                "key_prefix": key_prefix,
+                "kind": kind,
+                "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "total_tokens": 0,
+                "cost": "0", "cost_nano": 0, "priced": true,
+                "latency_ms": started.elapsed().as_millis() as u64,
+                "status": code,
+                "ok": false,
+                "rejected": true,
+                "reason": reason,
+                "stream": stream,
+                "client_ip": client_ip,
+            }));
+        }
+    }
+    res
+}
+
+async fn inference_handler_inner(
     state: Arc<AppState>,
     headers: HeaderMap,
     addr: std::net::SocketAddr,
@@ -1184,6 +1303,34 @@ async fn inference_handler(
             req_id = %request_id,
             "hosted web_search tool dropped; request proceeds without it"
         );
+    }
+
+    // ── 模型访问控制 ──
+    // 1) 全局停用的模型 (models.json enabled=false) 对所有人 403
+    if models::registry().is_disabled(&model) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(openai_error(
+                &format!("model '{}' is disabled", model),
+                "model_disabled",
+                403,
+            )),
+        )
+            .into_response());
+    }
+    // 2) API key 限定模型组 (空 = 不限). 卡请求在 card_store.acquire 里按套餐的 model_groups 校验
+    if let Some(rec) = key_rec {
+        if !models::registry().allowed_by_groups(&rec.model_groups, &model) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(openai_error(
+                    &models::deny_reason(&rec.model_groups, &model),
+                    "model_not_allowed",
+                    403,
+                )),
+            )
+                .into_response());
+        }
     }
 
     // 计费上下文: 此刻快照单价与分成, 贯穿整个请求
@@ -1556,7 +1703,6 @@ async fn inference_handler(
         let aid = account_id.clone();
         let rid = request_id.clone();
         let model_clone = model.clone();
-        let log_buf = state.log_buffer.clone();
         let key_usage = state.key_usage.clone();
         let card_store = state.card_store.clone();
         let billed_key = used_key.clone();
@@ -1728,7 +1874,7 @@ async fn inference_handler(
             });
             let line = log_entry.to_string();
             info!(event = "request", log = %line, "request completed");
-            log_buf.push_with_line(log_entry, line);
+            // (请求日志由 ledger.record 镜像写入 ring buffer, 不再手动 push, 避免重复)
             if !billed_key.is_empty() {
                 key_usage.add(&billed_key, usage.total());
                 // 套餐卡记账: 折算高级额度累加到今日 (驱动日额度帽/渐进降速)
@@ -1924,7 +2070,7 @@ async fn inference_handler(
                 });
                 let line = log_entry.to_string();
                 info!(event = "request", log = %line, "request completed");
-                state.log_buffer.push_with_line(log_entry, line);
+                // (请求日志由 ledger.record 镜像写入 ring buffer, 不再手动 push, 避免重复)
                 if !used_key.is_empty() {
                     state.key_usage.add(&used_key, usage.total());
                     // 套餐卡记账 (非流式)
