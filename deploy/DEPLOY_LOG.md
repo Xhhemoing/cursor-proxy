@@ -16,3 +16,10 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 隔离 E2E: scripts/e2e-models-a.sh 10/10 + scripts/e2e-cards-p0.sh 回归 11/11
 - 注意: 隔离实例 dummy 号连续错误 ≥5 会 auto_disable → 请求 503 而非 502;
   恢复: POST /admin/api/accounts/:id/enabled {"enabled":true} + cooldown/clear
+
+## 2026-09-05 13:40 UTC — 本机 8800 可见性修复 (40ac772)
+- 备份: cursor-fast-proxy-rs.bak-vis-20260905-133230
+- 换后 /proc/PID/exe md5 862dd10399a32cd1a00b149992706c0f == target/release
+- 实测: /v1/models 213 个 = 上游 212 + kimi-k3 (网关别名, 显式保留); 幽灵 0
+- 注意: 可见性名单在内存, 重启后需重新点「获取可用模型」; 未拉时 /v1/models 只有注册表条目+default+kimi-k3
+- 隔离 E2E: scripts/e2e-models-visibility.sh 7/7
