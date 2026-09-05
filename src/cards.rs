@@ -976,15 +976,15 @@ impl CardStore {
     }
 
     /// 该套餐当前实际可调的模型 (tier/组/前缀三合一 + 全局停用/可见性过滤).
-    /// 候选 = 注册表 ∪ 内置表 ∪ 上游确认 ∪ 账本出现过的模型.
-    /// 可见性: 注册表条目看 enabled; 非注册表模型须上游确认 (upstream 名单或变体后缀收敛).
+    /// 候选 = 客户端可见清单 (注册表 enabled ∪ 上游家族基名 ∪ 无变体独立模型),
+    /// 变体名不进套餐预览 —— 客户端选基名, 网关按思考强度路由 (resolve_smart_model).
     pub fn plan_models(&self, plan: &CardPlan, extra_seen: &[String]) -> Vec<Value> {
         let upstream = self.upstream_names();
-        crate::models::candidate_models_extra(&upstream, extra_seen)
+        crate::models::registry()
+            .visible_models(&upstream, extra_seen)
             .into_iter()
-            .filter_map(|(m, manual)| {
+            .filter_map(|m| {
                 let enabled = !crate::models::registry().is_disabled(&m);
-                let visible = crate::models::registry().is_visible(&m, &upstream);
                 let allowed = crate::models::plan_allows_model(
                     &plan.tier,
                     &plan.model_groups,
@@ -992,14 +992,14 @@ impl CardStore {
                     &m,
                 )
                 .is_ok();
-                if !enabled || !visible || !allowed {
+                if !enabled || !allowed {
                     return None;
                 }
                 let (i, o, c, w) = model_price(&m);
                 Some(json!({
                     "model": m,
                     "tier": model_tier(&m),
-                    "source": if manual { "manual" } else { "builtin" },
+                    "source": if crate::models::registry().get_exact(&m).is_some() { "manual" } else { "builtin" },
                     "input_per_m": i, "output_per_m": o,
                     "cache_read_per_m": c, "cache_write_per_m": w,
                 }))

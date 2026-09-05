@@ -880,6 +880,10 @@ async fn models_handler(
     // 可见性: 注册表条目看 enabled; 非注册表模型须上游确认 (拉过 AvailableModels 或变体后缀收敛)
     // —— 内置表里的纯别名 (fable-5/opus-5/gpt-5/gemini-3/glm-5/kimi-k2…) 上游不存在, 不再列出.
     let upstream = state.card_store.upstream_names();
+    let seen: Vec<String> = admin::seen_models(&state)
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect();
     let mut ids: Vec<String> = vec![];
     let mut push = |id: String| {
         if !ids.iter().any(|x| *x == id) {
@@ -891,26 +895,8 @@ async fn models_handler(
     // 同名模型但客户端习惯了这个入口, 始终保留.
     push("kimi-k3".to_string());
     let reg = models::registry();
-    let snap = reg.snapshot();
-    for e in &snap.models {
-        if e.enabled {
-            push(e.model.clone());
-        }
-    }
-    for (m, ..) in cards::builtin_table() {
-        if reg.is_visible(&m, &upstream) {
-            push(m);
-        }
-    }
-    for m in upstream.iter() {
-        if reg.is_visible(m, &upstream) {
-            push(m.clone());
-        }
-    }
-    for (m, _) in admin::seen_models(&state) {
-        if reg.is_visible(&m, &upstream) {
-            push(m);
-        }
+    for id in reg.visible_models(&upstream, &seen) {
+        push(id);
     }
     let data: Vec<Value> = ids
         .into_iter()
@@ -1320,6 +1306,22 @@ async fn inference_handler_inner(
     } else {
         model
     };
+    // 智能思考强度路由: 客户端传家族基名 (claude-opus-5 / gpt-5.6-sol / glm-5.2…),
+    // 按 thinking_level / reasoning_effort / max_mode / 复杂度推断档位, 在该家族的
+    // 上游变体里挑一个 (Max→-max>xhigh>high, High→high>medium>low, Low→low>minimal>none).
+    // 客户端直接传变体全名则原样放行. 上游名单为空 (未拉过) 时跳过, 行为同旧版.
+    if let Some(resolved) =
+        models::ModelRegistry::resolve_smart_model(&model, &body, &state.card_store.upstream_names())
+    {
+        info!(
+            event = "smart_model_route",
+            req_id = %request_id,
+            from = %model,
+            to = %resolved,
+            "base model resolved to upstream variant by thinking level"
+        );
+        model = resolved;
+    }
     let stream = body
         .get("stream")
         .and_then(|v| v.as_bool())

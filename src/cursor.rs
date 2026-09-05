@@ -99,6 +99,24 @@ pub fn auto_detect_thinking_level(body: &Value) -> ThinkingLevel {
     let messages = body.get("messages").and_then(|v| v.as_array());
     let tools = body.get("tools");
     let tool_choice = body.get("tool_choice");
+
+    // 2b. OpenAI 习惯: reasoning_effort / reasoning.effort
+    if let Some(eff) = body
+        .get("reasoning_effort")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            body.get("reasoning")
+                .and_then(|r| r.get("effort"))
+                .and_then(|v| v.as_str())
+        })
+    {
+        match eff.to_ascii_lowercase().as_str() {
+            "max" | "xhigh" | "extra-high" | "extra_high" => return ThinkingLevel::Max,
+            "high" | "medium" => return ThinkingLevel::High,
+            "low" | "minimal" | "none" => return ThinkingLevel::Low,
+            _ => {}
+        }
+    }
     
     if let Some(msgs) = messages {
         let msg_count = msgs.len();

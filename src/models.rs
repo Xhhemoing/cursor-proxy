@@ -295,12 +295,79 @@ impl ModelRegistry {
         self.lookup(model).map_or(false, |e| !e.enabled)
     }
 
+    /// 模型家族基名: 循环剥官方变体后缀直到收敛.
+    /// claude-opus-5-thinking-max-fast → claude-opus-5; gpt-5.4-mini-none → gpt-5.4-mini;
+    /// kimi-k2.7-code / default / gemini-3-flash 这类无变体后缀的, 基名即自身.
+    pub fn family_base(model: &str) -> &str {
+        let mut m = model;
+        loop {
+            let s = strip_variant_suffix(m);
+            if s == m {
+                return m;
+            }
+            m = s;
+        }
+    }
+
+    /// 客户端请求模型名 → 实际上游模型名 (智能思考强度路由).
+    ///
+    /// 客户端传家族基名 (如 claude-opus-5) 且上游名单里**没有**这个精确名时,
+    /// 按思考强度在该家族的上游变体里挑一个:
+    ///   thinking_level 显式字段 > reasoning_effort (OpenAI 习惯) > max_mode > 复杂度推断.
+    /// 档位映射 (家族里没有该档变体时向 nearest 可用档回落):
+    ///   Max → -max > -xhigh > -extra-high > -high
+    ///   High → -high > -medium > -low > -xhigh
+    ///   Low → -low > -minimal > -none > -medium
+    /// 基名本身就在上游名单里 (gemini-3-flash / kimi-k2.7-code / claude-4-sonnet) → 原样放行.
+    /// 客户端直接传了变体全名 (claude-opus-5-high-fast) → 原样放行, 不重写.
+    /// 返回 None = 无法解析 (家族在上游名单里没有任何变体), 调用方原样透传.
+    pub fn resolve_smart_model(
+        model: &str,
+        body: &serde_json::Value,
+        upstream: &[String],
+    ) -> Option<String> {
+        if upstream.is_empty() || upstream.iter().any(|u| u == model) {
+            return None;
+        }
+        let base = Self::family_base(model);
+        if base != model {
+            return None; // 客户端已带变体后缀, 尊重显式选择
+        }
+        // 家族须在上游名单里真有变体 (防止把任意字符串路由成不存在的模型)
+        let pref = format!("{base}-");
+        if !upstream
+            .iter()
+            .any(|u| u.starts_with(&pref) && Self::family_base(u) == base)
+        {
+            return None;
+        }
+        let level = crate::cursor::auto_detect_thinking_level(body);
+        let pick = |cands: &[&str]| -> Option<String> {
+            cands
+                .iter()
+                .map(|c| format!("{base}-{c}"))
+                .find(|want| upstream.iter().any(|u| u == want))
+        };
+        use crate::cursor::ThinkingLevel::*;
+        let resolved = match level {
+            Max => pick(&["max", "xhigh", "extra-high", "high"]),
+            High => pick(&["high", "medium", "low", "xhigh"]),
+            Low => pick(&["low", "minimal", "none", "medium"]),
+        };
+        // 家族无任何档位变体 (如 default): 试试基名-fast, 再放弃
+        resolved.or_else(|| {
+            let fast = format!("{base}-fast");
+            upstream.iter().any(|u| u == &fast).then_some(fast)
+        })
+    }
+
     /// 模型是否对客户端可见 (进 /v1/models 与套餐可调清单).
     /// 规则: 注册表条目看自己的 enabled; 非注册表模型要求「上游确认过」——
     /// 上游 AvailableModels 拉到的名字直接可见, 或能剥掉官方变体后缀
     /// (-low/-medium/-high/-xhigh/-max/-none/-minimal/-extra-high/-thinking[-*]/-fast)
-    /// 落到一个可见名上. 内置表里的纯别名 (fable-5/opus-5/gpt-5/gemini-3/glm-5/kimi-k2…)
-    /// 上游根本不存在, 不再出现在列表里.
+    /// 落到上游名单里某个名字的家族基名上 (claude-opus-5-thinking-max-fast → …→ claude-opus-5).
+    /// 内置表里的纯别名 (fable-5/opus-5/gpt-5/gemini-3/glm-5/kimi-k2…) 上游名单里
+    /// 没有任何变体, 不再出现在列表里.
     pub fn is_visible(&self, model: &str, upstream: &[String]) -> bool {
         let d = self.data.load();
         if let Some(e) = d.models.iter().find(|e| e.model == model) {
@@ -309,7 +376,16 @@ impl ModelRegistry {
         if upstream.iter().any(|u| u == model) {
             return true;
         }
-        // 剥变体后缀, 逐级向可见名收敛 (如 claude-opus-5-thinking-max-fast → …→ claude-opus-5)
+        // 上游名单里存在「以 model 为基名」的变体 → 基名可见
+        // (claude-opus-5 不在名单, 但 claude-opus-5-low 在)
+        let pref = format!("{model}-");
+        if upstream
+            .iter()
+            .any(|u| u.starts_with(&pref) && Self::family_base(u) == model)
+        {
+            return true;
+        }
+        // 剥变体后缀, 逐级向可见名收敛
         let mut m = model;
         loop {
             let stripped = strip_variant_suffix(m);
@@ -320,10 +396,41 @@ impl ModelRegistry {
             if upstream.iter().any(|u| u == m) {
                 return true;
             }
+            let pref = format!("{m}-");
+            if upstream
+                .iter()
+                .any(|u| u.starts_with(&pref) && Self::family_base(u) == m)
+            {
+                return true;
+            }
             if let Some(e) = d.models.iter().find(|e| e.model == m) {
                 return e.enabled;
             }
         }
+    }
+    /// 客户端可见的模型清单: 注册表(enabled) ∪ 上游家族基名 ∪ 上游无变体独立模型.
+    /// 变体名 (claude-opus-5-high-fast) 不进列表 —— 客户端选基名, 网关按思考强度
+    /// 路由到具体变体 (resolve_smart_model). extra 里的账本 seen 名同样按家族折叠.
+    pub fn visible_models(&self, upstream: &[String], extra: &[String]) -> Vec<String> {
+        let d = self.data.load();
+        let mut out: Vec<String> = vec![];
+        let mut push = |id: String| {
+            if !out.iter().any(|x| *x == id) {
+                out.push(id);
+            }
+        };
+        for e in &d.models {
+            if e.enabled {
+                push(e.model.clone());
+            }
+        }
+        for m in upstream.iter().chain(extra.iter()) {
+            let base = Self::family_base(m);
+            if self.is_visible(base, upstream) {
+                push(base.to_string());
+            }
+        }
+        out
     }
 }
 
@@ -434,13 +541,130 @@ mod tests {
     }
 
     #[test]
+    fn family_base_collapses_variants() {
+        assert_eq!(
+            ModelRegistry::family_base("claude-opus-5-thinking-max-fast"),
+            "claude-opus-5"
+        );
+        assert_eq!(ModelRegistry::family_base("gpt-5.4-mini-none"), "gpt-5.4-mini");
+        assert_eq!(ModelRegistry::family_base("gemini-3-flash"), "gemini-3-flash");
+        assert_eq!(ModelRegistry::family_base("kimi-k2.7-code"), "kimi-k2.7-code");
+    }
+
+    #[test]
+    fn resolve_smart_model_picks_variant_by_thinking_level() {
+        use serde_json::json;
+        let upstream: Vec<String> = vec![
+            "claude-opus-5-low",
+            "claude-opus-5-high",
+            "claude-opus-5-high-fast",
+            "claude-opus-5-thinking-max",
+            "gpt-5.4-low",
+            "gpt-5.4-medium",
+            "gpt-5.4-xhigh",
+            "gemini-3-flash",
+            "composer-2.5",
+            "composer-2.5-fast",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        // 显式 thinking_level 优先
+        let b = json!({"model":"claude-opus-5","thinking_level":"low","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5", &b, &upstream).as_deref(),
+            Some("claude-opus-5-low")
+        );
+        // reasoning_effort (OpenAI 习惯)
+        let b = json!({"model":"claude-opus-5","reasoning_effort":"high","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5", &b, &upstream).as_deref(),
+            Some("claude-opus-5-high")
+        );
+        // max_mode → Max, opus-5 无 -max 变体 → 回落 xhigh 无 → high
+        let b = json!({"model":"claude-opus-5","max_mode":true,"messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5", &b, &upstream).as_deref(),
+            Some("claude-opus-5-high")
+        );
+        // gpt-5.4 Max → 无 -max, 有 -xhigh
+        let b = json!({"model":"gpt-5.4","max_mode":true,"messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("gpt-5.4", &b, &upstream).as_deref(),
+            Some("gpt-5.4-xhigh")
+        );
+        // 基名本身在上游名单 → 不重写
+        let b = json!({"model":"gemini-3-flash","messages":[]});
+        assert_eq!(ModelRegistry::resolve_smart_model("gemini-3-flash", &b, &upstream), None);
+        // 客户端已传变体全名 → 不重写
+        let b = json!({"model":"claude-opus-5-high-fast","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5-high-fast", &b, &upstream),
+            None
+        );
+        // 无档位变体的家族: 基名在上游名单里 → 不重写 (上游自己处理)
+        let b = json!({"model":"composer-2.5","messages":[]});
+        assert_eq!(ModelRegistry::resolve_smart_model("composer-2.5", &b, &upstream), None);
+        // 基名不在但 -fast 在 → 路由到 -fast
+        let b = json!({"model":"foo-9","messages":[]});
+        let up2: Vec<String> = vec!["foo-9-fast".to_string()];
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("foo-9", &b, &up2).as_deref(),
+            Some("foo-9-fast")
+        );
+        // 上游名单里完全没有的家族 → 不路由 (原样透传, 让上游报错)
+        let b = json!({"model":"no-such-family","thinking_level":"low","messages":[]});
+        assert_eq!(ModelRegistry::resolve_smart_model("no-such-family", &b, &upstream), None);
+        // 上游名单为空 → 不路由 (未拉过 AvailableModels 时行为同旧版)
+        let b = json!({"model":"claude-opus-5","thinking_level":"low","messages":[]});
+        assert_eq!(ModelRegistry::resolve_smart_model("claude-opus-5", &b, &[]), None);
+    }
+
+    #[test]
+    fn visible_models_collapses_to_family_bases() {
+        let reg = ModelRegistry::empty();
+        let upstream: Vec<String> = vec![
+            "claude-opus-5-low",
+            "claude-opus-5-high",
+            "claude-opus-5-thinking-max",
+            "gpt-5.4-low-fast",
+            "gpt-5.4-xhigh",
+            "gemini-3-flash",
+            "kimi-k2.7-code",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let vis = reg.visible_models(&upstream, &[]);
+        assert_eq!(vis, vec!["claude-opus-5", "gpt-5.4", "gemini-3-flash", "kimi-k2.7-code"]);
+        // 注册表手动条目 (enabled) 即使不在上游也列出
+        reg.upsert_model(ModelEntry {
+            model: "my-custom".into(),
+            input_per_m: 1.0,
+            output_per_m: 2.0,
+            cache_read_per_m: 0.0,
+            cache_write_per_m: 0.0,
+            tier: String::new(),
+            enabled: true,
+            upstream: false,
+            note: String::new(),
+        })
+        .unwrap();
+        let vis2 = reg.visible_models(&upstream, &[]);
+        assert!(vis2.iter().any(|m| m == "my-custom"));
+        let _ = reg.delete_model("my-custom");
+    }
+
+    #[test]
     fn visibility_rules() {
         let r = reg();
         let up = vec!["kimi-k3-low".to_string(), "claude-opus-5-low".to_string()];
         // 上游名单直接可见
         assert!(r.is_visible("kimi-k3-low", &up));
-        // 变体收敛: claude-opus-5-thinking-max-fast → … → claude-opus-5-low 不在, 但中途无命中 → 不可见
-        assert!(!r.is_visible("claude-opus-5-thinking-max-fast", &up));
+        // 变体收敛: claude-opus-5-thinking-max-fast 的家族基名 claude-opus-5
+        // 在上游有变体 (claude-opus-5-low) → 可见 (智能路由会接管)
+        assert!(r.is_visible("claude-opus-5-thinking-max-fast", &up));
+        // 但家族基名不在上游的纯别名仍不可见
         // 上游有 kimi-k3-low → kimi-k3-low-fast 剥 -fast 命中 → 可见
         assert!(r.is_visible("kimi-k3-low-fast", &up));
         // 纯别名 (上游不存在) 不可见
