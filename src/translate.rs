@@ -13,12 +13,12 @@ use serde_json::{json, Value};
 use std::pin::Pin;
 use uuid::Uuid;
 
+use crate::cursor::MAX_TOKENS_FLOOR;
 use crate::protocol::{
     anthropic_message, apply_tool_call_part, display_model_id, encode_reasoning,
     merge_tool_arg_text, openai_message_with_tools, responses_message_with_request, sse_event,
     wants_encrypted_reasoning, AssistantOut,
 };
-use crate::cursor::MAX_TOKENS_FLOOR;
 
 pub fn openai_error(message: &str, code: &str, status: u16) -> Value {
     json!({
@@ -88,16 +88,14 @@ fn pick_u64(u: &Value, keys: &[&str]) -> Option<u64> {
 /// 从上游帧提取 usage (兼容 Cursor extendedUsage / OpenAI / Anthropic 命名)
 fn extract_usage(obj: &Value) -> Option<Usage> {
     let u = obj.get("extendedUsage").or_else(|| obj.get("usage"))?;
-    let mut input = pick_u64(
-        u,
-        &[
-            "promptTokens",
-            "inputTokens",
-            "prompt_tokens",
-            "input_tokens",
-        ],
-    )
-    .unwrap_or(0);
+    // prompt* 系 (Cursor extendedUsage / OpenAI) 的 promptTokens 是**含缓存**的 prompt 总数
+    // (2026-09-05 对账: promptTokens ≈ cacheReadTokens + cacheWriteTokens + 几百未命中);
+    // input* 系 (Anthropic) 的 input_tokens 本身不含缓存. 两者要分别处理, 否则缓存部分按
+    // input 全价重复计一遍, 面值高估 4–7 倍.
+    let prompt_total = pick_u64(u, &["promptTokens", "prompt_tokens"]);
+    let mut input = prompt_total
+        .or_else(|| pick_u64(u, &["inputTokens", "input_tokens"]))
+        .unwrap_or(0);
     let output = pick_u64(
         u,
         &[
@@ -140,6 +138,9 @@ fn extract_usage(obj: &Value) -> Option<Usage> {
             cache_read = cached;
             input = input.saturating_sub(cached);
         }
+    } else if prompt_total.is_some() {
+        // prompt 总数里已含 cacheRead/cacheWrite → 扣掉, input 只留未命中部分
+        input = input.saturating_sub(cache_read + cache_write);
     }
     Some(Usage {
         input,
@@ -205,7 +206,10 @@ pub fn is_output_token_limit_error_str(err: &str) -> bool {
 /// Cursor 把业务错误塞进 connect 帧 `error` 对象；`message` 经常只是 "Error"。
 /// 优先取 details[].debug.details.title / detail，避免客户端只看到 empty_content。
 pub fn extract_cursor_error_message(obj: &Value) -> Option<String> {
-    let err = obj.get("errorMessage").cloned().or_else(|| obj.get("error").cloned())?;
+    let err = obj
+        .get("errorMessage")
+        .cloned()
+        .or_else(|| obj.get("error").cloned())?;
     if let Some(s) = err.as_str() {
         if !s.is_empty() && !s.eq_ignore_ascii_case("error") {
             return Some(s.to_string());
@@ -352,9 +356,8 @@ impl StreamTranslator {
         } else {
             upstream_model.to_string()
         };
-        let responses_wants_encrypted = request_body
-            .map(wants_encrypted_reasoning)
-            .unwrap_or(false);
+        let responses_wants_encrypted =
+            request_body.map(wants_encrypted_reasoning).unwrap_or(false);
         Self {
             dialect,
             id,
@@ -599,13 +602,14 @@ impl StreamTranslator {
                                 self.anthropic_thinking_open = false;
                                 let idx = self.anthropic_thinking_idx.unwrap_or(0);
                                 // Anthropic 规范: thinking block 关闭前要发 signature_delta
-                                let sig = self.out.thinking_signature.clone().unwrap_or_else(|| {
-                                    format!(
-                                        "{}{}",
-                                        crate::protocol::PROXY_SIGNATURE_MARK,
-                                        Uuid::new_v4().simple()
-                                    )
-                                });
+                                let sig =
+                                    self.out.thinking_signature.clone().unwrap_or_else(|| {
+                                        format!(
+                                            "{}{}",
+                                            crate::protocol::PROXY_SIGNATURE_MARK,
+                                            Uuid::new_v4().simple()
+                                        )
+                                    });
                                 out_events.push(sse_event(
                                     "content_block_delta",
                                     &json!({
@@ -703,8 +707,7 @@ impl StreamTranslator {
         if let Some(part) = tool_call_part(obj) {
             let before_len = self.out.tool_calls.len();
             // 取出该 part 的 call_id, 用于查询已发出的 args 前缀
-            let part_id = crate::protocol::parse_tool_call_part(part)
-                .map(|(id, _, _, _, _)| id);
+            let part_id = crate::protocol::parse_tool_call_part(part).map(|(id, _, _, _, _)| id);
             // 上一帧的完整 args (用于计算这次的真实 delta)
             let prev_args = part_id
                 .as_ref()
@@ -718,7 +721,8 @@ impl StreamTranslator {
                 .unwrap_or_default();
             let is_complete = apply_tool_call_part(&mut self.out, part);
             if is_complete {
-                self.completed_tools.insert(part_id.clone().unwrap_or_default());
+                self.completed_tools
+                    .insert(part_id.clone().unwrap_or_default());
             }
             if self.out.tool_calls.len() > before_len || !self.out.tool_calls.is_empty() {
                 let idx = self.out.tool_calls.len().saturating_sub(1);
@@ -768,12 +772,7 @@ impl StreamTranslator {
                                 }]
                             })
                         };
-                        out_events.push(openai_chunk(
-                            &self.id,
-                            &self.public_model,
-                            delta,
-                            None,
-                        ));
+                        out_events.push(openai_chunk(&self.id, &self.public_model, delta, None));
                         // 注意: 这里**不**因 isComplete 发 finish_reason。OpenAI 规范每个 choice 只有一次
                         // 非空 finish_reason (在流末尾)。Codex 的 Chat 路径收到首个 finish_reason 即结束本轮,
                         // 之前逐工具发 "tool_calls" 会让并行第二个工具调用被丢弃 (2026-09-03 修复)。
@@ -786,13 +785,14 @@ impl StreamTranslator {
                             if self.anthropic_thinking_open {
                                 self.anthropic_thinking_open = false;
                                 let tidx = self.anthropic_thinking_idx.unwrap_or(0);
-                                let sig = self.out.thinking_signature.clone().unwrap_or_else(|| {
-                                    format!(
-                                        "{}{}",
-                                        crate::protocol::PROXY_SIGNATURE_MARK,
-                                        Uuid::new_v4().simple()
-                                    )
-                                });
+                                let sig =
+                                    self.out.thinking_signature.clone().unwrap_or_else(|| {
+                                        format!(
+                                            "{}{}",
+                                            crate::protocol::PROXY_SIGNATURE_MARK,
+                                            Uuid::new_v4().simple()
+                                        )
+                                    });
                                 out_events.push(sse_event(
                                     "content_block_delta",
                                     &json!({
@@ -939,13 +939,9 @@ impl StreamTranslator {
             if let Some(ri) = obj.get("responseInfo") {
                 if let Some(msgs) = ri.get("messages").and_then(|v| v.as_array()) {
                     for msg in msgs {
-                        if let Some(parts) = msg.get("reasoningParts").and_then(|v| v.as_array())
-                        {
+                        if let Some(parts) = msg.get("reasoningParts").and_then(|v| v.as_array()) {
                             for part in parts {
-                                let text = part
-                                    .get("text")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
+                                let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
                                 if text.is_empty() {
                                     continue;
                                 }
@@ -962,9 +958,7 @@ impl StreamTranslator {
                                     out_events.extend(self.emit_thinking_backfill(extra));
                                 }
                                 // 提取 signature
-                                if let Some(sig) =
-                                    part.get("signature").and_then(|v| v.as_str())
-                                {
+                                if let Some(sig) = part.get("signature").and_then(|v| v.as_str()) {
                                     self.out.thinking_signature = Some(sig.to_string());
                                 }
                             }
@@ -1294,10 +1288,7 @@ impl StreamTranslator {
                         "usage": {"output_tokens": u.output}
                     }),
                 ));
-                evts.push(sse_event(
-                    "message_stop",
-                    &json!({"type": "message_stop"}),
-                ));
+                evts.push(sse_event("message_stop", &json!({"type": "message_stop"})));
             }
             Dialect::Responses => {
                 if self.responses_reasoning_open {
@@ -1423,8 +1414,8 @@ where
             loop {
                 match frames.next().await {
                     Some(Ok(obj)) => {
-                        let is_terminal = obj.get("responseInfo").is_some()
-                            || obj.get("invocationId").is_some();
+                        let is_terminal =
+                            obj.get("responseInfo").is_some() || obj.get("invocationId").is_some();
                         match tr.feed(&obj) {
                             Ok(events) => {
                                 let sse = events.concat();
@@ -1515,8 +1506,7 @@ where
                 // 兜底: reasoningParts
                 if let Some(msgs) = ri.get("messages").and_then(|v| v.as_array()) {
                     for msg in msgs {
-                        if let Some(parts) = msg.get("reasoningParts").and_then(|v| v.as_array())
-                        {
+                        if let Some(parts) = msg.get("reasoningParts").and_then(|v| v.as_array()) {
                             for part in parts {
                                 if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
                                     if out.thinking.is_empty() {
@@ -1527,9 +1517,7 @@ where
                                         out.thinking = t.to_string();
                                     }
                                 }
-                                if let Some(sig) =
-                                    part.get("signature").and_then(|v| v.as_str())
-                                {
+                                if let Some(sig) = part.get("signature").and_then(|v| v.as_str()) {
                                     out.thinking_signature = Some(sig.to_string());
                                 }
                             }
@@ -1573,6 +1561,65 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_usage_prompt_total_excludes_cache_but_input_style_is_independent() {
+        // Cursor extendedUsage: promptTokens 含缓存 (实测 208667 = 208204 cr + 460 cw + 3 未命中)
+        let cur = extract_usage(&json!({"extendedUsage": {
+            "promptTokens": 208667, "completionTokens": 13,
+            "cacheReadTokens": 208204, "cacheWriteTokens": 460 }}))
+        .unwrap();
+        assert_eq!(
+            cur,
+            Usage {
+                input: 3,
+                output: 13,
+                cache_read: 208204,
+                cache_write: 460
+            }
+        );
+        // Anthropic: input_tokens 本身不含缓存 → 不扣
+        let ant = extract_usage(&json!({"usage": {
+            "input_tokens": 120, "output_tokens": 9,
+            "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 300 }}))
+        .unwrap();
+        assert_eq!(
+            ant,
+            Usage {
+                input: 120,
+                output: 9,
+                cache_read: 5000,
+                cache_write: 300
+            }
+        );
+        // OpenAI: prompt_tokens 含 cached_tokens → 扣 (原有行为)
+        let oai = extract_usage(&json!({"usage": {
+            "prompt_tokens": 1000, "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 900} }}))
+        .unwrap();
+        assert_eq!(
+            oai,
+            Usage {
+                input: 100,
+                output: 5,
+                cache_read: 900,
+                cache_write: 0
+            }
+        );
+        // 无缓存字段: 原样
+        let plain =
+            extract_usage(&json!({"extendedUsage": {"promptTokens": 4, "completionTokens": 2}}))
+                .unwrap();
+        assert_eq!(
+            plain,
+            Usage {
+                input: 4,
+                output: 2,
+                cache_read: 0,
+                cache_write: 0
+            }
+        );
+    }
     use futures_util::stream;
 
     #[test]
@@ -1637,9 +1684,10 @@ mod tests {
             ),
             Ok(json!({"responseInfo": {}})),
         ]);
-        let (v, _) = upstream_to_dialect_full(Box::pin(frames), "kimi-k3", Dialect::Anthropic, None)
-            .await
-            .unwrap();
+        let (v, _) =
+            upstream_to_dialect_full(Box::pin(frames), "kimi-k3", Dialect::Anthropic, None)
+                .await
+                .unwrap();
         assert_eq!(v["stop_reason"], "tool_use");
         assert_eq!(v["content"][0]["type"], "tool_use");
     }
@@ -1745,8 +1793,10 @@ mod tests {
     #[test]
     fn tool_choice_hint_message() {
         use crate::protocol::tool_choice_hint;
-        let h = tool_choice_hint(Some(&json!({"type": "function", "function": {"name": "bash"}})))
-            .unwrap();
+        let h = tool_choice_hint(Some(
+            &json!({"type": "function", "function": {"name": "bash"}}),
+        ))
+        .unwrap();
         assert!(h.contains("bash"), "hint should mention tool name: {}", h);
         let h = tool_choice_hint(Some(&json!("required"))).unwrap();
         assert!(h.contains("must call"), "required hint: {}", h);
@@ -1803,7 +1853,11 @@ mod tests {
         });
         let id = conversation_id_from(&b, None);
         // system 长度 >= 80 → sys_ 前缀
-        assert!(id.starts_with("sys_") || id.starts_with("conv_"), "got: {}", id);
+        assert!(
+            id.starts_with("sys_") || id.starts_with("conv_"),
+            "got: {}",
+            id
+        );
         // 5. 全空 → UUID v4
         let b = json!({});
         let id = conversation_id_from(&b, None);
@@ -1853,24 +1907,40 @@ mod format_conformance_probe {
         vec![
             Ok(json!({"thinkingPart": {"text": "think..."}})),
             Ok(json!({"textPart": {"text": "Let me run it."}})),
-            Ok(json!({"toolCallPart": {"toolCallId": "Bash_0-aaaaa", "toolName": "Bash", "args": {"command": "echo 1"}, "isComplete": true}})),
-            Ok(json!({"toolCallPart": {"toolCallId": "Read_1-aaaaa", "toolName": "Read", "args": {"path": "/tmp/x"}, "isComplete": true}})),
-            Ok(json!({"extendedUsage": {"promptTokens": 10, "completionTokens": 5}, "responseInfo": {}})),
+            Ok(
+                json!({"toolCallPart": {"toolCallId": "Bash_0-aaaaa", "toolName": "Bash", "args": {"command": "echo 1"}, "isComplete": true}}),
+            ),
+            Ok(
+                json!({"toolCallPart": {"toolCallId": "Read_1-aaaaa", "toolName": "Read", "args": {"path": "/tmp/x"}, "isComplete": true}}),
+            ),
+            Ok(
+                json!({"extendedUsage": {"promptTokens": 10, "completionTokens": 5}, "responseInfo": {}}),
+            ),
         ]
     }
 
     async fn run(dialect: Dialect) -> Vec<(Option<String>, Value)> {
         use futures_util::StreamExt;
-        let s = upstream_to_dialect_stream(Box::pin(stream::iter(frames())), "kimi-k3-max", dialect, None);
+        let s = upstream_to_dialect_stream(
+            Box::pin(stream::iter(frames())),
+            "kimi-k3-max",
+            dialect,
+            None,
+        );
         let raw: Vec<String> = s.map(|r| r.unwrap().0).collect().await;
         let mut out = Vec::new();
         for chunk in raw {
             let mut ev: Option<String> = None;
             for line in chunk.lines() {
-                if let Some(e) = line.strip_prefix("event: ") { ev = Some(e.trim().to_string()); }
-                else if let Some(d) = line.strip_prefix("data: ") {
+                if let Some(e) = line.strip_prefix("event: ") {
+                    ev = Some(e.trim().to_string());
+                } else if let Some(d) = line.strip_prefix("data: ") {
                     let d = d.trim();
-                    let v = if d == "[DONE]" { json!("[DONE]") } else { serde_json::from_str(d).unwrap_or(json!(d)) };
+                    let v = if d == "[DONE]" {
+                        json!("[DONE]")
+                    } else {
+                        serde_json::from_str(d).unwrap_or(json!(d))
+                    };
                     out.push((ev.clone(), v));
                 }
             }
@@ -1899,16 +1969,26 @@ mod format_conformance_probe {
             .filter_map(|(_, v)| v.get("choices").and_then(|c| c[0].get("finish_reason")))
             .filter(|f| !f.is_null())
             .collect();
-        assert_eq!(finishes.len(), 1, "finish_reason 必须且只能出现一次: {finishes:?}");
+        assert_eq!(
+            finishes.len(),
+            1,
+            "finish_reason 必须且只能出现一次: {finishes:?}"
+        );
         assert_eq!(finishes[0], "tool_calls");
         let last_two: Vec<&Value> = evs.iter().rev().take(2).map(|(_, v)| v).collect();
         assert_eq!(last_two[0], &json!("[DONE]"));
         assert!(last_two[1].get("usage").is_some(), "finish 帧携带 usage");
         let mut tool_idx = std::collections::BTreeSet::new();
         for (_, v) in &evs {
-            if let Some(tcs) = v.pointer("/choices/0/delta/tool_calls").and_then(|t| t.as_array()) {
+            if let Some(tcs) = v
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(|t| t.as_array())
+            {
                 for tc in tcs {
-                    assert!(tc.get("id").is_some() && tc["type"] == "function", "delta 需带 id+type: {tc}");
+                    assert!(
+                        tc.get("id").is_some() && tc["type"] == "function",
+                        "delta 需带 id+type: {tc}"
+                    );
                     tool_idx.insert(tc["index"].as_u64().unwrap());
                 }
             }
@@ -1925,15 +2005,24 @@ mod format_conformance_probe {
         let mut stops = std::collections::HashMap::new();
         for (ev, v) in &evs {
             match ev.as_deref() {
-                Some("content_block_start") => *starts.entry(v["index"].as_u64().unwrap()).or_insert(0) += 1,
-                Some("content_block_stop") => *stops.entry(v["index"].as_u64().unwrap()).or_insert(0) += 1,
+                Some("content_block_start") => {
+                    *starts.entry(v["index"].as_u64().unwrap()).or_insert(0) += 1
+                }
+                Some("content_block_stop") => {
+                    *stops.entry(v["index"].as_u64().unwrap()).or_insert(0) += 1
+                }
                 _ => {}
             }
         }
         assert_eq!(starts.len(), 4, "thinking+text+2 tools");
         for (idx, n) in &starts {
             assert_eq!(*n, 1, "index {idx} start 次数");
-            assert_eq!(stops.get(idx), Some(&1), "index {idx} stop 必须恰好一次, 实际 {:?}", stops.get(idx));
+            assert_eq!(
+                stops.get(idx),
+                Some(&1),
+                "index {idx} stop 必须恰好一次, 实际 {:?}",
+                stops.get(idx)
+            );
         }
         let names: Vec<&str> = evs.iter().filter_map(|(e, _)| e.as_deref()).collect();
         assert_eq!(names[0], "message_start");
@@ -1942,7 +2031,14 @@ mod format_conformance_probe {
         let md = &evs[evs.len() - 2].1;
         assert_eq!(md["delta"]["stop_reason"], "tool_use");
         // tool_use block 形态
-        let tu: Vec<&Value> = evs.iter().filter(|(e, v)| e.as_deref() == Some("content_block_start") && v["content_block"]["type"] == "tool_use").map(|(_, v)| v).collect();
+        let tu: Vec<&Value> = evs
+            .iter()
+            .filter(|(e, v)| {
+                e.as_deref() == Some("content_block_start")
+                    && v["content_block"]["type"] == "tool_use"
+            })
+            .map(|(_, v)| v)
+            .collect();
         assert_eq!(tu.len(), 2);
         assert_eq!(tu[0]["content_block"]["name"], "Bash");
         assert_eq!(tu[0]["content_block"]["input"], json!({}));
@@ -1957,12 +2053,24 @@ mod format_conformance_probe {
         let mut added = std::collections::HashMap::new();
         let mut done = std::collections::HashMap::new();
         for (ev, v) in &evs {
-            let seq = v["sequence_number"].as_u64().expect("每个事件都有 sequence_number");
+            let seq = v["sequence_number"]
+                .as_u64()
+                .expect("每个事件都有 sequence_number");
             assert!(seq > last_seq, "sequence_number 必须递增");
             last_seq = seq;
             match ev.as_deref() {
-                Some("response.output_item.added") => { added.insert(v["item"]["id"].as_str().unwrap().to_string(), v["output_index"].as_u64().unwrap()); }
-                Some("response.output_item.done") => { done.insert(v["item"]["id"].as_str().unwrap().to_string(), v["output_index"].as_u64().unwrap()); }
+                Some("response.output_item.added") => {
+                    added.insert(
+                        v["item"]["id"].as_str().unwrap().to_string(),
+                        v["output_index"].as_u64().unwrap(),
+                    );
+                }
+                Some("response.output_item.done") => {
+                    done.insert(
+                        v["item"]["id"].as_str().unwrap().to_string(),
+                        v["output_index"].as_u64().unwrap(),
+                    );
+                }
                 _ => {}
             }
         }
@@ -1971,12 +2079,28 @@ mod format_conformance_probe {
         let (ev, completed) = evs.last().unwrap();
         assert_eq!(ev.as_deref(), Some("response.completed"));
         assert_eq!(completed["response"]["status"], "completed");
-        let final_ids: std::collections::HashSet<String> = completed["response"]["output"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_string()).collect();
+        let final_ids: std::collections::HashSet<String> = completed["response"]["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
         let streamed_ids: std::collections::HashSet<String> = added.keys().cloned().collect();
-        assert_eq!(final_ids, streamed_ids, "response.completed.output ids 必须与流中 item id 一致");
-        let fc_done = evs.iter().filter(|(e, _)| e.as_deref() == Some("response.function_call_arguments.done")).count();
+        assert_eq!(
+            final_ids, streamed_ids,
+            "response.completed.output ids 必须与流中 item id 一致"
+        );
+        let fc_done = evs
+            .iter()
+            .filter(|(e, _)| e.as_deref() == Some("response.function_call_arguments.done"))
+            .count();
         assert_eq!(fc_done, 2, "每个 function_call 恰好一个 arguments.done");
-        let fc_items: Vec<&Value> = completed["response"]["output"].as_array().unwrap().iter().filter(|i| i["type"] == "function_call").collect();
+        let fc_items: Vec<&Value> = completed["response"]["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["type"] == "function_call")
+            .collect();
         assert_eq!(fc_items[0]["call_id"], "Bash_0-aaaaa");
         assert_eq!(fc_items[0]["arguments"], "{\"command\":\"echo 1\"}");
     }

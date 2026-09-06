@@ -428,6 +428,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("cache_write_tokens", "ALTER TABLE billing_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
         ("cache_read_price_micro", "ALTER TABLE billing_records ADD COLUMN cache_read_price_micro INTEGER NOT NULL DEFAULT 0"),
         ("cache_write_price_micro", "ALTER TABLE billing_records ADD COLUMN cache_write_price_micro INTEGER NOT NULL DEFAULT 0"),
+        // 2026-09-05 之前 input_tokens 记的是 Cursor promptTokens (含 cacheRead+cacheWrite);
+        // 之后 translate::extract_usage 已扣缓存. 老行默认 1 (含), 新行写 0 → 分析端按此归一化.
+        ("input_incl_cache", "ALTER TABLE billing_records ADD COLUMN input_incl_cache INTEGER NOT NULL DEFAULT 1"),
     ] {
         if !cols.iter().any(|c| c == name) {
             conn.execute_batch(ddl)?;
@@ -524,8 +527,9 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 ts_ms, req_id, key_hash, key_prefix, key_name, sales_id, commission_bps,
                 model, account, input_tokens, output_tokens, input_price_micro, output_price_micro,
                 priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags,
-                cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+                cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro,
+                input_incl_cache
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0)",
         )?;
         let mut ins_tag = tx.prepare_cached(
             "INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)",
@@ -766,6 +770,41 @@ mod tests {
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM billing_records"), 1);
         assert_eq!(
             count(&conn, "SELECT cache_read_tokens FROM billing_records"),
+            0
+        );
+        // 老行 input_incl_cache 默认 1 (input 含缓存); 新写入的行为 0
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT input_incl_cache FROM billing_records WHERE req_id='old'"
+            ),
+            1
+        );
+        drop(conn);
+        let ctx = BillingCtx::from_key(None, "kimi-k3");
+        ledger.record(BillingRecord::build(
+            &ctx,
+            "new-row",
+            "kimi-k3",
+            "acc",
+            Usage {
+                input: 3,
+                output: 1,
+                cache_read: 100,
+                cache_write: 0,
+            },
+            true,
+            200,
+            5,
+            "",
+        ));
+        assert!(ledger.flush(Duration::from_secs(5)));
+        let conn = ledger.reader().unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT input_incl_cache FROM billing_records WHERE req_id='new-row'"
+            ),
             0
         );
         let _ = std::fs::remove_dir_all(db.parent().unwrap());

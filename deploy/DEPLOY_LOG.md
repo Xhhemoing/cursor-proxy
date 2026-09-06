@@ -50,3 +50,16 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 新: upstream-models.json 落盘, 重启自动读回 → 不再需要重启后手点「获取可用模型」
 - 隔离 E2E (真实 billing.db 副本, 1029 行): scripts/e2e-analytics.sh 19/19; cargo test 151/151
 - 未做: 换后实时冒烟 (curl 读 admin_token 的命令被审批层拦, 交用户在面板核对)
+
+## 2026-09-06 01:52 UTC — 本机 8800 并发槽消耗 + 修 promptTokens 含缓存双计
+- 备份: *.bak-lanes-20260906-015245 (bin/cards.json/config.json/billing.db); 脚本 scripts/local-swap-8800.sh
+- 换后 /proc/PID/exe md5 8202033a74c1a31723997b68dbea0a7e == target/release
+- 算法: 同 key 请求按区间划分进并发槽 (assign_lanes), 每槽各自切时段 → lane_hours / peak_concurrency;
+  主定价指标改 usd_per_lane_hour (面值 ÷ 槽·时); 套餐行加 满载上限 = $/槽·时 × 并发 × 时长
+- Bug: Cursor extendedUsage.promptTokens 含 cacheRead+cacheWrite, 曾按 input 全价再算一遍 →
+  sol $61.7→$9.0 (7×), fable-high $237→$56 (4×). translate::extract_usage 扣缓存; 账本加列
+  input_incl_cache (老行 1 / 新行 0), 分析端归一化. 老行 cost_nano 与卡 face_used 历史值仍偏高 (未回写)
+- 实测 (今日 1454 行): $/槽·时 fable-high 22.0 / fable-max 18.7 / sol 28.3 / grok-xhigh 5.5 / kimi-max 0.3;
+  峰值并发 3, 均并发 1.2–1.5; day50 满载上限 $1313/卡
+- 上游名单落盘实测: 点一次「获取可用模型」(212) → restart → /v1/models 仍 37 家族 (之前重启后只剩 1)
+- 隔离 E2E scripts/e2e-analytics.sh 20/20 (加假号+黑洞 9911 才能验新行 input_incl_cache=0); cargo test 155/155

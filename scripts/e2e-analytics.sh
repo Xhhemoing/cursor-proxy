@@ -26,10 +26,12 @@ if [ "${1:-run}" = "setup" ]; then
    "prices":[{"model":"*","input_per_m":1,"output_per_m":1}],"sales":[{"id":"s1","name":"S","commission_bps":100}]},
  "proxy":{"enabled":false,"nodes":[],"rules":[]}}
 EOF
-  echo '[]' > $E/accounts.json
+  # 一个假号: 请求会真正打到 9911 黑洞上游 → 超时 502 → 走账本 (才能验新行 input_incl_cache=0)
+  echo '[{"id":"dummy","access_token":"x","machine_id":"m","enabled":true,"priority":50,"tags":[]}]' > $E/accounts.json
   # 预置上游名单文件 → 启动后 /v1/models 必须包含 (重启不丢)
   echo '{"fetched_at":1,"models":["e2e-upstream-model-high","kimi-k3-max"]}' > $E/upstream-models.json
   echo "setup done at $E; start with:"
+  echo "  python3 scripts/blackhole_upstream.py 9911 3 &   # 黑洞上游 (先起)"
   echo "  cd $E && CFP_CONFIG=$E/config.json CFP_ACCOUNTS=$E/accounts.json $PWD/$BIN"
   exit 0
 fi
@@ -62,8 +64,22 @@ assert t["usd_per_online_hour"]>0
 assert len(d["by_model"])>0 and len(d["by_key"])>0 and len(d["hourly"])>0 and len(d["by_plan"])>0
 m=d["by_model"][0]; assert "usd_per_online_hour" in m and "groups" in m and "priced" in m
 assert d["gap_mode"]=="auto" and d["gap_secs"] is None
-print("  rows=%d face=$%.3f cost=¥%.2f online=%.2fh busy=%.2fh sessions=%d users=%d $/online-h=%.2f" % (d["rows_scanned"],t["face_usd"],t["cost_rmb"],t["online_hours"],t["busy_hours"],t["sessions"],t["users"],t["usd_per_online_hour"]))
-print("  top models:", [(r["model"],r["requests"],round(r["face_usd"],3),r["usd_per_online_hour"] and round(r["usd_per_online_hour"],2)) for r in d["by_model"][:4]])
+# 并发槽: 槽·时 ≥ 在线时 (多路并发才会大于), 槽·时 ≥ 忙时 (槽在等人也算), 峰值并发 ≥ 1
+assert t["lane_hours"]>=t["online_hours"]-1e-9, ("lane<online",t)
+assert t["lane_hours"]>=t["busy_hours"]*0.95, ("lane<busy",t)
+assert t["peak_concurrency"]>=1 and t["usd_per_lane_hour"]>0
+assert t["usd_per_lane_hour"]<=t["usd_per_online_hour"]+1e-9
+for r in d["by_model"]:
+    assert r["lane_hours"]>=r["online_hours"]-1e-9 and r["lane_hours"]>=r["busy_hours"]*0.95, ("model lane", r["model"])
+# 老行 input 含缓存 → 归一化后 sol 的面值必须低于 fable-thinking-high (修 bug 前 $61 vs $237 被高估 6 倍)
+bm={r["model"]:r for r in d["by_model"]}
+if "gpt-5.6-sol" in bm and "claude-fable-5-1-thinking-high" in bm:
+    sol=bm["gpt-5.6-sol"]; fab=bm["claude-fable-5-1-thinking-high"]
+    assert sol["face_usd"]<fab["face_usd"], ("sol>=fable", sol["face_usd"], fab["face_usd"])
+    # sol 的 $/请求 应远低于旧口径的 $0.8 (全是 200k 缓存命中, 修正后 ≈ $0.12)
+    assert sol["avg_face_per_req"]<0.4, ("sol per req still cache-inflated", sol["avg_face_per_req"])
+print("  rows=%d face=$%.3f cost=¥%.2f online=%.2fh lane=%.2fh busy=%.2fh peak_conc=%d sessions=%d users=%d $/lane-h=%.2f $/online-h=%.2f" % (d["rows_scanned"],t["face_usd"],t["cost_rmb"],t["online_hours"],t["lane_hours"],t["busy_hours"],t["peak_concurrency"],t["sessions"],t["users"],t["usd_per_lane_hour"],t["usd_per_online_hour"]))
+print("  top models (req, face, $/lane-h, peak/avg conc):", [(r["model"],r["requests"],round(r["face_usd"],2),r["usd_per_lane_hour"] and round(r["usd_per_lane_hour"],1),r["peak_concurrency"],r["avg_concurrency"] and round(r["avg_concurrency"],2)) for r in d["by_model"][:4]])
 print("  by_plan:", [(r["plan_id"],r["requests"],round(r["face_usd"],3)) for r in d["by_plan"]])
 print("  by_group:", [(r["group_id"],r["requests"]) for r in d["by_group"]])
 ' && ok "consumption(all) 结构+数值合理" || ko "consumption(all) 断言失败"
@@ -108,7 +124,9 @@ s=d["sessions"][0]; assert s["end_ms"]>=s["start_ms"] and s["requests"]>=1 and "
 # 时段互不重叠且按时间倒序
 ss=d["sessions"]
 for i in range(len(ss)-1): assert ss[i]["start_ms"]>=ss[i+1]["end_ms"], "overlap"
-print("  %s… sessions=%d online=%.2fh face=$%.3f gap=%.0fs" % (d["key"][:16],d["totals"]["sessions"],d["totals"]["online_hours"],d["totals"]["face_usd"],d["gap_secs"]))
+assert d["totals"]["lane_hours"]>=d["totals"]["online_hours"]-1e-9 and d["totals"]["peak_concurrency"]>=1
+assert all("peak_concurrency" in x and "lane_hours" in x for x in ss)
+print("  %s… sessions=%d online=%.2fh lane=%.2fh peak=%d face=$%.3f gap=%.0fs" % (d["key"][:16],d["totals"]["sessions"],d["totals"]["online_hours"],d["totals"]["lane_hours"],d["totals"]["peak_concurrency"],d["totals"]["face_usd"],d["gap_secs"]))
 print("  latest:", ss[0]["start"], "→", ss[0]["end"][11:], "%.1fmin" % (ss[0]["secs"]/60), ss[0]["requests"], "req", [m["model"] for m in ss[0]["models"]][:3])
 ' && ok "sessions 明细合理 (无重叠, 倒序)" || ko "sessions 断言失败"
 else
@@ -116,12 +134,15 @@ else
 fi
 c=$(curl -s "$B/admin/api/analytics/sessions?key=" -H "$A"); echo "$c" | grep -q 'key required' && ok "sessions 缺 key → error" || ko "sessions 缺 key 未报错: $c"
 
-echo "── 账本新口径: 新请求 (503, 无 usage) 记 0 面值, sales/commission 恒 NULL/0 ──"
+echo "── 账本新口径: 新请求 (502 黑洞, 无 usage) 记 0 面值, sales/commission 恒 NULL/0, input_incl_cache=0 ──"
 curl -s -o /dev/null -X POST $B/v1/chat/completions -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' -d '{"model":"kimi-k3-high","messages":[{"role":"user","content":"hi"}]}'
-sleep 1
+sleep 12   # 3 次重试 × 3s 黑洞超时 → 502 落账
 N=$(sqlite3 $E/billing.db "select count(*) from billing_records where sales_id is not null or commission_nano<>0")
 [ "$N" = "0" ] && ok "新写入行 sales_id NULL / commission 0 (老行也无)" || echo "  ℹ 历史行含 sales/commission: $N (老库残留, 不算失败)"
 sqlite3 $E/billing.db "select name from sqlite_master where type='index' and name='idx_br_keyname_ts'" | grep -q idx_br_keyname_ts && ok "老库自动补 idx_br_keyname_ts 索引" || ko "索引未建"
+OLD_INCL=$(sqlite3 $E/billing.db "select count(*) from billing_records where input_incl_cache=1")
+NEW_INCL=$(sqlite3 $E/billing.db "select count(*) from billing_records where input_incl_cache=0")
+[ "$OLD_INCL" -gt 0 ] && [ "$NEW_INCL" -gt 0 ] && ok "老库补 input_incl_cache: 老行=1 ($OLD_INCL) 新行=0 ($NEW_INCL)" || ko "input_incl_cache 迁移异常 old=$OLD_INCL new=$NEW_INCL"
 
 echo; echo "══ RESULT: $pass passed, $fail failed ══"
 exit $fail

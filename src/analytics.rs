@@ -8,9 +8,14 @@
 //!   使用; 一次使用从首条请求开始到末条请求结束. `gap` 缺省按该 key 自身节奏自适应:
 //!   取 < 1h 的相邻间隔的中位数 × 3, 夹在 [5min, 30min] —— 秒接的 agent 用户和慢聊的人类
 //!   用同一个固定阈值都会判错, 所以按人算.
-//! - **$/在线小时**: 该维度 (模型/组/套餐/卡) 的面值 ÷ 该维度自身请求流算出的在线小时.
-//!   对模型来说就是「用户开着这个模型干活时, 每小时烧多少面值」—— 这是给套餐定价用的数.
-//! - **忙时 (busy)**: Σ latency, 即上游真正在算的时间; 在线时长 ≥ 忙时.
+//! - **并发槽 (lane)**: 一个用户同时开 N 路请求 (agent 并行 / 多窗口), 就占了 N 个并发槽.
+//!   按区间划分把同 key 的请求贪心塞进最少的槽 (槽数 = 瞬时最大并发), 每个槽再各自
+//!   sessionize —— `lane_hours` = Σ 各槽的在线时长, `peak_concurrency` = 槽数.
+//!   一个人单路用 1h = 1 槽·时; 4 路并行 1h = 4 槽·时. **模型消耗按槽·时归一化**:
+//! - **$/槽·时 (`usd_per_lane_hour`)** = 面值 ÷ lane_hours —— 「一路并发开着这个模型,
+//!   每小时烧多少面值」. 这是给套餐定价用的主指标: 套餐上限 = max_concurrency × 时长 × $/槽·时.
+//!   `usd_per_online_hour` (面值 ÷ 用户在线小时, 不管几路) 保留作对照; 两者之比 = 平均并发.
+//! - **忙时 (busy)**: Σ latency, 即上游真正在算的时间; lane_hours ≥ 忙时 (槽在等人时也算在线).
 //!
 //! 请求开始时间 = `ts_ms - latency_ms` (账本 ts_ms 记的是请求结束落账的时刻).
 
@@ -110,6 +115,52 @@ pub fn sessionize(reqs: &[Req], gap_secs: Option<f64>) -> (Vec<Session>, f64) {
     (out, gap)
 }
 
+/// 区间划分: 把一条 key 的请求按开始时间贪心分配到并发槽 (一个槽内请求不重叠).
+/// 选「结束最晚但仍 ≤ 本条开始」的槽 (best-fit), 没有就开新槽. 槽数 = 瞬时最大并发.
+pub fn assign_lanes(reqs: &[Req]) -> Vec<Vec<Req>> {
+    let mut v: Vec<Req> = reqs.to_vec();
+    v.sort_by_key(|r| (r.start_ms, r.end_ms));
+    let mut lanes: Vec<Vec<Req>> = Vec::new();
+    let mut lane_end: Vec<i64> = Vec::new();
+    for r in v {
+        let mut best: Option<usize> = None;
+        for (i, e) in lane_end.iter().enumerate() {
+            if *e <= r.start_ms && best.map_or(true, |b| lane_end[b] < *e) {
+                best = Some(i);
+            }
+        }
+        match best {
+            Some(i) => {
+                lane_end[i] = r.end_ms.max(r.start_ms);
+                lanes[i].push(r);
+            }
+            None => {
+                lane_end.push(r.end_ms.max(r.start_ms));
+                lanes.push(vec![r]);
+            }
+        }
+    }
+    lanes
+}
+
+/// 一条 key 的请求流 → (在线秒, 段数, 槽·秒, 槽数). 槽用与整体相同的 gap 切时段.
+pub fn key_online_and_lanes(reqs: &[Req], gap_secs: Option<f64>) -> (f64, usize, f64, usize) {
+    let (sessions, gap) = sessionize(reqs, gap_secs);
+    let online: f64 = sessions.iter().map(|s| s.secs()).sum();
+    let lanes = assign_lanes(reqs);
+    let lane_secs: f64 = lanes
+        .iter()
+        .map(|l| {
+            sessionize(l, Some(gap))
+                .0
+                .iter()
+                .map(|s| s.secs())
+                .sum::<f64>()
+        })
+        .sum();
+    (online, sessions.len(), lane_secs, lanes.len())
+}
+
 /// 一个维度值 (某模型 / 某组 / 某套餐 / 某卡) 的聚合
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Agg {
@@ -125,6 +176,10 @@ pub struct Agg {
     /// 在线时段合计 (小时), 按 key 分流 sessionize 后求和
     pub online_hours: f64,
     pub sessions: u64,
+    /// 并发槽在线时长合计 (小时): Σ_key Σ_槽 该槽的时段时长. 单路使用时 = online_hours
+    pub lane_hours: f64,
+    /// 所有 key 中的最大瞬时并发 (槽数)
+    pub peak_concurrency: u64,
     /// 参与的 key / 卡 数
     pub users: u64,
     pub first_ms: Option<i64>,
@@ -148,6 +203,14 @@ impl Agg {
     }
     pub fn usd_per_online_hour(&self) -> Option<f64> {
         (self.online_hours > 1e-6).then(|| self.face_usd / self.online_hours)
+    }
+    /// 主定价指标: 一路并发开着该维度, 每小时烧的面值
+    pub fn usd_per_lane_hour(&self) -> Option<f64> {
+        (self.lane_hours > 1e-6).then(|| self.face_usd / self.lane_hours)
+    }
+    /// 平均并发 = 槽·时 ÷ 在线时
+    pub fn avg_concurrency(&self) -> Option<f64> {
+        (self.online_hours > 1e-6).then(|| self.lane_hours / self.online_hours)
     }
     pub fn usd_per_busy_hour(&self) -> Option<f64> {
         (self.busy_hours > 1e-6).then(|| self.face_usd / self.busy_hours)
@@ -173,7 +236,12 @@ impl Agg {
             "busy_hours": self.busy_hours,
             "online_hours": self.online_hours,
             "sessions": self.sessions,
+            "lane_hours": self.lane_hours,
+            "peak_concurrency": self.peak_concurrency,
+            "avg_concurrency": self.avg_concurrency(),
             "users": self.users,
+            "usd_per_lane_hour": self.usd_per_lane_hour(),
+            "rmb_per_lane_hour": self.usd_per_lane_hour().map(|v| v * rmb_per_usd),
             "usd_per_online_hour": self.usd_per_online_hour(),
             "usd_per_busy_hour": self.usd_per_busy_hour(),
             "rmb_per_online_hour": self.usd_per_online_hour().map(|v| v * rmb_per_usd),
@@ -208,9 +276,11 @@ where
             for r in rs {
                 a.add_req(r);
             }
-            let (sessions, _) = sessionize(rs, gap_secs);
-            a.sessions += sessions.len() as u64;
-            a.online_hours += sessions.iter().map(|s| s.secs()).sum::<f64>() / 3600.0;
+            let (online_secs, n_sessions, lane_secs, n_lanes) = key_online_and_lanes(rs, gap_secs);
+            a.sessions += n_sessions as u64;
+            a.online_hours += online_secs / 3600.0;
+            a.lane_hours += lane_secs / 3600.0;
+            a.peak_concurrency = a.peak_concurrency.max(n_lanes as u64);
         }
         a.users = per_key.len() as u64;
         out.insert(d, a);
@@ -305,6 +375,16 @@ pub fn req_from_row(
     }
 }
 
+/// 老账本行 (`input_incl_cache=1`) 的 input_tokens 是 Cursor promptTokens (含缓存) →
+/// 扣掉缓存只留未命中部分, 与新行同口径; 否则缓存按 input 全价重复计, 面值高估 4–7 倍.
+pub fn normalize_input(input: u64, cache_read: u64, cache_write: u64, incl_cache: bool) -> u64 {
+    if incl_cache {
+        input.saturating_sub(cache_read + cache_write)
+    } else {
+        input
+    }
+}
+
 /// 读账本时间窗内的请求 (按开始时间升序). `cards_only` 只取 card- 前缀.
 pub fn load_reqs(
     conn: &rusqlite::Connection,
@@ -316,7 +396,7 @@ pub fn load_reqs(
 ) -> rusqlite::Result<Vec<Req>> {
     let mut sql = String::from(
         "SELECT ts_ms, latency_ms, key_name, model, input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens, status
+                cache_read_tokens, cache_write_tokens, status, input_incl_cache
          FROM billing_records WHERE 1=1",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -339,15 +419,19 @@ pub fn load_reqs(
     params.push(Box::new(limit as i64));
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        let input = r.get::<_, i64>(4)?.max(0) as u64;
+        let cr = r.get::<_, i64>(6)?.max(0) as u64;
+        let cw = r.get::<_, i64>(7)?.max(0) as u64;
+        let incl: i64 = r.get(9)?;
         Ok(req_from_row(
             r.get(0)?,
             r.get(1)?,
             r.get(2)?,
             r.get(3)?,
-            r.get::<_, i64>(4)?.max(0) as u64,
+            normalize_input(input, cr, cw, incl != 0),
             r.get::<_, i64>(5)?.max(0) as u64,
-            r.get::<_, i64>(6)?.max(0) as u64,
-            r.get::<_, i64>(7)?.max(0) as u64,
+            cr,
+            cw,
             r.get::<_, i64>(8)?.clamp(0, 999) as u16,
         ))
     })?;
@@ -446,6 +530,73 @@ mod tests {
         assert_eq!(m2.sessions, 1);
         assert!((m2.online_hours - 30.0 / 3600.0).abs() < 1e-12);
         assert_eq!(m2.usd_per_online_hour().map(|v| v.round()), Some(360.0));
+    }
+
+    #[test]
+    fn lanes_count_concurrency_and_lane_hours_exceed_online_hours() {
+        // 单路: 3 条串行 → 1 槽, lane_hours == online_hours
+        let serial = vec![
+            r("k", "m", 0, 10, 1.0),
+            r("k", "m", 20, 10, 1.0),
+            r("k", "m", 40, 10, 1.0),
+        ];
+        assert_eq!(assign_lanes(&serial).len(), 1);
+        let (on, n, lane, k) = key_online_and_lanes(&serial, Some(600.0));
+        assert_eq!((n, k), (1, 1));
+        assert!((on - lane).abs() < 1e-9);
+        assert!((on - 50.0).abs() < 1e-9);
+
+        // 4 路并行 1h (每路每 5min 一条 60s 请求, 起点错开 0/15/30/45s):
+        // 用户在线 ≈ 1h, 槽·时 ≈ 4h, 峰值并发 4
+        let mut par = vec![];
+        for lane in 0..4i64 {
+            for i in 0..12 {
+                par.push(r("k", "m", i * 300 + lane * 15, 60, 0.25));
+            }
+        }
+        let lanes = assign_lanes(&par);
+        assert_eq!(lanes.len(), 4);
+        assert!(lanes.iter().all(|l| l.len() == 12));
+        // 每槽内请求不重叠
+        for l in &lanes {
+            for w in l.windows(2) {
+                assert!(w[1].start_ms >= w[0].end_ms);
+            }
+        }
+        let (on, _, lane_secs, k) = key_online_and_lanes(&par, Some(600.0));
+        assert_eq!(k, 4);
+        assert!((on - 3405.0).abs() < 1e-9); // 0 → 11*300+45+60
+        assert!(lane_secs > 3.9 * on && lane_secs < 4.0 * on + 1.0);
+
+        let agg = aggregate(&par, |q| vec![q.model.clone()], Some(600.0));
+        let m = &agg["m"];
+        assert_eq!(m.peak_concurrency, 4);
+        assert!((m.avg_concurrency().unwrap() - 3.95).abs() < 0.06);
+        // 面值 12; $/槽·时 ≈ 12/3.78 ≈ 3.2, $/在线时 ≈ 12/0.946 ≈ 12.7
+        let per_lane = m.usd_per_lane_hour().unwrap();
+        let per_online = m.usd_per_online_hour().unwrap();
+        assert!((per_online / per_lane - m.avg_concurrency().unwrap()).abs() < 1e-9);
+        assert!(per_lane < 3.3 && per_lane > 3.1);
+    }
+
+    #[test]
+    fn lane_best_fit_reuses_freed_lane() {
+        // A 0-100, B 10-20 (并发 → 槽2), C 30-40 应回到槽2 (槽1 到 100 才空)
+        let reqs = vec![
+            r("k", "m", 0, 100, 1.0),
+            r("k", "m", 10, 10, 1.0),
+            r("k", "m", 30, 10, 1.0),
+        ];
+        let lanes = assign_lanes(&reqs);
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[1].len(), 2);
+    }
+
+    #[test]
+    fn normalize_input_only_for_old_rows() {
+        assert_eq!(normalize_input(208_667, 208_204, 460, true), 3);
+        assert_eq!(normalize_input(3, 208_204, 460, false), 3);
+        assert_eq!(normalize_input(100, 500, 0, true), 0); // 不为负
     }
 
     #[test]

@@ -177,6 +177,13 @@ pub async fn api_analytics_consumption(
             // 一张卡在有效期内若「全程在线」的理论上限 vs 实测 $/在线小时 → 定价参考
             let per_h = r["usd_per_online_hour"].as_f64();
             r["rmb_per_online_hour"] = json!(per_h.map(|v| v * rmb));
+            // 套餐满载上限: 卡的并发上限 × 有效期小时 × 实测 $/槽·时 → 该套餐一张卡最坏烧多少
+            let per_lane = r["usd_per_lane_hour"].as_f64();
+            r["worst_case_face_usd"] =
+                json!(per_lane
+                    .map(|v| { v * p.max_concurrency.max(1) as f64 * p.duration_hours as f64 }));
+            r["worst_case_cost_rmb"] = json!(per_lane
+                .map(|v| { v * p.max_concurrency.max(1) as f64 * p.duration_hours as f64 * rmb }));
             // 每卡平均: 面值 / 参与卡数
             let users = r["users"].as_u64().unwrap_or(0).max(1) as f64;
             r["avg_face_per_card"] = json!(r["face_usd"].as_f64().unwrap_or(0.0) / users);
@@ -301,6 +308,7 @@ pub async fn api_analytics_presence(
             .collect();
         let (sessions, gap) = analytics::sessionize(&today, None);
         let online_secs: f64 = sessions.iter().map(|s| s.secs()).sum();
+        let (_, _, lane_secs, peak_conc) = analytics::key_online_and_lanes(&today, Some(gap));
         let face: f64 = today.iter().map(|r| r.face_usd).sum();
         let mut models: BTreeMap<String, u64> = BTreeMap::new();
         for r in &today {
@@ -325,6 +333,9 @@ pub async fn api_analytics_presence(
             "today_face_usd": face,
             "today_cost_rmb": face * rmb,
             "today_online_hours": online_secs / 3600.0,
+            "today_lane_hours": lane_secs / 3600.0,
+            "today_peak_concurrency": peak_conc,
+            "today_usd_per_lane_hour": if lane_secs > 0.0 { Some(face / (lane_secs / 3600.0)) } else { None },
             "today_sessions": sessions.len(),
             "session_gap_secs": gap,
             "current_session_start_ms": cur_session.map(|s| s.start_ms),
@@ -407,7 +418,22 @@ pub async fn api_analytics_sessions(
             }
         }
         let secs = s.secs();
+        let owned: Vec<Req> = inside.iter().map(|r| (*r).clone()).collect();
+        let lanes = analytics::assign_lanes(&owned);
+        let lane_secs: f64 = lanes
+            .iter()
+            .map(|l| {
+                analytics::sessionize(l, Some(gap))
+                    .0
+                    .iter()
+                    .map(|x| x.secs())
+                    .sum::<f64>()
+            })
+            .sum();
         out.push(json!({
+            "peak_concurrency": lanes.len(),
+            "lane_hours": lane_secs / 3600.0,
+            "usd_per_lane_hour": if lane_secs > 0.0 { Some(s.face_usd / (lane_secs / 3600.0)) } else { None },
             "start_ms": s.start_ms,
             "end_ms": s.end_ms,
             "start": crate::billing::fmt_local(s.start_ms, c.tz),
@@ -425,6 +451,7 @@ pub async fn api_analytics_sessions(
     out.reverse(); // 最近的在前
     let total_face: f64 = sessions.iter().map(|s| s.face_usd).sum();
     let total_secs: f64 = sessions.iter().map(|s| s.secs()).sum();
+    let (_, _, total_lane_secs, peak_conc) = analytics::key_online_and_lanes(&reqs, Some(gap));
     let card = state.card_store.card_status(&key);
     Json(json!({
         "key": key,
@@ -437,9 +464,12 @@ pub async fn api_analytics_sessions(
             "requests": reqs.len(),
             "sessions": sessions.len(),
             "online_hours": total_secs / 3600.0,
+            "lane_hours": total_lane_secs / 3600.0,
+            "peak_concurrency": peak_conc,
             "face_usd": total_face,
             "cost_rmb": total_face * c.rmb_per_usd,
             "usd_per_online_hour": if total_secs > 0.0 { Some(total_face / (total_secs / 3600.0)) } else { None },
+            "usd_per_lane_hour": if total_lane_secs > 0.0 { Some(total_face / (total_lane_secs / 3600.0)) } else { None },
         },
         "sessions": out,
     }))
