@@ -70,3 +70,4 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - analytics 每维度 speed{ttft_p50/p90, tps_p50/p10/p90, latency_p50/p90, 样本数}; presence today_speed; sessions 每段 ttft/tps
 - 面板: 消耗分析各表 + 在线状态 + 时段明细 加「首字 p50/p90」「tok/s p50/p10」(<15 tok/s 标黄); 请求日志延迟列附首字/tok/s
 - 隔离 E2E 22/22; cargo test 157/157. 换后真实流量 ttft 落库待流量到达后核对 (/tmp/chk_ttft.sh)
+- 03:10 追加 ac28517: ttft 含 reasoning 帧; 换后 md5 95198551d32435a1807c16cc265b1497. 实测 fable-thinking-high 首字 7–15s (思考期无输出), 之后正文 90–180 tok/s 突发; sol-max 首字 5s / 78 tok/s
