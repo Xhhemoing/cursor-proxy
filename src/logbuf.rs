@@ -319,16 +319,28 @@ impl LogFilter {
             }
         }
         if let Some(min) = self.min_latency_ms {
-            if entry.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(0) < min {
+            if entry
+                .get("latency_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                < min
+            {
                 return false;
             }
         }
         if let Some(ref q) = self.q {
             let q = q.to_ascii_lowercase();
             if !q.is_empty()
-                && !["req_id", "model", "account", "key_name", "key_prefix", "client_ip"]
-                    .iter()
-                    .any(|k| s(k).contains(&q))
+                && ![
+                    "req_id",
+                    "model",
+                    "account",
+                    "key_name",
+                    "key_prefix",
+                    "client_ip",
+                ]
+                .iter()
+                .any(|k| s(k).contains(&q))
             {
                 return false;
             }

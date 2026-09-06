@@ -104,7 +104,11 @@ pub async fn api_models_list(State(state): State<Arc<AppState>>) -> impl IntoRes
     let rows: Vec<Value> = names
         .iter()
         .map(|(m, src)| {
-            let n = seen.iter().find(|(x, _)| x == m).map(|(_, c)| *c).unwrap_or(0);
+            let n = seen
+                .iter()
+                .find(|(x, _)| x == m)
+                .map(|(_, c)| *c)
+                .unwrap_or(0);
             row(m, src, n)
         })
         .collect();
@@ -161,7 +165,11 @@ pub async fn api_models_upsert(
         return bad(m);
     }
     if let Err(err) = reg.upsert_model(e) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response();
     }
     state.audit.key_op("model_upsert", &model, json!({}));
     Json(row(&model, "manual", 0)).into_response()
@@ -195,7 +203,11 @@ pub async fn api_models_bulk(
         .collect();
     let n = models.len();
     if let Err(err) = registry().replace_models(models) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response();
     }
     state.audit.key_op("models_bulk", "*", json!({"count": n}));
     Json(json!({"ok": true, "count": n})).into_response()
@@ -233,7 +245,9 @@ pub async fn api_models_import_builtin(
             n += 1;
         }
     }
-    state.audit.key_op("models_import_builtin", "*", json!({"count": n}));
+    state
+        .audit
+        .key_op("models_import_builtin", "*", json!({"count": n}));
     Json(json!({"ok": true, "written": n})).into_response()
 }
 
@@ -246,8 +260,16 @@ pub async fn api_models_delete(
             state.audit.key_op("model_delete", &model, json!({}));
             Json(json!({"ok": true})).into_response()
         }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "no manual entry"}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no manual entry"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -310,7 +332,12 @@ pub async fn api_groups_upsert(
     Json(b): Json<GroupBody>,
 ) -> Response {
     let id = b.id.trim().to_string();
-    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return bad("group id: 1-64 chars, [a-zA-Z0-9_-]");
     }
     let reg = registry();
@@ -329,14 +356,26 @@ pub async fn api_groups_upsert(
         .collect();
     let g = ModelGroup {
         id: id.clone(),
-        name: b.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or(cur.name),
+        name: b
+            .name
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(cur.name),
         members,
         note: b.note.unwrap_or(cur.note),
     };
     if let Err(e) = reg.upsert_group(g.clone()) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
     }
-    state.audit.key_op("model_group_upsert", &id, json!({"members": g.members.len()}));
+    state.audit.key_op(
+        "model_group_upsert",
+        &id,
+        json!({"members": g.members.len()}),
+    );
     Json(json!({"ok": true, "group": g})).into_response()
 }
 
@@ -371,8 +410,16 @@ pub async fn api_groups_delete(
             state.audit.key_op("model_group_delete", &id, json!({}));
             Json(json!({"ok": true})).into_response()
         }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "group not found"}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "group not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -387,9 +434,17 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
         .find(|a| a.enabled)
         .or_else(|| state.pool.accounts().into_iter().next());
     let Some(acc) = acc else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "no accounts"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "no accounts"})),
+        )
+            .into_response();
     };
-    match state.cursor.available_models(&acc.access_token, &acc.machine_id).await {
+    match state
+        .cursor
+        .available_models(&acc.access_token, &acc.machine_id)
+        .await
+    {
         Ok(v) => {
             let names = extract_model_names(&v);
             let reg = registry();
@@ -409,9 +464,14 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
                     })
                 })
                 .collect();
-            Json(json!({"account": acc.id, "models": rows, "count": rows.len(), "marked": marked})).into_response()
+            Json(json!({"account": acc.id, "models": rows, "count": rows.len(), "marked": marked}))
+                .into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -423,7 +483,11 @@ fn extract_model_names(v: &Value) -> Vec<String> {
             let n = it
                 .as_str()
                 .map(|s| s.to_string())
-                .or_else(|| it.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                .or_else(|| {
+                    it.get("name")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                })
                 .or_else(|| it.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()));
             if let Some(n) = n {
                 if !n.is_empty() && !out.contains(&n) {
@@ -432,7 +496,13 @@ fn extract_model_names(v: &Value) -> Vec<String> {
             }
         }
     };
-    for key in ["models", "modelIds", "model_ids", "availableModels", "available_models"] {
+    for key in [
+        "models",
+        "modelIds",
+        "model_ids",
+        "availableModels",
+        "available_models",
+    ] {
         if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
             walk(arr);
         }
@@ -473,13 +543,22 @@ fn litellm_candidates(model: &str) -> Vec<String> {
 
 /// POST /admin/api/models/sync-litellm — 拉 litellm 价格表, 为已知模型填价.
 /// 只填「注册表里没有手动条目」的模型; ?overwrite=1 才覆盖手动条目.
-pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q): Query<ImportQuery>) -> Response {
+pub async fn api_models_sync_litellm(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ImportQuery>,
+) -> Response {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     let mut table: Option<Value> = None;
     let mut errs: Vec<String> = vec![];
@@ -497,15 +576,27 @@ pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q
         }
     }
     let Some(table) = table else {
-        return (StatusCode::BAD_GATEWAY, Json(json!({"error": "all litellm mirrors failed", "detail": errs}))).into_response();
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "all litellm mirrors failed", "detail": errs})),
+        )
+            .into_response();
     };
     let price_of = |name: &str| -> Option<(f64, f64, f64, f64)> {
         let e = table.get(name)?;
         let g = |k: &str| e.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) * 1e6; // $/token → $/1M
-        Some((g("input_cost_per_token"), g("output_cost_per_token"), g("cache_read_input_token_cost"), g("cache_creation_input_token_cost")))
+        Some((
+            g("input_cost_per_token"),
+            g("output_cost_per_token"),
+            g("cache_read_input_token_cost"),
+            g("cache_creation_input_token_cost"),
+        ))
     };
     // 目标模型集合: 内置表 + 注册表已有 + 账本出现过的
-    let mut targets: Vec<String> = cards::builtin_table().iter().map(|(m, ..)| m.clone()).collect();
+    let mut targets: Vec<String> = cards::builtin_table()
+        .iter()
+        .map(|(m, ..)| m.clone())
+        .collect();
     for e in &registry().snapshot().models {
         if !targets.contains(&e.model) {
             targets.push(e.model.clone());
@@ -526,7 +617,9 @@ pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q
             skipped_manual.push(m.clone());
             continue;
         }
-        let hit = litellm_candidates(m).iter().find_map(|cand| price_of(cand).map(|p| (cand.clone(), p)));
+        let hit = litellm_candidates(m)
+            .iter()
+            .find_map(|cand| price_of(cand).map(|p| (cand.clone(), p)));
         match hit {
             Some((src, (i, o, c, w))) => {
                 let cur = reg.get_exact(m);
@@ -547,7 +640,9 @@ pub async fn api_models_sync_litellm(State(state): State<Arc<AppState>>, Query(q
             None => no_price.push(m.clone()),
         }
     }
-    state.audit.key_op("models_sync_litellm", "*", json!({"filled": filled.len()}));
+    state
+        .audit
+        .key_op("models_sync_litellm", "*", json!({"filled": filled.len()}));
     Json(json!({
         "ok": true,
         "filled": filled,

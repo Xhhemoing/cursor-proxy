@@ -91,12 +91,16 @@ pub async fn api_logs_stats(
     let mut tokens_out = 0u64;
     let mut cost_nano = 0i64;
     let mut lat: Vec<u64> = Vec::with_capacity(n);
-    let mut by_model: std::collections::BTreeMap<String, (usize, usize, u64, i64)> = Default::default();
-    let mut by_key: std::collections::BTreeMap<String, (usize, usize, u64, i64)> = Default::default();
+    let mut by_model: std::collections::BTreeMap<String, (usize, usize, u64, i64)> =
+        Default::default();
+    let mut by_key: std::collections::BTreeMap<String, (usize, usize, u64, i64)> =
+        Default::default();
     let mut by_status: std::collections::BTreeMap<u64, usize> = Default::default();
     let mut by_account: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
     let g = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-    let gs = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let gs = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    };
     for l in &logs {
         let st = g(l, "status");
         let is_ok = st == 200;
@@ -112,28 +116,44 @@ pub async fn api_logs_stats(
         lat.push(g(l, "latency_ms"));
         let m = by_model.entry(gs(l, "model")).or_default();
         m.0 += 1;
-        if is_ok { m.1 += 1; }
+        if is_ok {
+            m.1 += 1;
+        }
         m.2 += ti + to;
         m.3 += c;
         let k = by_key.entry(gs(l, "key_name")).or_default();
         k.0 += 1;
-        if is_ok { k.1 += 1; }
+        if is_ok {
+            k.1 += 1;
+        }
         k.2 += ti + to;
         k.3 += c;
         *by_status.entry(st).or_default() += 1;
         let a = by_account.entry(gs(l, "account")).or_default();
         a.0 += 1;
-        if !is_ok { a.1 += 1; }
+        if !is_ok {
+            a.1 += 1;
+        }
     }
     lat.sort_unstable();
     let pct = |p: f64| -> u64 {
-        if lat.is_empty() { 0 } else { lat[((lat.len() - 1) as f64 * p).round() as usize] }
+        if lat.is_empty() {
+            0
+        } else {
+            lat[((lat.len() - 1) as f64 * p).round() as usize]
+        }
     };
-    let avg = if lat.is_empty() { 0 } else { lat.iter().sum::<u64>() / lat.len() as u64 };
-    let row4 = |(k, (n, ok, tok, cost)): (&String, &(usize, usize, u64, i64))| json!({
-        "name": k, "requests": n, "ok": ok, "errors": n - ok, "tokens": tok,
-        "cost": crate::billing::fmt_money(*cost),
-    });
+    let avg = if lat.is_empty() {
+        0
+    } else {
+        lat.iter().sum::<u64>() / lat.len() as u64
+    };
+    let row4 = |(k, (n, ok, tok, cost)): (&String, &(usize, usize, u64, i64))| {
+        json!({
+            "name": k, "requests": n, "ok": ok, "errors": n - ok, "tokens": tok,
+            "cost": crate::billing::fmt_money(*cost),
+        })
+    };
     let mut models: Vec<_> = by_model.iter().map(row4).collect();
     models.sort_by_key(|v| std::cmp::Reverse(v["requests"].as_u64().unwrap_or(0)));
     let mut keys: Vec<_> = by_key.iter().map(row4).collect();
@@ -183,17 +203,37 @@ pub async fn api_logs_export(
         let body: String = logs.iter().map(|l| l.to_string() + "\n").collect();
         return (
             [
-                (axum::http::header::CONTENT_TYPE, "application/x-ndjson".to_string()),
-                (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"logs-{ts}.jsonl\"")),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-ndjson".to_string(),
+                ),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"logs-{ts}.jsonl\""),
+                ),
             ],
             body,
         )
             .into_response();
     }
     let cols = [
-        "ts", "req_id", "status", "model", "account", "kind", "key_name", "key_prefix", "stream",
-        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens",
-        "cost", "latency_ms", "client_ip",
+        "ts",
+        "req_id",
+        "status",
+        "model",
+        "account",
+        "kind",
+        "key_name",
+        "key_prefix",
+        "stream",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "total_tokens",
+        "cost",
+        "latency_ms",
+        "client_ip",
     ];
     let esc = |v: &serde_json::Value| -> String {
         let s = match v {
@@ -220,8 +260,14 @@ pub async fn api_logs_export(
     }
     (
         [
-            (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
-            (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"logs-{ts}.csv\"")),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"logs-{ts}.csv\""),
+            ),
         ],
         out,
     )

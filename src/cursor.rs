@@ -117,14 +117,15 @@ pub fn auto_detect_thinking_level(body: &Value) -> ThinkingLevel {
             _ => {}
         }
     }
-    
+
     if let Some(msgs) = messages {
         let msg_count = msgs.len();
-        let total_len: usize = msgs.iter()
+        let total_len: usize = msgs
+            .iter()
             .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
             .map(|s| s.len())
             .sum();
-        
+
         // 有工具调用 → Max
         if tools.is_some() || tool_choice.is_some() {
             return ThinkingLevel::Max;
@@ -154,7 +155,11 @@ pub fn default_max_tokens_for(_model: &str) -> Option<u32> {
 /// 计算最终生效的 maxTokens: 客户端值优先, 无则默认 32k, 低于 floor 则提升到 floor.
 pub fn effective_max_tokens(client_value: Option<u32>, _model: &str) -> u32 {
     let v = client_value.unwrap_or(DEFAULT_MAX_TOKENS);
-    if v < MAX_TOKENS_FLOOR { MAX_TOKENS_FLOOR } else { v }
+    if v < MAX_TOKENS_FLOOR {
+        MAX_TOKENS_FLOOR
+    } else {
+        v
+    }
 }
 
 pub fn context_window_for(_model: &str) -> u32 {
@@ -836,15 +841,24 @@ mod tests {
     fn thinking_level_from_model_test() {
         assert_eq!(thinking_level_from_model("kimi-k3"), ThinkingLevel::Max);
         assert_eq!(thinking_level_from_model("kimi-k3-max"), ThinkingLevel::Max);
-        assert_eq!(thinking_level_from_model("kimi-k3-high"), ThinkingLevel::High);
+        assert_eq!(
+            thinking_level_from_model("kimi-k3-high"),
+            ThinkingLevel::High
+        );
         assert_eq!(thinking_level_from_model("kimi-k3-low"), ThinkingLevel::Low);
-        assert_eq!(thinking_level_from_model("kimi-k3-unknown"), ThinkingLevel::Max);
+        assert_eq!(
+            thinking_level_from_model("kimi-k3-unknown"),
+            ThinkingLevel::Max
+        );
     }
 
     #[test]
     fn model_for_thinking_level_test() {
         assert_eq!(model_for_thinking_level(ThinkingLevel::Max), "kimi-k3-max");
-        assert_eq!(model_for_thinking_level(ThinkingLevel::High), "kimi-k3-high");
+        assert_eq!(
+            model_for_thinking_level(ThinkingLevel::High),
+            "kimi-k3-high"
+        );
         assert_eq!(model_for_thinking_level(ThinkingLevel::Low), "kimi-k3-low");
     }
 
@@ -889,7 +903,9 @@ mod tests {
             ThinkingLevel::Max
         );
         // 多消息 → High
-        let msgs: Vec<Value> = (0..6).map(|i| json!({"role": "user", "content": format!("msg {}", i)})).collect();
+        let msgs: Vec<Value> = (0..6)
+            .map(|i| json!({"role": "user", "content": format!("msg {}", i)}))
+            .collect();
         assert_eq!(
             auto_detect_thinking_level(&json!({"messages": msgs})),
             ThinkingLevel::High
@@ -932,13 +948,19 @@ mod tests {
 
     #[test]
     fn max_mode_from_request_variants() {
-        assert_eq!(max_mode_from_request(&json!({"max_mode": true})), Some(true));
+        assert_eq!(
+            max_mode_from_request(&json!({"max_mode": true})),
+            Some(true)
+        );
         assert_eq!(max_mode_from_request(&json!({"maxMode": true})), Some(true));
         assert_eq!(
             max_mode_from_request(&json!({"requestedModel": {"maxMode": true}})),
             Some(true)
         );
-        assert_eq!(max_mode_from_request(&json!({"max_mode": false})), Some(false));
+        assert_eq!(
+            max_mode_from_request(&json!({"max_mode": false})),
+            Some(false)
+        );
         assert_eq!(max_mode_from_request(&json!({})), None);
     }
 
@@ -946,11 +968,27 @@ mod tests {
     fn max_mode_defaults_off() {
         let msgs = vec![json!({"role": "user", "content": "hi"})];
         let body = build_cursor_body_with_tools(
-            &msgs, "kimi-k3", Some(128), None, None, None, None, None, None,
+            &msgs,
+            "kimi-k3",
+            Some(128),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(body["requestedModel"]["maxMode"], false);
         let body_on = build_cursor_body_with_tools(
-            &msgs, "kimi-k3", Some(128), None, None, None, None, None, Some(true),
+            &msgs,
+            "kimi-k3",
+            Some(128),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
         );
         assert_eq!(body_on["requestedModel"]["maxMode"], true);
     }
@@ -997,14 +1035,26 @@ mod tests {
             "stop": ["END", ""],
         });
         let body = build_cursor_body_full(
-            &client, &msgs, "kimi-k3", Some(4096), Some(0.7), None, None, None, None, None,
+            &client,
+            &msgs,
+            "kimi-k3",
+            Some(4096),
+            Some(0.7),
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         let cfg = &body["modelConfig"];
         assert_eq!(cfg["maxTokens"], 4096);
         assert_eq!(cfg["temperature"], 0.7);
         assert_eq!(cfg["topP"], 0.9);
         assert_eq!(cfg["stopSequences"], json!(["END"]));
-        assert!(cfg.get("parallelToolCalls").is_none(), "未传 parallel_tool_calls 不应出现");
+        assert!(
+            cfg.get("parallelToolCalls").is_none(),
+            "未传 parallel_tool_calls 不应出现"
+        );
         // 顶层不得再出现这些字段
         assert!(body.get("maxTokens").is_none());
         assert!(body.get("temperature").is_none());
@@ -1016,23 +1066,52 @@ mod tests {
         let msgs = vec![json!({"role": "user", "content": "hi"})];
         // 客户端 max_tokens=16 → 提升到 floor 1024
         let body = build_cursor_body_full(
-            &json!({"max_tokens": 16}), &msgs, "kimi-k3", Some(16), None, None, None, None, None, None,
+            &json!({"max_tokens": 16}),
+            &msgs,
+            "kimi-k3",
+            Some(16),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(body["modelConfig"]["maxTokens"], MAX_TOKENS_FLOOR);
         // 无 max_tokens → 默认预算
         let body = build_cursor_body_full(
-            &json!({}), &msgs, "kimi-k3", None, None, None, None, None, None, None,
+            &json!({}),
+            &msgs,
+            "kimi-k3",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(body["modelConfig"]["maxTokens"], DEFAULT_MAX_TOKENS);
         assert!(body["modelConfig"].get("temperature").is_none());
         // output_budget_retry 降档: 调用方显式 max_tokens 覆盖客户端 body 里的值
         let body = build_cursor_body_full(
-            &json!({"max_tokens": 131072}), &msgs, "kimi-k3", Some(65536), None, None, None, None, None, None,
+            &json!({"max_tokens": 131072}),
+            &msgs,
+            "kimi-k3",
+            Some(65536),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(body["modelConfig"]["maxTokens"], 65536);
         // Responses 形态 max_output_tokens
-        assert_eq!(model_config_from_request(&json!({"max_output_tokens": 2048}))
-            .unwrap()["maxTokens"], 2048);
+        assert_eq!(
+            model_config_from_request(&json!({"max_output_tokens": 2048})).unwrap()["maxTokens"],
+            2048
+        );
         assert!(model_config_from_request(&json!({})).is_none());
     }
 
@@ -1044,8 +1123,17 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         let msgs = vec![json!({"role": "user", "content": "hi"})];
-        let body =
-            build_cursor_body_with_tools(&msgs, "kimi-k3", None, None, None, None, None, Some(&a), None);
+        let body = build_cursor_body_with_tools(
+            &msgs,
+            "kimi-k3",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&a),
+            None,
+        );
         assert_eq!(body["conversationId"], a);
     }
 

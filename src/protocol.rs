@@ -50,15 +50,24 @@ pub fn decode_reasoning(encrypted: &str) -> Option<(String, Option<String>)> {
         .decode(padded.as_bytes())
         .ok()?;
     let v: Value = serde_json::from_slice(&raw).ok()?;
-    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let sig = v.get("signature").and_then(|x| x.as_str()).map(String::from);
+    let text = v
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let sig = v
+        .get("signature")
+        .and_then(|x| x.as_str())
+        .map(String::from);
     Some((text, sig))
 }
 
 /// 判断请求是否要加密 reasoning (Responses API `include` 字段).
 /// 与 Python 版 `_wants_encrypted_reasoning` 等价.
 pub fn wants_encrypted_reasoning(request: &Value) -> bool {
-    let Some(inc) = request.get("include") else { return false };
+    let Some(inc) = request.get("include") else {
+        return false;
+    };
     let items: Vec<&str> = match inc {
         Value::String(s) => vec![s.as_str()],
         Value::Array(a) => a.iter().filter_map(|v| v.as_str()).collect(),
@@ -301,7 +310,8 @@ pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
                         let mut tc = json!({"toolCallId": id, "toolName": name});
                         match f.get("arguments") {
                             Some(Value::Object(o)) => tc["args"] = Value::Object(o.clone()),
-                            Some(Value::String(s)) => match serde_json::from_str::<Value>(s.trim()) {
+                            Some(Value::String(s)) => match serde_json::from_str::<Value>(s.trim())
+                            {
                                 Ok(Value::Object(o)) => tc["args"] = Value::Object(o),
                                 _ => tc["rawToolCallArgs"] = json!(s),
                             },
@@ -513,10 +523,7 @@ pub fn conversation_id_from(body: &Value, headers: Option<&axum::http::HeaderMap
         if let Some(conv) = body.get("conversation") {
             value = match conv {
                 Value::String(s) => Some(s.clone()),
-                Value::Object(o) => o
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
+                Value::Object(o) => o.get("id").and_then(|v| v.as_str()).map(String::from),
                 _ => None,
             };
         }
@@ -524,7 +531,12 @@ pub fn conversation_id_from(body: &Value, headers: Option<&axum::http::HeaderMap
     // 2. body.metadata.{conversation_id, conversationId, session_id, sessionId}
     if value.is_none() {
         if let Some(meta) = body.get("metadata").and_then(|v| v.as_object()) {
-            for k in ["conversation_id", "conversationId", "session_id", "sessionId"] {
+            for k in [
+                "conversation_id",
+                "conversationId",
+                "session_id",
+                "sessionId",
+            ] {
                 if let Some(v) = meta.get(k).and_then(|v| v.as_str()) {
                     value = Some(v.to_string());
                     break;
@@ -627,7 +639,11 @@ pub fn conversation_prefix(body: &Value) -> String {
             }
         }
     }
-    chunks.into_iter().filter(|s| s.len() > 4).collect::<Vec<_>>().join("\n")
+    chunks
+        .into_iter()
+        .filter(|s| s.len() > 4)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Anthropic Messages body → OpenAI Chat 形态 (messages + tools + max_tokens).
@@ -1043,10 +1059,9 @@ pub fn anthropic_message(
     let mut content: Vec<Value> = Vec::new();
     // P0: Anthropic 规范要求 thinking block 在 text 之前, 且必须携带 signature
     if !out.thinking.is_empty() {
-        let sig = out
-            .thinking_signature
-            .clone()
-            .unwrap_or_else(|| format!("{}{}", PROXY_SIGNATURE_MARK, uuid::Uuid::new_v4().simple()));
+        let sig = out.thinking_signature.clone().unwrap_or_else(|| {
+            format!("{}{}", PROXY_SIGNATURE_MARK, uuid::Uuid::new_v4().simple())
+        });
         content.push(json!({
             "type": "thinking",
             "thinking": out.thinking,
@@ -1111,8 +1126,10 @@ pub fn responses_message_with_request(
             "summary": [{"type": "summary_text", "text": out.thinking}],
         });
         if wants_encrypted {
-            item["encrypted_content"] =
-                json!(encode_reasoning(&out.thinking, out.thinking_signature.as_deref()));
+            item["encrypted_content"] = json!(encode_reasoning(
+                &out.thinking,
+                out.thinking_signature.as_deref()
+            ));
         }
         output.push(item);
     }
@@ -1253,15 +1270,24 @@ mod tests {
         assert_eq!(msgs[2]["tool_call_id"], "toolu_1");
         let tools = cursor_tools_from_client(chat.get("tools"));
         assert_eq!(tools[0]["name"], "bash");
-        assert_eq!(tools[0]["parameters"]["jsonSchema"]["required"][0], "command");
+        assert_eq!(
+            tools[0]["parameters"]["jsonSchema"]["required"][0],
+            "command"
+        );
         let cursor_msgs = openai_messages_to_cursor(msgs);
         assert_eq!(cursor_msgs[1]["role"], "INFERENCE_MESSAGE_ROLE_ASSISTANT");
         assert_eq!(cursor_msgs[1]["toolCalls"][0]["toolCallId"], "toolu_1");
         assert_eq!(cursor_msgs[1]["toolCalls"][0]["toolName"], "bash");
         assert_eq!(cursor_msgs[1]["toolCalls"][0]["args"]["command"], "ls");
         assert_eq!(cursor_msgs[2]["role"], "INFERENCE_MESSAGE_ROLE_TOOL");
-        assert_eq!(cursor_msgs[2]["toolContent"]["parts"][0]["toolCallId"], "toolu_1");
-        assert_eq!(cursor_msgs[2]["toolContent"]["parts"][0]["toolName"], "bash");
+        assert_eq!(
+            cursor_msgs[2]["toolContent"]["parts"][0]["toolCallId"],
+            "toolu_1"
+        );
+        assert_eq!(
+            cursor_msgs[2]["toolContent"]["parts"][0]["toolName"],
+            "bash"
+        );
         assert_eq!(cursor_msgs[2]["toolContent"]["parts"][0]["result"], "a.txt");
     }
 
@@ -1328,7 +1354,11 @@ mod tests {
         assert_eq!(out, expected.as_array().unwrap().clone());
         // 旧的错误形状必须彻底消失
         let s = serde_json::to_string(&out).unwrap();
-        assert!(!s.contains("functionResult") && !s.contains("functionCall") && !s.contains("\"system\":true"));
+        assert!(
+            !s.contains("functionResult")
+                && !s.contains("functionCall")
+                && !s.contains("\"system\":true")
+        );
     }
 
     #[test]
@@ -1337,7 +1367,10 @@ mod tests {
             {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
         ]})];
         let out = openai_messages_to_cursor(&msgs);
-        assert!(out[0].get("text").is_none(), "Python 版: 有 toolCalls 且无文本时不带 text 字段");
+        assert!(
+            out[0].get("text").is_none(),
+            "Python 版: 有 toolCalls 且无文本时不带 text 字段"
+        );
         assert_eq!(out[0]["toolCalls"][0]["args"], json!({}));
         // 纯文本 assistant 消息保留 text (即使为空串)
         let out2 = openai_messages_to_cursor(&[json!({"role": "assistant", "content": ""})]);
@@ -1406,7 +1439,10 @@ mod tests {
             }
         }]);
         let tools = cursor_tools_from_client(Some(&anthropic));
-        assert_eq!(tools[0]["parameters"]["jsonSchema"]["required"][0], "command");
+        assert_eq!(
+            tools[0]["parameters"]["jsonSchema"]["required"][0],
+            "command"
+        );
     }
 
     #[test]
@@ -1415,7 +1451,10 @@ mod tests {
         assert_eq!(normalize_tool_choice_for_kimi(&openai), json!("required"));
         let claude = json!({"type": "tool", "name": "Bash"});
         assert_eq!(normalize_tool_choice_for_kimi(&claude), json!("required"));
-        assert_eq!(normalize_tool_choice_for_kimi(&json!("auto")), json!("auto"));
+        assert_eq!(
+            normalize_tool_choice_for_kimi(&json!("auto")),
+            json!("auto")
+        );
         let hint = tool_choice_hint(Some(&openai)).unwrap();
         assert!(hint.contains("`Read`"));
         let chat = anthropic_to_openai_chat(&json!({

@@ -448,10 +448,7 @@ pub fn plan_allows_model(
     model: &str,
 ) -> Result<(), String> {
     if !prefixes.is_empty() && !prefixes.iter().any(|p| model.starts_with(p.as_str())) {
-        return Err(format!(
-            "model '{}' not in prefixes {:?}",
-            model, prefixes
-        ));
+        return Err(format!("model '{}' not in prefixes {:?}", model, prefixes));
     }
     if !registry().allowed_by_groups(groups, model) {
         return Err(deny_reason(groups, model));
@@ -519,11 +516,23 @@ mod tests {
 
     #[test]
     fn strip_suffix_chains() {
-        assert_eq!(strip_variant_suffix("claude-opus-5-thinking-max-fast"), "claude-opus-5-thinking-max");
-        assert_eq!(strip_variant_suffix("claude-opus-5-thinking-max"), "claude-opus-5-thinking");
-        assert_eq!(strip_variant_suffix("claude-opus-5-thinking"), "claude-opus-5");
+        assert_eq!(
+            strip_variant_suffix("claude-opus-5-thinking-max-fast"),
+            "claude-opus-5-thinking-max"
+        );
+        assert_eq!(
+            strip_variant_suffix("claude-opus-5-thinking-max"),
+            "claude-opus-5-thinking"
+        );
+        assert_eq!(
+            strip_variant_suffix("claude-opus-5-thinking"),
+            "claude-opus-5"
+        );
         assert_eq!(strip_variant_suffix("claude-opus-5"), "claude-opus-5");
-        assert_eq!(strip_variant_suffix("gpt-5.6-sol-none-fast"), "gpt-5.6-sol-none");
+        assert_eq!(
+            strip_variant_suffix("gpt-5.6-sol-none-fast"),
+            "gpt-5.6-sol-none"
+        );
         assert_eq!(strip_variant_suffix("kimi-k3"), "kimi-k3");
     }
 
@@ -533,9 +542,18 @@ mod tests {
             ModelRegistry::family_base("claude-opus-5-thinking-max-fast"),
             "claude-opus-5"
         );
-        assert_eq!(ModelRegistry::family_base("gpt-5.4-mini-none"), "gpt-5.4-mini");
-        assert_eq!(ModelRegistry::family_base("gemini-3-flash"), "gemini-3-flash");
-        assert_eq!(ModelRegistry::family_base("kimi-k2.7-code"), "kimi-k2.7-code");
+        assert_eq!(
+            ModelRegistry::family_base("gpt-5.4-mini-none"),
+            "gpt-5.4-mini"
+        );
+        assert_eq!(
+            ModelRegistry::family_base("gemini-3-flash"),
+            "gemini-3-flash"
+        );
+        assert_eq!(
+            ModelRegistry::family_base("kimi-k2.7-code"),
+            "kimi-k2.7-code"
+        );
     }
 
     #[test]
@@ -582,7 +600,10 @@ mod tests {
         );
         // 基名本身在上游名单 → 不重写
         let b = json!({"model":"gemini-3-flash","messages":[]});
-        assert_eq!(ModelRegistry::resolve_smart_model("gemini-3-flash", &b, &upstream), None);
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("gemini-3-flash", &b, &upstream),
+            None
+        );
         // 客户端已传变体全名 → 不重写
         let b = json!({"model":"claude-opus-5-high-fast","messages":[]});
         assert_eq!(
@@ -591,7 +612,10 @@ mod tests {
         );
         // 无档位变体的家族: 基名在上游名单里 → 不重写 (上游自己处理)
         let b = json!({"model":"composer-2.5","messages":[]});
-        assert_eq!(ModelRegistry::resolve_smart_model("composer-2.5", &b, &upstream), None);
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("composer-2.5", &b, &upstream),
+            None
+        );
         // 基名不在但 -fast 在 → 路由到 -fast
         let b = json!({"model":"foo-9","messages":[]});
         let up2: Vec<String> = vec!["foo-9-fast".to_string()];
@@ -601,10 +625,16 @@ mod tests {
         );
         // 上游名单里完全没有的家族 → 不路由 (原样透传, 让上游报错)
         let b = json!({"model":"no-such-family","thinking_level":"low","messages":[]});
-        assert_eq!(ModelRegistry::resolve_smart_model("no-such-family", &b, &upstream), None);
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("no-such-family", &b, &upstream),
+            None
+        );
         // 上游名单为空 → 不路由 (未拉过 AvailableModels 时行为同旧版)
         let b = json!({"model":"claude-opus-5","thinking_level":"low","messages":[]});
-        assert_eq!(ModelRegistry::resolve_smart_model("claude-opus-5", &b, &[]), None);
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5", &b, &[]),
+            None
+        );
     }
 
     #[test]
@@ -623,7 +653,15 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         let vis = reg.visible_models(&upstream, &[]);
-        assert_eq!(vis, vec!["claude-opus-5", "gpt-5.4", "gemini-3-flash", "kimi-k2.7-code"]);
+        assert_eq!(
+            vis,
+            vec![
+                "claude-opus-5",
+                "gpt-5.4",
+                "gemini-3-flash",
+                "kimi-k2.7-code"
+            ]
+        );
         // 注册表手动条目 (enabled) 即使不在上游也列出
         reg.upsert_model(ModelEntry {
             model: "my-custom".into(),

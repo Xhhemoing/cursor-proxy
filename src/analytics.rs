@@ -17,6 +17,10 @@
 //!   `usd_per_online_hour` (面值 ÷ 用户在线小时, 不管几路) 保留作对照; 两者之比 = 平均并发.
 //! - **忙时 (busy)**: Σ latency, 即上游真正在算的时间; lane_hours ≥ 忙时 (槽在等人时也算在线).
 //!
+//! - **速度/延迟**: `ttft_ms` 首字延迟 (流式: 首个内容帧; 老行/非流式 NULL), `output_tps` =
+//!   输出 token ÷ (总延迟 − 首字延迟). 每维度给 p50/p90 (TTFT) 与 p50/p10 (tok/s) —— 用户体验用
+//!   分位数看, 不用均值 (长尾请求会把均值拉飞).
+//!
 //! 请求开始时间 = `ts_ms - latency_ms` (账本 ts_ms 记的是请求结束落账的时刻).
 
 use std::collections::BTreeMap;
@@ -40,6 +44,8 @@ pub struct Req {
     pub status: u16,
     /// 官方面值 (美元)
     pub face_usd: f64,
+    /// 首字延迟 (ms); 老行 / 非流式 / 失败 = None
+    pub ttft_ms: Option<i64>,
 }
 
 impl Req {
@@ -52,6 +58,25 @@ impl Req {
     pub fn latency_ms(&self) -> i64 {
         (self.end_ms - self.start_ms).max(0)
     }
+    /// 输出速度 tok/s (只对成功且有输出的请求有意义). 有 ttft 就扣掉等待时间.
+    pub fn output_tps(&self) -> Option<f64> {
+        if !self.ok() || self.output == 0 {
+            return None;
+        }
+        let gen_ms = self.latency_ms() - self.ttft_ms.unwrap_or(0).max(0);
+        (gen_ms > 0).then(|| self.output as f64 / (gen_ms as f64 / 1000.0))
+    }
+}
+
+/// 分位数 (线性最近秩, 输入无需有序). 空 → None
+pub fn percentile(v: &[f64], p: f64) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s: Vec<f64> = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((s.len() as f64 - 1.0) * p.clamp(0.0, 1.0)).round() as usize;
+    Some(s[idx.min(s.len() - 1)])
 }
 
 /// 一次「在线使用」
@@ -184,7 +209,19 @@ pub struct Agg {
     pub users: u64,
     pub first_ms: Option<i64>,
     pub last_ms: Option<i64>,
+    /// 首字延迟样本 (ms, 成功且有 ttft 的请求)
+    #[serde(skip)]
+    pub ttft_samples: Vec<f64>,
+    /// 输出速度样本 (tok/s, 成功且 output ≥ 50 的请求 — 太短的答复算不出稳定速度)
+    #[serde(skip)]
+    pub tps_samples: Vec<f64>,
+    /// 端到端延迟样本 (ms, 成功请求)
+    #[serde(skip)]
+    pub latency_samples: Vec<f64>,
 }
+
+/// 速度样本最少输出 token 数
+pub const TPS_MIN_OUTPUT: u64 = 50;
 
 impl Agg {
     pub fn add_req(&mut self, r: &Req) {
@@ -200,6 +237,31 @@ impl Agg {
         self.busy_hours += r.latency_ms() as f64 / 3_600_000.0;
         self.first_ms = Some(self.first_ms.map_or(r.start_ms, |f| f.min(r.start_ms)));
         self.last_ms = Some(self.last_ms.map_or(r.end_ms, |l| l.max(r.end_ms)));
+        if r.ok() {
+            self.latency_samples.push(r.latency_ms() as f64);
+            if let Some(t) = r.ttft_ms.filter(|t| *t >= 0) {
+                self.ttft_samples.push(t as f64);
+            }
+            if r.output >= TPS_MIN_OUTPUT {
+                if let Some(tps) = r.output_tps() {
+                    self.tps_samples.push(tps);
+                }
+            }
+        }
+    }
+    /// 速度/延迟摘要
+    pub fn speed_json(&self) -> Value {
+        json!({
+            "ttft_p50_ms": percentile(&self.ttft_samples, 0.5),
+            "ttft_p90_ms": percentile(&self.ttft_samples, 0.9),
+            "ttft_samples": self.ttft_samples.len(),
+            "tps_p50": percentile(&self.tps_samples, 0.5),
+            "tps_p10": percentile(&self.tps_samples, 0.1),
+            "tps_p90": percentile(&self.tps_samples, 0.9),
+            "tps_samples": self.tps_samples.len(),
+            "latency_p50_ms": percentile(&self.latency_samples, 0.5),
+            "latency_p90_ms": percentile(&self.latency_samples, 0.9),
+        })
     }
     pub fn usd_per_online_hour(&self) -> Option<f64> {
         (self.online_hours > 1e-6).then(|| self.face_usd / self.online_hours)
@@ -247,6 +309,7 @@ impl Agg {
             "rmb_per_online_hour": self.usd_per_online_hour().map(|v| v * rmb_per_usd),
             "first_ms": self.first_ms,
             "last_ms": self.last_ms,
+            "speed": self.speed_json(),
         })
     }
 }
@@ -372,6 +435,7 @@ pub fn req_from_row(
         cache_write,
         status,
         face_usd,
+        ttft_ms: None,
     }
 }
 
@@ -396,7 +460,7 @@ pub fn load_reqs(
 ) -> rusqlite::Result<Vec<Req>> {
     let mut sql = String::from(
         "SELECT ts_ms, latency_ms, key_name, model, input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens, status, input_incl_cache
+                cache_read_tokens, cache_write_tokens, status, input_incl_cache, ttft_ms
          FROM billing_records WHERE 1=1",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -423,7 +487,8 @@ pub fn load_reqs(
         let cr = r.get::<_, i64>(6)?.max(0) as u64;
         let cw = r.get::<_, i64>(7)?.max(0) as u64;
         let incl: i64 = r.get(9)?;
-        Ok(req_from_row(
+        let ttft: Option<i64> = r.get(10)?;
+        let mut q = req_from_row(
             r.get(0)?,
             r.get(1)?,
             r.get(2)?,
@@ -433,7 +498,9 @@ pub fn load_reqs(
             cr,
             cw,
             r.get::<_, i64>(8)?.clamp(0, 999) as u16,
-        ))
+        );
+        q.ttft_ms = ttft;
+        Ok(q)
     })?;
     let mut v: Vec<Req> = rows.flatten().collect();
     v.sort_by_key(|r| (r.start_ms, r.end_ms));
@@ -456,7 +523,38 @@ mod tests {
             cache_write: 0,
             status: 200,
             face_usd: face,
+            ttft_ms: None,
         }
+    }
+
+    #[test]
+    fn speed_percentiles_and_tps_exclude_ttft() {
+        assert_eq!(percentile(&[], 0.5), None);
+        assert_eq!(percentile(&[5.0, 1.0, 3.0], 0.5), Some(3.0));
+        assert_eq!(percentile(&[5.0, 1.0, 3.0], 0.0), Some(1.0));
+        assert_eq!(percentile(&[5.0, 1.0, 3.0], 1.0), Some(5.0));
+        // 10s 请求, 200 输出, ttft 2s → 25 tok/s; 无 ttft → 20 tok/s
+        let mut q = r("k", "m", 0, 10, 1.0);
+        q.output = 200;
+        assert!((q.output_tps().unwrap() - 20.0).abs() < 1e-9);
+        q.ttft_ms = Some(2000);
+        assert!((q.output_tps().unwrap() - 25.0).abs() < 1e-9);
+        // 失败 / 无输出 / 输出太短 → 不进样本
+        let mut bad = q.clone();
+        bad.status = 502;
+        assert!(bad.output_tps().is_none());
+        let mut short = q.clone();
+        short.output = 10;
+        let agg = aggregate(
+            &[q.clone(), bad, short],
+            |x| vec![x.model.clone()],
+            Some(600.0),
+        );
+        let sp = agg["m"].speed_json();
+        assert_eq!(sp["tps_samples"], 1);
+        assert_eq!(sp["ttft_samples"], 2);
+        assert!((sp["tps_p50"].as_f64().unwrap() - 25.0).abs() < 1e-9);
+        assert_eq!(sp["ttft_p50_ms"], 2000.0);
     }
 
     #[test]

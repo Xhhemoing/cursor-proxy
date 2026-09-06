@@ -103,7 +103,12 @@ pub fn kimi_vendor_param_normalize(body: &mut Value) {
 /// 是否启用严格 vendor 校验 (默认关闭). `KVV_STRICT=1|true|yes` 开启.
 pub fn kvv_strict_enabled() -> bool {
     std::env::var("KVV_STRICT")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -515,7 +520,11 @@ mod tests {
         for t in [0.0, 0.2, 0.7, 1.0, 1.5, 2.0] {
             let mut b = json!({"temperature": t, "top_p": 0.9, "messages": []});
             kimi_vendor_param_normalize(&mut b);
-            assert_eq!(b["temperature"].as_f64(), Some(t), "temperature {t} 必须透传");
+            assert_eq!(
+                b["temperature"].as_f64(),
+                Some(t),
+                "temperature {t} 必须透传"
+            );
             assert_eq!(b["top_p"].as_f64(), Some(0.9));
         }
         // 旧严格校验对同样输入是 400 —— 仅在 KVV_STRICT 下保留

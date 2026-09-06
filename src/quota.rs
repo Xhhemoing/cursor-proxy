@@ -258,7 +258,10 @@ impl CursorClient {
     ) -> Result<Value, CursorError> {
         let mut req = hyper::Request::builder()
             .method("POST")
-            .uri(format!("{}/aiserver.v1.AiService/AvailableModels", self.backend()))
+            .uri(format!(
+                "{}/aiserver.v1.AiService/AvailableModels",
+                self.backend()
+            ))
             .header("content-type", "application/json")
             .header("connect-protocol-version", "1")
             .header("connect-timeout-ms", "15000")
@@ -268,7 +271,9 @@ impl CursorClient {
             req = req.header(k, v);
         }
         let req = req
-            .body(http_body_util::Full::new(hyper::body::Bytes::from_static(b"{}")))
+            .body(http_body_util::Full::new(hyper::body::Bytes::from_static(
+                b"{}",
+            )))
             .map_err(|e| CursorError::Network(e.to_string()))?;
         let resp = self
             .request(req)
@@ -287,14 +292,17 @@ impl CursorClient {
             return Ok(v);
         }
         if body_bytes.len() >= 5 {
-            let n = u32::from_be_bytes([body_bytes[1], body_bytes[2], body_bytes[3], body_bytes[4]]) as usize;
+            let n = u32::from_be_bytes([body_bytes[1], body_bytes[2], body_bytes[3], body_bytes[4]])
+                as usize;
             if body_bytes.len() >= 5 + n {
                 if let Ok(v) = serde_json::from_slice::<Value>(&body_bytes[5..5 + n]) {
                     return Ok(v);
                 }
             }
         }
-        Err(CursorError::Decode("available models response not json".into()))
+        Err(CursorError::Decode(
+            "available models response not json".into(),
+        ))
     }
 
     pub async fn dashboard_call(

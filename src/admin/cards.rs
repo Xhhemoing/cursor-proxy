@@ -59,7 +59,10 @@ fn plan_warnings(p: &CardPlan, allowed_count: usize) -> Vec<String> {
     let snap = reg.snapshot();
     for g in &p.model_groups {
         if !snap.groups.iter().any(|x| &x.id == g) {
-            w.push(format!("模型组 '{}' 不存在 (可能已删除), 该条件永不放行", g));
+            w.push(format!(
+                "模型组 '{}' 不存在 (可能已删除), 该条件永不放行",
+                g
+            ));
         }
     }
     let candidates = crate::models::candidate_models(&[]);

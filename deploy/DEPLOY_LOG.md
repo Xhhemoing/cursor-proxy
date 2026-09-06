@@ -63,3 +63,10 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
   峰值并发 3, 均并发 1.2–1.5; day50 满载上限 $1313/卡
 - 上游名单落盘实测: 点一次「获取可用模型」(212) → restart → /v1/models 仍 37 家族 (之前重启后只剩 1)
 - 隔离 E2E scripts/e2e-analytics.sh 20/20 (加假号+黑洞 9911 才能验新行 input_incl_cache=0); cargo test 155/155
+
+## 2026-09-06 03:00 UTC — 本机 8800 速度/延迟指标 (TTFT + tok/s)
+- 备份 *.bak-speed-20260906-030031; md5 d17782f4dee3a1beafe7c9b0e2fa769a == target/release
+- 账本加列 ttft_ms (流式: 首个内容帧到达; 老行 NULL); BillingRecord.output_tps = out ÷ (latency − ttft)
+- analytics 每维度 speed{ttft_p50/p90, tps_p50/p10/p90, latency_p50/p90, 样本数}; presence today_speed; sessions 每段 ttft/tps
+- 面板: 消耗分析各表 + 在线状态 + 时段明细 加「首字 p50/p90」「tok/s p50/p10」(<15 tok/s 标黄); 请求日志延迟列附首字/tok/s
+- 隔离 E2E 22/22; cargo test 157/157. 换后真实流量 ttft 落库待流量到达后核对 (/tmp/chk_ttft.sh)

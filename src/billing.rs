@@ -163,6 +163,8 @@ pub struct BillingRecord {
     pub stream: bool,
     pub status: u16,
     pub latency_ms: u64,
+    /// 首个内容帧到达耗时 (ms). 流式 = 客户端看到第一个字的等待; 非流式 = 整段延迟; 失败/无内容 = None
+    pub ttft_ms: Option<u64>,
     pub client_ip: String,
     pub tags: Vec<String>,
 }
@@ -191,11 +193,29 @@ impl BillingRecord {
             "cost_nano": self.cost_nano,
             "priced": self.priced,
             "latency_ms": self.latency_ms,
+            "ttft_ms": self.ttft_ms,
+            "output_tps": self.output_tps(),
             "status": self.status,
             "ok": self.status == 200,
             "stream": self.stream,
             "client_ip": self.client_ip,
         })
+    }
+
+    /// 输出速度 tok/s: 输出 token ÷ (总延迟 − 首字延迟). 无输出或时长为 0 → None
+    pub fn output_tps(&self) -> Option<f64> {
+        let gen_ms = self.latency_ms.saturating_sub(self.ttft_ms.unwrap_or(0));
+        if self.output_tokens == 0 || gen_ms == 0 {
+            None
+        } else {
+            Some(self.output_tokens as f64 / (gen_ms as f64 / 1000.0))
+        }
+    }
+
+    /// 补首字延迟 (build 之后链式调用)
+    pub fn with_ttft(mut self, ttft_ms: Option<u64>) -> Self {
+        self.ttft_ms = ttft_ms;
+        self
     }
 
     /// 由上下文 + 结果构造一条账单, 金额在此处一次算定
@@ -235,6 +255,7 @@ impl BillingRecord {
             stream,
             status,
             latency_ms,
+            ttft_ms: None,
             client_ip: client_ip.to_string(),
             tags: ctx.tags.clone(),
         }
@@ -431,6 +452,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 2026-09-05 之前 input_tokens 记的是 Cursor promptTokens (含 cacheRead+cacheWrite);
         // 之后 translate::extract_usage 已扣缓存. 老行默认 1 (含), 新行写 0 → 分析端按此归一化.
         ("input_incl_cache", "ALTER TABLE billing_records ADD COLUMN input_incl_cache INTEGER NOT NULL DEFAULT 1"),
+        // 首字延迟 (ms), 老行 NULL
+        ("ttft_ms", "ALTER TABLE billing_records ADD COLUMN ttft_ms INTEGER"),
     ] {
         if !cols.iter().any(|c| c == name) {
             conn.execute_batch(ddl)?;
@@ -528,8 +551,8 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 model, account, input_tokens, output_tokens, input_price_micro, output_price_micro,
                 priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags,
                 cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro,
-                input_incl_cache
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0)",
+                input_incl_cache, ttft_ms
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26)",
         )?;
         let mut ins_tag = tx.prepare_cached(
             "INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)",
@@ -562,6 +585,7 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 r.cache_write_tokens as i64,
                 r.cache_read_price_micro as i64,
                 r.cache_write_price_micro as i64,
+                r.ttft_ms.map(|v| v as i64),
             ])?;
             if n == 0 {
                 dups += 1;
@@ -757,6 +781,33 @@ mod tests {
     }
 
     #[test]
+    fn output_tps_excludes_ttft() {
+        let ctx = BillingCtx::from_key(None, "kimi-k3");
+        let u = Usage {
+            input: 1,
+            output: 200,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        let r = BillingRecord::build(&ctx, "x", "kimi-k3", "a", u, true, 200, 5000, "");
+        assert!((r.output_tps().unwrap() - 40.0).abs() < 1e-9); // 无 ttft: 200/5s
+        let r = r.with_ttft(Some(1000));
+        assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9); // 200/(5-1)s
+        let r0 = BillingRecord::build(
+            &ctx,
+            "y",
+            "kimi-k3",
+            "a",
+            Usage::default(),
+            true,
+            200,
+            5000,
+            "",
+        );
+        assert!(r0.output_tps().is_none());
+    }
+
+    #[test]
     fn migrate_adds_cache_columns_to_old_db() {
         let db = tmp_db();
         {
@@ -798,6 +849,25 @@ mod tests {
             5,
             "",
         ));
+        ledger.record(
+            BillingRecord::build(
+                &ctx,
+                "ttft-row",
+                "kimi-k3",
+                "acc",
+                Usage {
+                    input: 3,
+                    output: 200,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
+                true,
+                200,
+                5000,
+                "",
+            )
+            .with_ttft(Some(1000)),
+        );
         assert!(ledger.flush(Duration::from_secs(5)));
         let conn = ledger.reader().unwrap();
         assert_eq!(
@@ -806,6 +876,20 @@ mod tests {
                 "SELECT input_incl_cache FROM billing_records WHERE req_id='new-row'"
             ),
             0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT ttft_ms FROM billing_records WHERE req_id='ttft-row'"
+            ),
+            1000
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT ttft_ms IS NULL FROM billing_records WHERE req_id='new-row'"
+            ),
+            1
         );
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }

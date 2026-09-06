@@ -676,7 +676,7 @@
             <div class="ph"><h3>在线时段 <span class="mono muted" id="an-sess-key"></span></h3><button type="button" class="ghost" id="an-sess-close">返回</button></div>
             <div class="table-scroll">
               <table class="nowrap">
-                <thead><tr><th>开始</th><th>结束</th><th class="num">时长</th><th class="num">并发</th><th class="num">槽·时</th><th class="num">请求</th><th class="num">面值 $</th><th class="num">$/槽·时</th><th class="num">$/h</th><th class="num">忙时占比</th><th>模型</th></tr></thead>
+                <thead><tr><th>开始</th><th>结束</th><th class="num">时长</th><th class="num">并发</th><th class="num">槽·时</th><th class="num">请求</th><th class="num">面值 $</th><th class="num">$/槽·时</th><th class="num">$/h</th><th class="num">忙时占比</th><th class="num">首字</th><th class="num">tok/s</th><th>模型</th></tr></thead>
                 <tbody id="an-sess-body"></tbody>
               </table>
             </div>
@@ -2104,7 +2104,7 @@
           '<td>' + who + '</td><td class="mono">' + esc(l.model || '') + '</td><td class="mono">' + esc(l.account || '') + '</td>' +
           '<td class="mono" title="in ' + (l.input_tokens || 0) + ' · out ' + (l.output_tokens || 0) + ' · cr ' + (l.cache_read_tokens || 0) + ' · cw ' + (l.cache_write_tokens || 0) + '">' + fmtN(l.total_tokens) + '</td>' +
           '<td class="mono">' + (l.priced === false ? '<span class="warn" title="不在价格表, 按兜底价估算">~' + esc(String(l.cost || '')) + '</span>' : esc(String(l.cost || ''))) + '</td>' +
-          '<td class="mono ' + (lat >= 60000 ? 'bad' : lat >= 20000 ? 'warn' : '') + '">' + fmtLat(lat) + '</td><td class="mono muted">' + esc(l.client_ip || '') + '</td><td></td>';
+          '<td class="mono ' + (lat >= 60000 ? 'bad' : lat >= 20000 ? 'warn' : '') + '" title="' + (l.ttft_ms != null ? '首字 ' + (l.ttft_ms / 1000).toFixed(1) + 's · ' : '') + (l.output_tps != null ? Number(l.output_tps).toFixed(0) + ' tok/s' : '') + '">' + fmtLat(lat) + (l.ttft_ms != null ? ' <span class="muted" style="font-size:10px">首字' + (l.ttft_ms / 1000).toFixed(1) + 's</span>' : '') + (l.output_tps != null && l.output_tokens >= 50 ? ' <span class="muted" style="font-size:10px">' + Number(l.output_tps).toFixed(0) + 't/s</span>' : '') + '</td><td class="mono muted">' + esc(l.client_ip || '') + '</td><td></td>';
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button', title: '详情' }, '…')).addEventListener('click', () => {
           document.getElementById('lg-detail-body').textContent = JSON.stringify(l, null, 2);
@@ -2334,6 +2334,14 @@
       document.getElementById('an-sessions').style.display = 'none';
       document.getElementById('an-tab-table').style.display = '';
     });
+    // 速度/延迟 单元格: TTFT p50 / tok/s p50 (p10). 样本不足显示 –
+    function speedCells(sp) {
+      sp = sp || {};
+      const ttft = sp.ttft_p50_ms == null ? '–' : (sp.ttft_p50_ms / 1000).toFixed(1) + 's' + (sp.ttft_p90_ms == null ? '' : ' <span class="muted">/' + (sp.ttft_p90_ms / 1000).toFixed(0) + '</span>');
+      const tps = sp.tps_p50 == null ? '–' : Number(sp.tps_p50).toFixed(0) + (sp.tps_p10 == null ? '' : ' <span class="muted">/' + Number(sp.tps_p10).toFixed(0) + '</span>');
+      const slow = sp.tps_p50 != null && sp.tps_p50 < 15 ? ' warn' : '';
+      return '<td class="mono" title="首字延迟 p50 / p90 (秒), 样本 ' + (sp.ttft_samples || 0) + '">' + ttft + '</td><td class="mono' + slow + '" title="输出速度 tok/s p50 / p10, 只算输出≥50 tok 的成功请求, 样本 ' + (sp.tps_samples || 0) + '">' + tps + '</td>';
+    }
     function anHead(cols) {
       document.getElementById('an-head').innerHTML = '<tr>' + cols.map((c) => '<th' + (c[1] ? ' class="' + c[1] + '"' : '') + '>' + c[0] + '</th>').join('') + '</tr>';
     }
@@ -2354,13 +2362,13 @@
       document.getElementById('an-rows').textContent = fmtN(d.rows_scanned);
       document.getElementById('an-trunc').textContent = d.truncated ? '（已截断, 请缩短时间窗）' : '';
     }
-    const AGG_COLS = [['请求', 'num'], ['错误', 'num'], ['用户', 'num'], ['面值 $', 'num'], ['成本 ¥', 'num'], ['$/请求', 'num'], ['槽·时', 'num'], ['峰值/均并发', 'num'], ['在线', 'num'], ['忙时', 'num'], ['时段', 'num'], ['$/槽·时', 'num'], ['¥/槽·时', 'num'], ['$/在线h', 'num'], ['tokens in/out/cr', 'num']];
+    const AGG_COLS = [['请求', 'num'], ['错误', 'num'], ['用户', 'num'], ['面值 $', 'num'], ['成本 ¥', 'num'], ['$/请求', 'num'], ['槽·时', 'num'], ['峰值/均并发', 'num'], ['在线', 'num'], ['忙时', 'num'], ['时段', 'num'], ['$/槽·时', 'num'], ['¥/槽·时', 'num'], ['$/在线h', 'num'], ['首字 p50/p90', 'num'], ['tok/s p50/p10', 'num'], ['tokens in/out/cr', 'num']];
     function aggCells(r) {
       return '<td class="mono">' + fmtN(r.requests) + '</td><td class="mono ' + (r.errors ? 'bad' : 'muted') + '">' + fmtN(r.errors) + '</td><td class="mono">' + fmtN(r.users) + '</td>' +
         '<td class="mono">' + fUsd(r.face_usd) + '</td><td class="mono">' + fRmb(r.cost_rmb) + '</td><td class="mono muted">' + fUsd(r.avg_face_per_req, 4) + '</td>' +
         '<td class="mono">' + fHrs(r.lane_hours) + '</td><td class="mono muted">' + (r.peak_concurrency == null ? '–' : r.peak_concurrency) + ' / ' + (r.avg_concurrency == null ? '–' : Number(r.avg_concurrency).toFixed(1)) + '</td>' +
         '<td class="mono">' + fHrs(r.online_hours) + '</td><td class="mono muted">' + fHrs(r.busy_hours) + '</td><td class="mono muted">' + fmtN(r.sessions) + '</td>' +
-        '<td class="mono"><b>' + (r.usd_per_lane_hour == null ? '–' : Number(r.usd_per_lane_hour).toFixed(2)) + '</b></td><td class="mono">' + (r.rmb_per_lane_hour == null ? '–' : Number(r.rmb_per_lane_hour).toFixed(2)) + '</td><td class="mono muted">' + (r.usd_per_online_hour == null ? '–' : Number(r.usd_per_online_hour).toFixed(2)) + '</td>' +
+        '<td class="mono"><b>' + (r.usd_per_lane_hour == null ? '–' : Number(r.usd_per_lane_hour).toFixed(2)) + '</b></td><td class="mono">' + (r.rmb_per_lane_hour == null ? '–' : Number(r.rmb_per_lane_hour).toFixed(2)) + '</td><td class="mono muted">' + (r.usd_per_online_hour == null ? '–' : Number(r.usd_per_online_hour).toFixed(2)) + '</td>' + speedCells(r.speed) +
         '<td class="mono muted" style="font-size:11px">' + fmtN(r.input_tokens) + ' / ' + fmtN(r.output_tokens) + ' / ' + fmtN(r.cache_read_tokens) + '</td>';
     }
     async function loadAnalytics() {
@@ -2426,7 +2434,7 @@
           tb.appendChild(tr);
         });
       }
-      if (!rows.length) tb.innerHTML = '<tr><td colspan="20" class="muted">范围内无数据</td></tr>';
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="22" class="muted">范围内无数据</td></tr>';
     }
     async function loadPresence() {
       const d = await api('/admin/api/analytics/presence');
@@ -2451,9 +2459,9 @@
       document.getElementById('an-ubh').textContent = '–'; document.getElementById('an-busy').textContent = '–';
       document.getElementById('an-sess').textContent = fmtN(rows.reduce((a, r) => a + (r.today_sessions || 0), 0));
       document.getElementById('an-rows').textContent = fmtN(rows.reduce((a, r) => a + (r.today_requests || 0), 0)); document.getElementById('an-trunc').textContent = '';
-      anHead([['状态', ''], ['卡 / key', ''], ['归属', ''], ['套餐', ''], ['在飞', 'num'], ['最近活动', 'num'], ['本次在线', ''], ['今日请求', 'num'], ['今日面值', 'num'], ['今日成本', 'num'], ['今日在线', 'num'], ['槽·时 / 峰并发', 'num'], ['$/槽·时', 'num'], ['今日模型', ''], ['', '']]);
+      anHead([['状态', ''], ['卡 / key', ''], ['归属', ''], ['套餐', ''], ['在飞', 'num'], ['最近活动', 'num'], ['本次在线', ''], ['今日请求', 'num'], ['今日面值', 'num'], ['今日成本', 'num'], ['今日在线', 'num'], ['槽·时 / 峰并发', 'num'], ['$/槽·时', 'num'], ['首字 p50/p90', 'num'], ['tok/s p50/p10', 'num'], ['今日模型', ''], ['', '']]);
       const tb = document.getElementById('an-body'); tb.innerHTML = '';
-      if (!rows.length) tb.innerHTML = '<tr><td colspan="15" class="muted">今日无活动、无有效卡</td></tr>';
+      if (!rows.length) tb.innerHTML = '<tr><td colspan="17" class="muted">今日无活动、无有效卡</td></tr>';
       rows.forEach((r) => {
         const tr = document.createElement('tr');
         const pz = r.presence === 'online' ? '<span class="pill ok">在线</span>' : r.presence === 'idle' ? '<span class="pill warn">空闲</span>' : '<span class="pill">离线</span>';
@@ -2461,7 +2469,7 @@
         const models = Object.entries(r.models_today || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([m, n]) => '<span class="mono" style="font-size:10px" title="' + esc(m) + '">' + esc(m.length > 22 ? m.slice(0, 20) + '…' : m) + '×' + n + '</span>').join(' ');
         tr.innerHTML = '<td>' + pz + (r.throttle && r.throttle !== 'normal' ? ' <span class="pill warn">' + esc(r.throttle) + '</span>' : '') + '</td><td>' + shortKey(r.key_name) + '</td><td>' + esc(r.owner || '') + '</td><td>' + esc(r.plan_name || r.plan_id || '') + '</td>' +
           '<td class="mono">' + r.in_flight + '</td><td class="mono muted">' + fAgo(r.idle_secs) + '前</td><td class="muted" style="font-size:11px">' + cur + '</td>' +
-          '<td class="mono">' + fmtN(r.today_requests) + (r.today_errors ? ' <span class="bad">(' + r.today_errors + ' 错)</span>' : '') + '</td><td class="mono">' + fUsd(r.today_face_usd) + '</td><td class="mono">' + fRmb(r.today_cost_rmb) + '</td><td class="mono">' + fHrs(r.today_online_hours) + ' <span class="muted">/' + r.today_sessions + '段</span></td><td class="mono">' + fHrs(r.today_lane_hours) + ' <span class="muted">/ ' + (r.today_peak_concurrency || 0) + '</span></td><td class="mono"><b>' + (r.today_usd_per_lane_hour == null ? '–' : Number(r.today_usd_per_lane_hour).toFixed(2)) + '</b></td><td>' + models + '</td><td></td>';
+          '<td class="mono">' + fmtN(r.today_requests) + (r.today_errors ? ' <span class="bad">(' + r.today_errors + ' 错)</span>' : '') + '</td><td class="mono">' + fUsd(r.today_face_usd) + '</td><td class="mono">' + fRmb(r.today_cost_rmb) + '</td><td class="mono">' + fHrs(r.today_online_hours) + ' <span class="muted">/' + r.today_sessions + '段</span></td><td class="mono">' + fHrs(r.today_lane_hours) + ' <span class="muted">/ ' + (r.today_peak_concurrency || 0) + '</span></td><td class="mono"><b>' + (r.today_usd_per_lane_hour == null ? '–' : Number(r.today_usd_per_lane_hour).toFixed(2)) + '</b></td>' + speedCells(r.today_speed) + '<td>' + models + '</td><td></td>';
         tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '时段')).addEventListener('click', () => loadSessions(r.key_name));
         tb.appendChild(tr);
       });
@@ -2473,10 +2481,10 @@
       document.getElementById('an-sessions').style.display = '';
       document.getElementById('an-sess-key').textContent = key + ' · ' + (d.totals.sessions || 0) + ' 段 · 在线 ' + fHrs(d.totals.online_hours) + ' · ' + fUsd(d.totals.face_usd) + ' · 槽·时 ' + fHrs(d.totals.lane_hours) + ' (峰值并发 ' + (d.totals.peak_concurrency || 0) + ')' + (d.totals.usd_per_lane_hour == null ? '' : ' · $' + Number(d.totals.usd_per_lane_hour).toFixed(2) + '/槽·时') + (d.totals.usd_per_online_hour == null ? '' : ' · $' + Number(d.totals.usd_per_online_hour).toFixed(2) + '/在线h') + ' · 间隔 ' + Math.round(d.gap_secs) + 's';
       const tb = document.getElementById('an-sess-body'); tb.innerHTML = '';
-      if (!(d.sessions || []).length) tb.innerHTML = '<tr><td colspan="11" class="muted">范围内无请求</td></tr>';
+      if (!(d.sessions || []).length) tb.innerHTML = '<tr><td colspan="13" class="muted">范围内无请求</td></tr>';
       (d.sessions || []).forEach((s) => {
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td class="mono">' + esc(s.start) + '</td><td class="mono">' + esc(s.end.slice(11)) + '</td><td class="mono">' + fHrs(s.secs / 3600) + '</td><td class="mono">' + (s.peak_concurrency || 1) + '</td><td class="mono">' + fHrs(s.lane_hours) + '</td><td class="mono">' + s.requests + (s.errors ? ' <span class="bad">(' + s.errors + ')</span>' : '') + '</td><td class="mono">' + fUsd(s.face_usd) + '</td><td class="mono"><b>' + (s.usd_per_lane_hour == null ? '–' : Number(s.usd_per_lane_hour).toFixed(2)) + '</b></td><td class="mono muted">' + (s.usd_per_hour == null ? '–' : Number(s.usd_per_hour).toFixed(2)) + '</td><td class="mono muted">' + Math.round((s.busy_ratio || 0) * 100) + '%</td>' +
+        tr.innerHTML = '<td class="mono">' + esc(s.start) + '</td><td class="mono">' + esc(s.end.slice(11)) + '</td><td class="mono">' + fHrs(s.secs / 3600) + '</td><td class="mono">' + (s.peak_concurrency || 1) + '</td><td class="mono">' + fHrs(s.lane_hours) + '</td><td class="mono">' + s.requests + (s.errors ? ' <span class="bad">(' + s.errors + ')</span>' : '') + '</td><td class="mono">' + fUsd(s.face_usd) + '</td><td class="mono"><b>' + (s.usd_per_lane_hour == null ? '–' : Number(s.usd_per_lane_hour).toFixed(2)) + '</b></td><td class="mono muted">' + (s.usd_per_hour == null ? '–' : Number(s.usd_per_hour).toFixed(2)) + '</td><td class="mono muted">' + Math.round((s.busy_ratio || 0) * 100) + '%</td><td class="mono">' + (s.ttft_p50_ms == null ? '–' : (s.ttft_p50_ms / 1000).toFixed(1) + 's') + '</td><td class="mono">' + (s.tps_p50 == null ? '–' : Number(s.tps_p50).toFixed(0)) + '</td>' +
           '<td style="font-size:11px">' + (s.models || []).map((m) => '<span class="mono">' + esc(m.model) + '</span>×' + m.requests).join(', ') + '</td>';
         tb.appendChild(tr);
       });

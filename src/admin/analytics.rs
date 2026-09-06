@@ -310,6 +310,11 @@ pub async fn api_analytics_presence(
         let online_secs: f64 = sessions.iter().map(|s| s.secs()).sum();
         let (_, _, lane_secs, peak_conc) = analytics::key_online_and_lanes(&today, Some(gap));
         let face: f64 = today.iter().map(|r| r.face_usd).sum();
+        let today_agg = analytics::aggregate(&today, |_| vec!["t".to_string()], Some(gap));
+        let speed = today_agg
+            .get("t")
+            .map(|a| a.speed_json())
+            .unwrap_or(json!(null));
         let mut models: BTreeMap<String, u64> = BTreeMap::new();
         for r in &today {
             *models.entry(r.model.clone()).or_default() += 1;
@@ -337,6 +342,7 @@ pub async fn api_analytics_presence(
             "today_peak_concurrency": peak_conc,
             "today_usd_per_lane_hour": if lane_secs > 0.0 { Some(face / (lane_secs / 3600.0)) } else { None },
             "today_sessions": sessions.len(),
+            "today_speed": speed,
             "session_gap_secs": gap,
             "current_session_start_ms": cur_session.map(|s| s.start_ms),
             "current_session_requests": cur_session.map(|s| s.requests),
@@ -408,6 +414,8 @@ pub async fn api_analytics_sessions(
         let mut models: BTreeMap<String, (u64, f64)> = BTreeMap::new();
         let mut busy_ms = 0i64;
         let mut errors = 0u64;
+        let mut ttft: Vec<f64> = Vec::new();
+        let mut tps: Vec<f64> = Vec::new();
         for r in &inside {
             let e = models.entry(r.model.clone()).or_default();
             e.0 += 1;
@@ -415,6 +423,16 @@ pub async fn api_analytics_sessions(
             busy_ms += r.latency_ms();
             if !r.ok() {
                 errors += 1;
+            }
+            if r.ok() {
+                if let Some(t) = r.ttft_ms {
+                    ttft.push(t as f64);
+                }
+                if r.output >= analytics::TPS_MIN_OUTPUT {
+                    if let Some(v) = r.output_tps() {
+                        tps.push(v);
+                    }
+                }
             }
         }
         let secs = s.secs();
@@ -444,6 +462,8 @@ pub async fn api_analytics_sessions(
             "face_usd": s.face_usd,
             "cost_rmb": s.face_usd * c.rmb_per_usd,
             "busy_ratio": if secs > 0.0 { (busy_ms as f64 / 1000.0 / secs).min(10.0) } else { 0.0 },
+            "ttft_p50_ms": analytics::percentile(&ttft, 0.5),
+            "tps_p50": analytics::percentile(&tps, 0.5),
             "usd_per_hour": if secs > 0.0 { Some(s.face_usd / (secs / 3600.0)) } else { None },
             "models": models.iter().map(|(m, (n, f))| json!({"model": m, "requests": n, "face_usd": f})).collect::<Vec<_>>(),
         }));

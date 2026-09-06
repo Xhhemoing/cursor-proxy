@@ -254,9 +254,15 @@ impl AccountPool {
                 let quota_ok = !self.quota_blocks(id);
 
                 let mut mask = 0u8;
-                if enabled { mask |= AvailableSlot::ENABLED; }
-                if !cooling { mask |= AvailableSlot::NOT_COOLING; }
-                if quota_ok { mask |= AvailableSlot::QUOTA_OK; }
+                if enabled {
+                    mask |= AvailableSlot::ENABLED;
+                }
+                if !cooling {
+                    mask |= AvailableSlot::NOT_COOLING;
+                }
+                if quota_ok {
+                    mask |= AvailableSlot::QUOTA_OK;
+                }
 
                 Some(AvailableSlot {
                     id: id.clone(),
@@ -566,7 +572,10 @@ impl AccountPool {
 
     /// 全部账号 (含禁用), 供 admin 读取配置字段 (如 priority)
     pub fn accounts(&self) -> Vec<Account> {
-        self.slots.iter().map(|r| r.value().account.clone()).collect()
+        self.slots
+            .iter()
+            .map(|r| r.value().account.clone())
+            .collect()
     }
 
     /// 清除冷却
@@ -737,10 +746,7 @@ impl AccountPool {
         let current_version = self.version();
         let fp = Self::query_fingerprint(q, filter, sort, page, page_size, proxy_id);
         // 同指纹 + 同版本 → 304 Not Modified
-        if client_version == current_version
-            && client_version > 0
-            && client_fingerprint == fp
-        {
+        if client_version == current_version && client_version > 0 && client_fingerprint == fp {
             return (current_version, fp, None);
         }
         // 缓存命中也必须指纹一致
@@ -1570,7 +1576,7 @@ mod tests {
     fn cached_query_respects_fingerprint() {
         let pool = AccountPool::new(vec![acc("a", true), acc("b", false)], 1);
         pool.bump_version(); // 模拟一次状态变更, 使版本号 > 0 (304 要求 version > 0)
-        // 第一次查询 filter=all, 拿到 (v1, fp1)
+                             // 第一次查询 filter=all, 拿到 (v1, fp1)
         let (v1, fp1, r1) = pool.query_accounts_cached("", "all", "attention", 1, 50, "", 0, 0);
         assert!(r1.is_some());
         assert_eq!(r1.unwrap()["filtered"], 2);

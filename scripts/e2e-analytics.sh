@@ -143,6 +143,14 @@ sqlite3 $E/billing.db "select name from sqlite_master where type='index' and nam
 OLD_INCL=$(sqlite3 $E/billing.db "select count(*) from billing_records where input_incl_cache=1")
 NEW_INCL=$(sqlite3 $E/billing.db "select count(*) from billing_records where input_incl_cache=0")
 [ "$OLD_INCL" -gt 0 ] && [ "$NEW_INCL" -gt 0 ] && ok "老库补 input_incl_cache: 老行=1 ($OLD_INCL) 新行=0 ($NEW_INCL)" || ko "input_incl_cache 迁移异常 old=$OLD_INCL new=$NEW_INCL"
+sqlite3 $E/billing.db "pragma table_info(billing_records)" | grep -q ttft_ms && ok "老库补 ttft_ms 列" || ko "ttft_ms 列未建"
+echo "$C" | py '
+import sys,json;d=json.load(sys.stdin)
+for r in d["by_model"][:3]:
+    sp=r["speed"]; assert set(["ttft_p50_ms","tps_p50","tps_p10","latency_p50_ms","tps_samples"])<=set(sp), sp.keys()
+    if sp["tps_samples"]>0: assert 1<sp["tps_p50"]<500, sp
+print("  speed:", [(r["model"][:24], sp["tps_p50"] and round(sp["tps_p50"]), sp["tps_p10"] and round(sp["tps_p10"]), sp["ttft_p50_ms"], sp["latency_p50_ms"] and round(sp["latency_p50_ms"]/1000,1)) for r in d["by_model"][:3] for sp in [r["speed"]]])
+' && ok "consumption 带 speed (tok/s p50/p10, ttft, latency)" || ko "speed 字段异常"
 
 echo; echo "══ RESULT: $pass passed, $fail failed ══"
 exit $fail

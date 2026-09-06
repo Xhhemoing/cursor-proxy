@@ -190,9 +190,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 模型注册表 (手动定价 + 模型组), 与 billing.db 同目录
-    let model_registry = models::init(
-        &std::path::Path::new(&config.billing.db_file).with_file_name("models.json"),
-    );
+    let model_registry =
+        models::init(&std::path::Path::new(&config.billing.db_file).with_file_name("models.json"));
     info!(
         event = "models_init",
         models = model_registry.snapshot().models.len(),
@@ -556,8 +555,14 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_models_import_builtin),
         )
         .route("/admin/api/models/resolve", get(admin::api_models_resolve))
-        .route("/admin/api/models/upstream", get(admin::api_models_upstream))
-        .route("/admin/api/models/sync-litellm", post(admin::api_models_sync_litellm))
+        .route(
+            "/admin/api/models/upstream",
+            get(admin::api_models_upstream),
+        )
+        .route(
+            "/admin/api/models/sync-litellm",
+            post(admin::api_models_sync_litellm),
+        )
         .route(
             "/admin/api/models/groups",
             get(admin::api_groups_list).post(admin::api_groups_upsert),
@@ -1064,7 +1069,10 @@ async fn inference_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let client_ip = addr.ip().to_string();
     let st = state.clone();
     let mut res = inference_handler_inner(state, headers, addr, body, dialect).await;
@@ -1087,7 +1095,11 @@ async fn inference_handler(
         if (400..500).contains(&code) {
             // 识别身份: 卡 / key 名 / 匿名 (不记录完整 key)
             let (kind, key_name, key_prefix) = if raw_token.starts_with("card-") {
-                ("card", raw_token.clone(), raw_token.chars().take(13).collect::<String>())
+                (
+                    "card",
+                    raw_token.clone(),
+                    raw_token.chars().take(13).collect::<String>(),
+                )
             } else if raw_token.is_empty() {
                 ("anon", "(no auth)".to_string(), String::new())
             } else {
@@ -1159,7 +1171,11 @@ async fn inference_handler_inner(
             .unwrap_or(&config.default_model)
             .to_string();
         // B8: 车道满时在此排队 (最多 LANE_WAIT_SECS), 不再立即 429
-        match state.card_store.acquire(&raw_token, &req_model, est_in).await {
+        match state
+            .card_store
+            .acquire(&raw_token, &req_model, est_in)
+            .await
+        {
             Ok((card, _plan, permit, throttle)) => {
                 card_throttle = throttle;
                 card_pace_tps = permit.pace_tps();
@@ -1307,9 +1323,11 @@ async fn inference_handler_inner(
     // 按 thinking_level / reasoning_effort / max_mode / 复杂度推断档位, 在该家族的
     // 上游变体里挑一个 (Max→-max>xhigh>high, High→high>medium>low, Low→low>minimal>none).
     // 客户端直接传变体全名则原样放行. 上游名单为空 (未拉过) 时跳过, 行为同旧版.
-    if let Some(resolved) =
-        models::ModelRegistry::resolve_smart_model(&model, &body, &state.card_store.upstream_names())
-    {
+    if let Some(resolved) = models::ModelRegistry::resolve_smart_model(
+        &model,
+        &body,
+        &state.card_store.upstream_names(),
+    ) {
         info!(
             event = "smart_model_route",
             req_id = %request_id,
@@ -1767,6 +1785,8 @@ async fn inference_handler_inner(
                 Dialect::Responses => "response.completed",
             };
             let mut sent_terminal = false;
+            // 首字延迟: 第一个有内容的帧到达时刻 (客户端真正开始看到输出)
+            let mut ttft_ms: Option<u64> = None;
             // 空内容追踪: 上游返回 200 但无实际内容时, 流式也要返回错误而非静默 200
             let mut has_content = false;
             // 流中途上游错误 (error 帧 / 解码失败 / 连接被掐): 记下来, 收尾时向客户端发 error 帧
@@ -1835,6 +1855,7 @@ async fn inference_handler_inner(
                                 || sse_str.contains("content_block")
                             {
                                 has_content = true;
+                                ttft_ms = Some(start.elapsed().as_millis() as u64);
                             }
                         }
                         if sse.contains(terminal_marker) {
@@ -1936,17 +1957,20 @@ async fn inference_handler_inner(
                 card_store_s.settle_permit(p, i, o, cr, cw);
             }
             metrics.observe_ok(usage.total());
-            ledger.record(billing::BillingRecord::build(
-                &bctx_s,
-                &rid,
-                &model_clone,
-                &aid,
-                usage,
-                true,
-                200,
-                latency,
-                &client_ip,
-            ));
+            ledger.record(
+                billing::BillingRecord::build(
+                    &bctx_s,
+                    &rid,
+                    &model_clone,
+                    &aid,
+                    usage,
+                    true,
+                    200,
+                    latency,
+                    &client_ip,
+                )
+                .with_ttft(ttft_ms),
+            );
             pool.record_success(&aid);
             // 成功时检查是否需要重新启用（连续错误已重置）
             pool.release(&aid, false, 0);
@@ -2206,14 +2230,24 @@ mod card_settle_tests {
     #[test]
     fn settle_usage_prefers_reported_input_and_max_output() {
         // 上游上报齐全: 输入用上报 (含缓存拆分), 输出取 max
-        let u = translate::Usage { input: 100, output: 50, cache_read: 900, cache_write: 0 };
+        let u = translate::Usage {
+            input: 100,
+            output: 50,
+            cache_read: 900,
+            cache_write: 0,
+        };
         assert_eq!(settle_usage_for_card(&u, 5000, 30.0), (100, 50, 900, 0));
         assert_eq!(settle_usage_for_card(&u, 5000, 80.4), (100, 80, 900, 0));
         // 无上报 (客户端中途断开): 输入用本地估, 输出用本地估
         let none = translate::Usage::default();
         assert_eq!(settle_usage_for_card(&none, 5000, 123.6), (5000, 124, 0, 0));
         // 上报了输入但 output=0 (空 usage 帧) 且本地放出了内容: 输出不能是 0
-        let partial = translate::Usage { input: 100, output: 0, cache_read: 0, cache_write: 0 };
+        let partial = translate::Usage {
+            input: 100,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+        };
         assert_eq!(settle_usage_for_card(&partial, 5000, 40.0), (100, 40, 0, 0));
     }
 }

@@ -192,7 +192,14 @@ pub fn estimate_request_input_tokens(body: &Value) -> u64 {
     }
     let mut est = 0.0f64;
     // 只数会送上游的内容字段; 跳过 model/stream/temperature 等标量本来就不计
-    for key in ["messages", "system", "tools", "input", "instructions", "prompt"] {
+    for key in [
+        "messages",
+        "system",
+        "tools",
+        "input",
+        "instructions",
+        "prompt",
+    ] {
         if let Some(v) = body.get(key) {
             walk(v, &mut est);
         }
@@ -722,7 +729,11 @@ impl CardStore {
         };
         let names: Vec<String> = v["models"]
             .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         if !names.is_empty() {
             if let Ok(mut g) = self.upstream.write() {
@@ -800,7 +811,9 @@ impl CardStore {
         };
         let mut from_db = std::collections::HashMap::<String, u64>::new();
         if let Ok(mut st) = conn.prepare("SELECT card_key, face_used_micro FROM card_face_used") {
-            if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+            if let Ok(rows) =
+                st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            {
                 for (k, v) in rows.flatten() {
                     from_db.insert(k, v.max(0) as u64);
                 }
@@ -832,7 +845,11 @@ impl CardStore {
             }
         }
         if migrated > 0 {
-            tracing::info!(event = "card_ledger_migrate", migrated, "migrated face_used from cards.json into cards.db");
+            tracing::info!(
+                event = "card_ledger_migrate",
+                migrated,
+                "migrated face_used from cards.json into cards.db"
+            );
         }
     }
 
@@ -1579,11 +1596,12 @@ impl CardPermit {
         if self.hold_micro > 0 {
             // 用 fetch_update 防止并发下减到负数 (u64 下溢)
             let h = self.hold_micro;
-            let _ = self.rt.hold_micro.fetch_update(
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-                |cur| Some(cur.saturating_sub(h)),
-            );
+            let _ = self
+                .rt
+                .hold_micro
+                .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(h))
+                });
             self.hold_micro = 0;
         }
     }
@@ -1766,7 +1784,10 @@ mod tests {
             s.settle(&c.card_key, "claude-opus-5", 0, 0, 0); // $0.215 each
         }
         let json_after = std::fs::read_to_string(&json_path).unwrap();
-        assert_eq!(json_before, json_after, "settle must not rewrite cards.json when db is available");
+        assert_eq!(
+            json_before, json_after,
+            "settle must not rewrite cards.json when db is available"
+        );
         assert_eq!(s.get_card(&c.card_key).unwrap().face_used_micro, 2_150_000);
         // 直接查 DB
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1807,7 +1828,8 @@ mod tests {
         let db_path = json_path.with_extension("db");
         drop(s);
         // 模拟旧版: 手改 JSON 里的 face_used, 删掉 DB
-        let mut data: Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let mut data: Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
         data["cards"][0]["face_used_micro"] = json!(777_000);
         std::fs::write(&json_path, serde_json::to_string_pretty(&data).unwrap()).unwrap();
         let _ = std::fs::remove_file(&db_path);
@@ -1913,11 +1935,16 @@ mod tests {
         let s2 = s.clone();
         let k2 = key.clone();
         let waiter = tokio::spawn(async move {
-            s2.acquire(&k2, "kimi-k3", 0).await.map(|(_, _, g, t)| (g, t))
+            s2.acquire(&k2, "kimi-k3", 0)
+                .await
+                .map(|(_, _, g, t)| (g, t))
         });
         // 等 300ms (远小于 30s 超时), 排队者仍在等
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(!waiter.is_finished(), "must still be queued while lane is held");
+        assert!(
+            !waiter.is_finished(),
+            "must still be queued while lane is held"
+        );
         // 释放车道 → 排队者被唤醒并拿到车道
         drop(g1);
         let (g2, t) = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
@@ -1958,9 +1985,20 @@ mod tests {
                 assert!(msg.contains("waited"), "{msg}");
             }
         }
-        assert!(started.elapsed() >= std::time::Duration::from_millis(150), "must actually wait");
-        assert_eq!(rt.hold_micro.load(Ordering::Relaxed), hold_after_first, "hold must roll back");
-        assert_eq!(rt.day_count.load(Ordering::Relaxed), day_after_first, "day_count must roll back");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(150),
+            "must actually wait"
+        );
+        assert_eq!(
+            rt.hold_micro.load(Ordering::Relaxed),
+            hold_after_first,
+            "hold must roll back"
+        );
+        assert_eq!(
+            rt.day_count.load(Ordering::Relaxed),
+            day_after_first,
+            "day_count must roll back"
+        );
     }
 
     /// B7: 同卡两条并发流共用一个匀速桶 —— 合计放出量受 pace 约束, 而不是各自一份.
@@ -1983,7 +2021,11 @@ mod tests {
         assert!(w.as_secs_f64() > 0.9 && w.as_secs_f64() <= 1.0, "{w:?}");
         // pace=0 的卡: 恒不等
         let s0 = store();
-        s0.upsert_plan(CardPlan { id: "np".into(), name: "np".into(), ..CardPlan::default() });
+        s0.upsert_plan(CardPlan {
+            id: "np".into(),
+            name: "np".into(),
+            ..CardPlan::default()
+        });
         let c0 = s0.issue_card("np", "x").unwrap();
         let (_, _, g0, _) = s0.acquire(&c0.card_key, "kimi-k3", 0).await.unwrap();
         assert_eq!(g0.pace_admit(1e6), std::time::Duration::ZERO);
@@ -2006,7 +2048,10 @@ mod tests {
     #[test]
     fn default_plan_and_presets_have_no_pacing() {
         let d = CardPlan::default();
-        assert_eq!((d.pace_normal_tps, d.pace_soften_tps, d.pace_degraded_tps), (0, 0, 0));
+        assert_eq!(
+            (d.pace_normal_tps, d.pace_soften_tps, d.pace_degraded_tps),
+            (0, 0, 0)
+        );
         for p in CardPlan::presets() {
             assert_eq!(p.pace_normal_tps, 0, "{}", p.id);
             assert_eq!(p.pace_soften_tps, 0, "{}", p.id);
@@ -2084,12 +2129,26 @@ mod tests {
         let names: Vec<String> = s
             .plan_models(&p, &[])
             .iter()
-            .filter_map(|v| v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .filter_map(|v| {
+                v.get("model")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
-        assert!(!names.is_empty(), "upstream-confirmed kimi models should be listed");
-        assert!(names.iter().all(|m| m.starts_with("kimi-")), "prefix gate leaked: {:?}", names);
+        assert!(
+            !names.is_empty(),
+            "upstream-confirmed kimi models should be listed"
+        );
+        assert!(
+            names.iter().all(|m| m.starts_with("kimi-")),
+            "prefix gate leaked: {:?}",
+            names
+        );
         // 未上游确认的内置别名 (kimi-k2 不在 upstream 名单) 不出现
-        assert!(!names.iter().any(|m| m == "kimi-k2"), "unconfirmed builtin alias listed");
+        assert!(
+            !names.iter().any(|m| m == "kimi-k2"),
+            "unconfirmed builtin alias listed"
+        );
         // 全局停用后从清单消失
         crate::models::registry()
             .upsert_model(crate::models::ModelEntry {
@@ -2106,9 +2165,16 @@ mod tests {
         let names2: Vec<String> = s
             .plan_models(&p, &[])
             .iter()
-            .filter_map(|v| v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .filter_map(|v| {
+                v.get("model")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
-        assert!(!names2.iter().any(|m| m == "kimi-k3"), "disabled model still listed");
+        assert!(
+            !names2.iter().any(|m| m == "kimi-k3"),
+            "disabled model still listed"
+        );
         let _ = crate::models::registry().delete_model("kimi-k3");
     }
 
@@ -2224,7 +2290,6 @@ mod tests {
         assert!((cm.rmb_per_usd() - 0.065).abs() < 1e-9);
         assert!((cm.cost_rmb(200.0) - 13.0).abs() < 1e-9);
     }
-
 
     #[test]
     fn quota_card_deducts_and_exhausts() {
@@ -2360,7 +2425,10 @@ mod tests {
             assert!(s.upstream_fetched_at().is_some());
         }
         let s2 = CardStore::open(&path, 480);
-        assert_eq!(s2.upstream_names(), vec!["claude-opus-5-high".to_string(), "kimi-k3-max".to_string()]);
+        assert_eq!(
+            s2.upstream_names(),
+            vec!["claude-opus-5-high".to_string(), "kimi-k3-max".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
