@@ -1855,8 +1855,16 @@ async fn inference_handler_inner(
                                 || sse_str.contains("content_block")
                             {
                                 has_content = true;
-                                ttft_ms = Some(start.elapsed().as_millis() as u64);
                             }
+                        }
+                        // 首字延迟: 客户端第一次看到任何输出 (含 reasoning 流 —— 思考模型先吐推理,
+                        // 用户此时已经"看到在动"), 不含 keep-alive / role 空帧
+                        if ttft_ms.is_none()
+                            && (has_content
+                                || sse.contains("\"reasoning_content\":\"")
+                                || sse.contains("\"reasoning\""))
+                        {
+                            ttft_ms = Some(start.elapsed().as_millis() as u64);
                         }
                         if sse.contains(terminal_marker) {
                             sent_terminal = true;
