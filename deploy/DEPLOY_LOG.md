@@ -74,7 +74,7 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 
 ## 2026-09-06 UTC — 本机 8800 限速记录 + 速度画像/what-if + 修 inputTokens 含缓存
 - 备份 *.bak-pace-rec-*; md5 见 swap 输出
-- translate::extract_usage: Cursor 实际字段是 inputTokens (非 promptTokens), 同样含缓存 → extendedUsage 容器一律扣 cr+cw (带 input≥cr+cw 保护). 之前 03:00 后写入的 ~1000 行仍含缓存 (input_incl_cache=0 但未扣) —— 分析端按 input≥cr+cw 兜底? 否: 这些行 normalize 不会再扣. 影响: 6 日 03:00–后此次 swap 间的行面值偏高 4–7×
+- translate::extract_usage: Cursor 实际字段是 inputTokens (非 promptTokens), 同样含缓存 → extendedUsage 容器一律扣 cr+cw (input≥cr+cw 保护). 05 03:00–06 12:11 间写入的 2454 行 incl=0 但未扣 → 已 UPDATE 回 incl=1, 分析端归一化正确
 - 账本加列 pace_tps / pace_wait_ms (每请求生效限速与累计 sleep); BillingRecord.upstream_tps 剔 sleep
 - analytics: speed{upstream_tps_p50, paced_requests, pace_wait_hours, pace_lane_share}; simulate_pace what-if
 - /admin/api/analytics/speed?paces=25,15,12,8 → 按模型 原生速度 + 各档限速后 $/槽·时 与省幅; 面板「消耗分析 → 速度/限速」tab
