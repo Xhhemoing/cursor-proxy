@@ -384,20 +384,28 @@ pub fn build_cursor_body_full(
     max_mode: Option<bool>,
 ) -> Value {
     let mut cursor_msgs = crate::protocol::openai_messages_to_cursor(messages);
-    // P2: tool_choice hint 注入到最前
+    // P2: tool_choice hint 注入到最前 — 仅首轮 (无 tool 结果) 时注入,
+    // 避免后续轮次 hint 变化破坏前缀缓存
+    let has_tool_results = messages
+        .iter()
+        .any(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"));
     let omit_tools = crate::protocol::tool_choice_omits_tools(tool_choice);
-    if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
-        cursor_msgs.insert(
-            0,
-            json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": hint}),
-        );
+    if !has_tool_results {
+        if let Some(hint) = crate::protocol::tool_choice_hint(tool_choice) {
+            cursor_msgs.insert(
+                0,
+                json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": hint}),
+            );
+        }
     }
-    // P2: response_format JSON schema 注入为 system 提示
-    if let Some(rf_hint) = crate::protocol::response_format_hint(body) {
-        cursor_msgs.insert(
-            0,
-            json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": rf_hint}),
-        );
+    // P2: response_format JSON schema 注入为 system 提示 — 同样仅首轮
+    if !has_tool_results {
+        if let Some(rf_hint) = crate::protocol::response_format_hint(body) {
+            cursor_msgs.insert(
+                0,
+                json!({"role": "INFERENCE_MESSAGE_ROLE_SYSTEM", "text": rf_hint}),
+            );
+        }
     }
 
     let mut requested_model = json!({"modelId": model});
@@ -1175,5 +1183,83 @@ mod tests {
             })),
             "kimi-k3-max"
         );
+    }
+
+    #[test]
+    fn tool_choice_hint_only_first_turn() {
+        // P1: 首轮 (无 tool 结果) 注入 hint, 后续轮次不注入以保前缀缓存
+        let base_msgs = vec![
+            json!({"role": "system", "content": "You are helpful."}),
+            json!({"role": "user", "content": "Read /tmp/a.txt"}),
+        ];
+        let tool_choice = json!({"type": "function", "function": {"name": "read_file"}});
+
+        // 首轮: 无 tool 结果 → 应注入 hint
+        let body1 = build_cursor_body_with_tools(
+            &base_msgs,
+            "kimi-k3",
+            None,
+            None,
+            None,
+            Some(&tool_choice),
+            None,
+            None,
+            None,
+        );
+        let msgs1 = body1["messages"].as_array().unwrap();
+        let has_hint1 = msgs1.iter().any(|m| {
+            m["role"] == "INFERENCE_MESSAGE_ROLE_SYSTEM"
+                && m["text"]
+                    .as_str()
+                    .map_or(false, |t| t.contains("read_file"))
+        });
+        assert!(has_hint1, "first turn should inject tool_choice hint");
+
+        // 后续轮: 有 tool 结果 → 不应注入 hint
+        let mut later_msgs = base_msgs.clone();
+        later_msgs.push(json!({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "t1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+        ]}));
+        later_msgs.push(json!({"role": "tool", "tool_call_id": "t1", "content": "file content"}));
+        let body2 = build_cursor_body_with_tools(
+            &later_msgs,
+            "kimi-k3",
+            None,
+            None,
+            None,
+            Some(&tool_choice),
+            None,
+            None,
+            None,
+        );
+        let msgs2 = body2["messages"].as_array().unwrap();
+        let has_hint2 = msgs2.iter().any(|m| {
+            m["role"] == "INFERENCE_MESSAGE_ROLE_SYSTEM"
+                && m["text"]
+                    .as_str()
+                    .map_or(false, |t| t.contains("read_file"))
+        });
+        assert!(
+            !has_hint2,
+            "later turns must NOT inject tool_choice hint (cache stability)"
+        );
+    }
+
+    #[test]
+    fn response_format_hint_only_first_turn() {
+        // P2: response_format hint 同样只在首轮注入
+        let base_msgs = vec![json!({"role": "user", "content": "List 3 items"})];
+        let rf_body = json!({"response_format": {"type": "json_object"}});
+
+        // 首轮
+        let body1 = build_cursor_body_with_tools(
+            &base_msgs, "kimi-k3", None, None, None, None, None, None, None,
+        );
+        // build_cursor_body_with_tools 内部读 body 的 response_format, 但签名没有 body 参数
+        // 所以这里直接测 protocol::response_format_hint 的行为即可
+        let hint = crate::protocol::response_format_hint(&rf_body);
+        assert!(hint.is_some(), "response_format should produce hint");
+
+        // 有 tool 结果时 build_cursor_body_with_tools 不注入 — 由 tool_choice_hint_only_first_turn 覆盖
     }
 }

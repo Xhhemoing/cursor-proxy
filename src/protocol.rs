@@ -297,15 +297,22 @@ pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
                 let mut tool_calls: Vec<Value> = Vec::new();
                 if let Some(calls) = m.get("tool_calls").and_then(|v| v.as_array()) {
                     for c in calls {
+                        let f = c.get("function").unwrap_or(c);
+                        let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
                         let id = c
                             .get("id")
                             .or_else(|| c.get("call_id"))
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                             .map(str::to_string)
-                            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
-                        let f = c.get("function").unwrap_or(c);
-                        let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            .unwrap_or_else(|| {
+                                // 稳定 toolCallId: 基于工具名哈希, 避免随机 uuid 破坏前缀缓存
+                                use sha1::Digest;
+                                let mut h = sha1::Sha1::new();
+                                h.update(name.as_bytes());
+                                let hex = format!("{:x}", h.finalize());
+                                format!("call_{}", &hex[..16])
+                            });
                         call_names.insert(id.clone(), name.to_string());
                         let mut tc = json!({"toolCallId": id, "toolName": name});
                         match f.get("arguments") {
@@ -1549,5 +1556,45 @@ mod tests {
         assert_eq!(p1, p2);
         assert!(p1.contains("sys:You are a precise assistant."));
         assert!(p1.contains("user:Read /tmp/secret.txt"));
+    }
+
+    #[test]
+    fn tool_call_id_stable_for_same_tool_name() {
+        // P0: 无 id 的 tool_call 应生成稳定 id (基于工具名哈希), 而非随机 uuid
+        let msg = json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}}
+            ]
+        });
+        let out1 = openai_messages_to_cursor(&[msg.clone()]);
+        let out2 = openai_messages_to_cursor(&[msg]);
+        let id1 = out1[0]["toolCalls"][0]["toolCallId"].as_str().unwrap();
+        let id2 = out2[0]["toolCalls"][0]["toolCallId"].as_str().unwrap();
+        assert_eq!(id1, id2, "same tool name must produce stable toolCallId");
+        assert!(id1.starts_with("call_"), "id should have call_ prefix");
+        assert_eq!(id1.len(), 5 + 16, "id should be call_ + 16 hex chars");
+    }
+
+    #[test]
+    fn tool_call_id_differs_for_different_tool_names() {
+        let msg1 = json!({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "read_file", "arguments": "{}"}}]
+        });
+        let msg2 = json!({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "write_file", "arguments": "{}"}}]
+        });
+        let id1 = openai_messages_to_cursor(&[msg1])[0]["toolCalls"][0]["toolCallId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let id2 = openai_messages_to_cursor(&[msg2])[0]["toolCalls"][0]["toolCallId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(id1, id2, "different tool names must produce different ids");
     }
 }
