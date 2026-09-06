@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::cards::{self, CardPlan, CostModel, PlanKind};
+use crate::cards::{self, CardPlan, CostModel, PlanKind, RiskPolicy};
 use crate::AppState;
 
 // ── 套餐 ──
@@ -245,6 +245,74 @@ pub async fn api_cost_model_set(
     }
     state.card_store.set_cost_model(cm.clone());
     Json(json!({ "ok": true, "cost_model": cm, "rmb_per_usd": cm.rmb_per_usd() })).into_response()
+}
+
+// ── 风控策略 ──
+
+pub async fn api_risk_policy_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let p = state.card_store.risk_policy();
+    Json(json!({ "policy": p, "defaults": RiskPolicy::default() }))
+}
+
+fn validate_policy(p: &RiskPolicy) -> Result<(), String> {
+    if !(0.0..=1.0).contains(&p.soften_ratio_of_threshold) {
+        return Err("soften_ratio_of_threshold must be in [0,1]".into());
+    }
+    if p.abuse_threshold_override > 100 {
+        return Err("abuse_threshold_override must be ≤ 100".into());
+    }
+    for r in &p.model_rules {
+        if r.prefix.trim().is_empty() {
+            return Err("model rule prefix empty".into());
+        }
+    }
+    if p.hard_cap_usd < 0.0 {
+        return Err("hard_cap_usd must be ≥ 0".into());
+    }
+    let w = &p.weights;
+    if !(0.0..=1.0).contains(&w.fast_hi) || !(0.0..=1.0).contains(&w.fast_lo) {
+        return Err("fast_* must be in [0,1]".into());
+    }
+    Ok(())
+}
+
+pub async fn api_risk_policy_set(
+    State(state): State<Arc<AppState>>,
+    Json(p): Json<RiskPolicy>,
+) -> Response {
+    if let Err(e) = validate_policy(&p) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    state.card_store.set_risk_policy(p.clone());
+    tracing::info!(
+        event = "risk_policy_set",
+        enabled = p.enabled,
+        rules = p.model_rules.len(),
+        "risk policy updated"
+    );
+    Json(json!({ "ok": true, "policy": p })).into_response()
+}
+
+/// 预演: 候选策略下, 今日有活动的卡各自会落到哪个档 (不落盘)
+pub async fn api_risk_policy_preview(
+    State(state): State<Arc<AppState>>,
+    Json(p): Json<RiskPolicy>,
+) -> Response {
+    if let Err(e) = validate_policy(&p) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    let rows = state.card_store.preview_risk(&p);
+    let n = |t: &str| {
+        rows.iter()
+            .filter(|r| r["preview"]["throttle"] == t)
+            .count()
+    };
+    Json(json!({
+        "rows": rows,
+        "summary": { "cards": rows.len(), "normal": n("normal"), "soften": n("soften"), "degraded": n("degraded"),
+                     "hard_cap": rows.iter().filter(|r| r["preview"]["hard_cap_hit"] == true).count() },
+    }))
+    .into_response()
 }
 
 /// 官方口径价格表 + 层级, 供调价时对照

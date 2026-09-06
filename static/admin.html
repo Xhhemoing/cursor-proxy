@@ -892,6 +892,7 @@
             <button type="button" data-tab="cards">卡</button>
             <button type="button" data-tab="profit">利润</button>
             <button type="button" data-tab="cost">成本模型 / 价格表</button>
+            <button type="button" data-tab="risk" title="行为评分权重、限速档位、按模型限速、日面值硬帽 — 全局生效, 即时热更新">风控</button>
           </div>
           <div class="info" id="cd-msg" style="min-height:18px;margin-bottom:6px"></div>
 
@@ -1023,6 +1024,66 @@
                 <table>
                   <thead><tr><th>模型</th><th>来源</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th></tr></thead>
                   <tbody id="cd-price-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div id="cd-tab-risk" style="display:none;flex:1;min-height:0;flex-direction:column;overflow:auto">
+            <div class="panel" style="flex:0 0 auto">
+              <div class="ph"><h3>风控总控</h3><p>改动即时生效 (下一次请求准入起), 持久化到 cards.json. 优先级: 模型规则 免限 &gt; 模型规则 pace &gt; 全局 pace 覆盖 &gt; 套餐 pace_*</p></div>
+              <div style="padding:10px 12px">
+                <div class="form-grid">
+                  <label>总开关 <select id="rk-enabled"><option value="true">开 (评分+限速生效)</option><option value="false">关 (全部 Normal, 不限速)</option></select></label>
+                  <label title="0 = 沿用各套餐自己的 abuse_score_threshold">压制阈值覆盖 (分, 0=沿用套餐) <input id="rk-th" type="number" min="0" max="100" step="1"></label>
+                  <label title="软化阈值 = 压制阈值 × 此比例">软化 = 阈值 × <input id="rk-soft" type="number" min="0" max="1" step="0.05"></label>
+                  <label title="留空 = 沿用套餐; 0 = 强制不限">全局 pace 正常 tok/s <input id="rk-pn" type="number" min="0" step="1" placeholder="沿用套餐"></label>
+                  <label>全局 pace 软化 tok/s <input id="rk-ps" type="number" min="0" step="1" placeholder="沿用套餐"></label>
+                  <label>全局 pace 压制 tok/s <input id="rk-pd" type="number" min="0" step="1" placeholder="沿用套餐"></label>
+                  <label title="单请求已放出 ≥ N tok 后放开限速, 避免长输出撞客户端超时 (输出 p90 4.7k tok @25 tok/s = 3 分钟). 0 = 不放开">长输出放开阈值 tok <input id="rk-ra" type="number" min="0" step="100"></label>
+                  <label title="放开后的速度; 0 = 完全不限">放开后 tok/s (0=不限) <input id="rk-rt" type="number" min="0" step="1"></label>
+                  <label title="卡当日面值 ≥ 此值后, 只放行白名单前缀的模型 (其余 429). 0 = 关">日面值硬帽 $ (0=关) <input id="rk-cap" type="number" min="0" step="10"></label>
+                  <label title="逗号分隔前缀, 如 kimi-k3,grok">硬帽后仍放行的模型前缀 <input id="rk-cap-allow" type="text" placeholder="kimi-k3, grok"></label>
+                </div>
+              </div>
+            </div>
+            <div class="panel" style="flex:0 0 auto">
+              <div class="ph"><h3>行为评分权重</h3><p>四类信号加分, 满 100. 缺省值用 61k 条真实流量校准: 个人 0–25 分, 脚本 55–85 分</p></div>
+              <div style="padding:10px 12px">
+                <div class="form-grid">
+                  <label>活跃格 ≥ <input id="rk-w-slots-hi" type="number" min="0" max="288"> 格 → +<input id="rk-w-slots-hi-pts" type="number" min="0" max="100"> 分</label>
+                  <label>活跃格 ≥ <input id="rk-w-slots-lo" type="number" min="0" max="288"> 格 → +<input id="rk-w-slots-lo-pts" type="number" min="0" max="100"> 分</label>
+                  <label>秒接率 ≥ <input id="rk-w-fast-hi" type="number" min="0" max="1" step="0.05"> → +<input id="rk-w-fast-hi-pts" type="number" min="0" max="100"> 分</label>
+                  <label>秒接率 ≥ <input id="rk-w-fast-lo" type="number" min="0" max="1" step="0.05"> → +<input id="rk-w-fast-lo-pts" type="number" min="0" max="100"> 分</label>
+                  <label>跨度 ≥ <input id="rk-w-span-hi" type="number" min="0" max="24" step="0.5"> h 且无停顿 → +<input id="rk-w-span-hi-pts" type="number" min="0" max="100"> 分</label>
+                  <label>跨度 ≥ <input id="rk-w-span-lo" type="number" min="0" max="24" step="0.5"> h → +<input id="rk-w-span-lo-pts" type="number" min="0" max="100"> 分</label>
+                  <label title="跨度类信号至少要这么多活跃格才算">跨度类最少活跃格 <input id="rk-w-span-min" type="number" min="0" max="288"></label>
+                  <label title="最长空闲小于此秒数 = 无停顿">无停顿阈值 秒 <input id="rk-w-nobreak" type="number" min="60" step="60"></label>
+                  <label>日消耗 ≥ $<input id="rk-w-quota" type="number" min="0" step="10"> → +<input id="rk-w-quota-pts" type="number" min="0" max="100"> 分 (0=关)</label>
+                </div>
+              </div>
+            </div>
+            <div class="panel" style="flex:0 0 auto">
+              <div class="ph"><h3>按模型限速规则</h3><p>前缀匹配 (自动兼容 cursor- 前缀), 最长前缀优先. 留空的 pace 沿用上层; 「免限」= 该模型完全不限速 (grok 原生 374 tok/s 且输出长, 限了只会超时)</p>
+                <button type="button" class="ghost" id="rk-rule-add">+ 规则</button></div>
+              <div class="table-scroll" style="max-height:220px">
+                <table class="nowrap">
+                  <thead><tr><th>模型前缀</th><th>免限</th><th class="num">正常 tok/s</th><th class="num">软化</th><th class="num">压制</th><th>备注</th><th></th></tr></thead>
+                  <tbody id="rk-rules-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="toolbar" style="padding:4px 12px;justify-content:flex-end;gap:8px">
+              <span class="muted" id="rk-msg"></span>
+              <button type="button" class="ghost" id="rk-defaults">恢复缺省</button>
+              <button type="button" class="ghost" id="rk-preview">预演 (不保存)</button>
+              <button type="button" id="rk-save">保存并生效</button>
+            </div>
+            <div class="panel fill" style="min-height:160px">
+              <div class="ph"><h3>预演结果</h3><p id="rk-preview-sub">用今日各卡已有的行为信号, 按上面的候选参数重算 → 谁会被压. 保存前先看这里.</p></div>
+              <div class="table-scroll">
+                <table class="nowrap">
+                  <thead><tr><th>卡</th><th>套餐</th><th class="num">今日 $</th><th class="num">请求</th><th>现档/分</th><th>预演档/分</th><th class="num">pace</th><th>触发原因</th><th class="num">格/秒接/跨度</th></tr></thead>
+                  <tbody id="rk-preview-body"><tr><td colspan="9" class="muted">点「预演」</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -1643,7 +1704,7 @@
     }
     // innerHTML 只拼接 esc() 转义后的服务端字段与固定模板, 数值直接 Number() 格式化
     // ---------- 套餐卡 ----------
-    const CD_TABS = ['plans', 'cards', 'profit', 'cost'];
+    const CD_TABS = ['plans', 'cards', 'profit', 'cost', 'risk'];
     let cdTab = 'plans';
     let cdPlans = [];
     const cdMsg = (m, err) => toast('cd-msg', m, err);
@@ -1674,8 +1735,93 @@
       if (cdTab === 'plans') await loadPlans();
       else if (cdTab === 'cards') await loadCards();
       else if (cdTab === 'profit') await loadProfit();
+      else if (cdTab === 'risk') await loadRisk();
       else await loadCostModel();
     }
+
+    // ==== 风控 ====
+    let rkRules = [];
+    const RK_W = [['slots_hi','rk-w-slots-hi'],['slots_hi_pts','rk-w-slots-hi-pts'],['slots_lo','rk-w-slots-lo'],['slots_lo_pts','rk-w-slots-lo-pts'],['fast_hi','rk-w-fast-hi'],['fast_hi_pts','rk-w-fast-hi-pts'],['fast_lo','rk-w-fast-lo'],['fast_lo_pts','rk-w-fast-lo-pts'],['span_hi_hours','rk-w-span-hi'],['span_hi_pts','rk-w-span-hi-pts'],['span_lo_hours','rk-w-span-lo'],['span_lo_pts','rk-w-span-lo-pts'],['span_min_slots','rk-w-span-min'],['no_break_secs','rk-w-nobreak'],['quota_usd','rk-w-quota'],['quota_pts','rk-w-quota-pts']];
+    function rkMsg(m, err) { const e = document.getElementById('rk-msg'); e.textContent = m || ''; e.className = err ? 'bad' : 'muted'; }
+    function rkFill(p) {
+      document.getElementById('rk-enabled').value = String(!!p.enabled);
+      document.getElementById('rk-th').value = p.abuse_threshold_override ?? 0;
+      document.getElementById('rk-soft').value = p.soften_ratio_of_threshold ?? 0.6;
+      document.getElementById('rk-pn').value = p.pace_normal_tps == null ? '' : p.pace_normal_tps;
+      document.getElementById('rk-ps').value = p.pace_soften_tps == null ? '' : p.pace_soften_tps;
+      document.getElementById('rk-pd').value = p.pace_degraded_tps == null ? '' : p.pace_degraded_tps;
+      document.getElementById('rk-ra').value = p.relief_after_tokens ?? 0;
+      document.getElementById('rk-rt').value = p.relief_tps ?? 0;
+      document.getElementById('rk-cap').value = p.hard_cap_usd ?? 0;
+      document.getElementById('rk-cap-allow').value = (p.hard_cap_allow_prefixes || []).join(', ');
+      RK_W.forEach(([k, id]) => { document.getElementById(id).value = (p.weights || {})[k] ?? ''; });
+      rkRules = (p.model_rules || []).map((r) => Object.assign({}, r));
+      rkRenderRules();
+    }
+    function rkRenderRules() {
+      const tb = document.getElementById('rk-rules-body'); tb.innerHTML = '';
+      if (!rkRules.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">无 — 全部模型按全局/套餐 pace</td></tr>'; return; }
+      rkRules.forEach((r, i) => {
+        const tr = document.createElement('tr');
+        const inp = (k, type, attrs) => { const x = el('input', Object.assign({ type: type }, attrs || {})); if (type === 'checkbox') x.checked = !!r[k]; else x.value = r[k] == null ? '' : r[k]; x.addEventListener('input', () => { r[k] = type === 'checkbox' ? x.checked : type === 'number' ? (x.value === '' ? null : Number(x.value)) : x.value; }); return x; };
+        tr.appendChild(el('td')).appendChild(inp('prefix', 'text', { placeholder: 'claude-fable-5-1-thinking', style: 'width:220px' }));
+        tr.appendChild(el('td')).appendChild(inp('exempt', 'checkbox'));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_normal_tps', 'number', { min: 0, style: 'width:70px', placeholder: '沿用' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_soften_tps', 'number', { min: 0, style: 'width:70px', placeholder: '沿用' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_degraded_tps', 'number', { min: 0, style: 'width:70px', placeholder: '沿用' }));
+        tr.appendChild(el('td')).appendChild(inp('note', 'text', { style: 'width:160px' }));
+        tr.appendChild(el('td')).appendChild(el('button', { class: 'ghost danger', type: 'button' }, '删')).addEventListener('click', () => { rkRules.splice(i, 1); rkRenderRules(); });
+        tb.appendChild(tr);
+      });
+    }
+    function rkCollect() {
+      const v = (id) => document.getElementById(id).value;
+      const optNum = (id) => v(id) === '' ? null : Number(v(id));
+      const w = {}; RK_W.forEach(([k, id]) => { w[k] = Number(v(id)); });
+      return {
+        enabled: v('rk-enabled') === 'true',
+        weights: w,
+        abuse_threshold_override: Number(v('rk-th')) || 0,
+        soften_ratio_of_threshold: Number(v('rk-soft')),
+        pace_normal_tps: optNum('rk-pn'), pace_soften_tps: optNum('rk-ps'), pace_degraded_tps: optNum('rk-pd'),
+        model_rules: rkRules.filter((r) => (r.prefix || '').trim()).map((r) => ({ prefix: r.prefix.trim(), exempt: !!r.exempt, pace_normal_tps: r.pace_normal_tps ?? null, pace_soften_tps: r.pace_soften_tps ?? null, pace_degraded_tps: r.pace_degraded_tps ?? null, note: r.note || '' })),
+        relief_after_tokens: Number(v('rk-ra')) || 0,
+        relief_tps: Number(v('rk-rt')) || 0,
+        hard_cap_usd: Number(v('rk-cap')) || 0,
+        hard_cap_allow_prefixes: v('rk-cap-allow').split(',').map((x) => x.trim()).filter(Boolean),
+      };
+    }
+    let rkDefaults = null;
+    async function loadRisk() {
+      const d = await api('/admin/api/cards/risk-policy');
+      rkDefaults = d.defaults; rkFill(d.policy); rkMsg('');
+    }
+    document.getElementById('rk-rule-add').addEventListener('click', () => { rkRules.push({ prefix: '', exempt: false, pace_normal_tps: null, pace_soften_tps: null, pace_degraded_tps: null, note: '' }); rkRenderRules(); });
+    document.getElementById('rk-defaults').addEventListener('click', () => { if (rkDefaults) { rkFill(rkDefaults); rkMsg('已填入缺省值 (未保存)'); } });
+    document.getElementById('rk-save').addEventListener('click', async () => {
+      try { const d = await api('/admin/api/cards/risk-policy', { method: 'POST', body: JSON.stringify(rkCollect()) }); rkFill(d.policy); rkMsg('已保存, 下一次请求起生效'); }
+      catch (e) { rkMsg(e.message, true); }
+    });
+    document.getElementById('rk-preview').addEventListener('click', async () => {
+      try {
+        const d = await api('/admin/api/cards/risk-policy/preview', { method: 'POST', body: JSON.stringify(rkCollect()) });
+        const s = d.summary || {};
+        document.getElementById('rk-preview-sub').textContent = '今日有活动 ' + s.cards + ' 张卡 → 正常 ' + s.normal + ' / 软化 ' + s.soften + ' / 压制 ' + s.degraded + (s.hard_cap ? ' / 触硬帽 ' + s.hard_cap : '');
+        const tb = document.getElementById('rk-preview-body'); tb.innerHTML = '';
+        if (!(d.rows || []).length) tb.innerHTML = '<tr><td colspan="9" class="muted">今日无活动卡</td></tr>';
+        (d.rows || []).forEach((r) => {
+          const tr = document.createElement('tr');
+          const pill = (t) => '<span class="pill ' + (t === 'degraded' ? 'bad' : t === 'soften' ? 'warn' : 'ok') + '">' + t + '</span>';
+          const chg = r.preview.throttle !== r.current.throttle;
+          tr.innerHTML = '<td class="mono" title="' + esc(r.card_key) + '">' + esc(r.card_key.slice(5, 13)) + ' <span class="muted">' + esc(r.owner || '') + '</span></td><td>' + esc(r.plan_id) + '</td><td class="mono">' + fUsd(r.day_quota_usd) + '</td><td class="mono">' + fmtN(r.day_used) + '</td>' +
+            '<td>' + pill(r.current.throttle) + ' <span class="mono">' + r.current.score + '</span></td><td' + (chg ? ' style="font-weight:600"' : '') + '>' + pill(r.preview.throttle) + ' <span class="mono">' + r.preview.score + '</span>/' + r.preview.threshold + (r.preview.hard_cap_hit ? ' <span class="pill bad">硬帽</span>' : '') + '</td>' +
+            '<td class="mono">' + (r.preview.pace_tps || '不限') + '</td><td style="font-size:11px">' + esc((r.preview.reasons || []).join(' · ')) + '</td>' +
+            '<td class="mono muted" style="font-size:11px">' + r.signals.active_slots + ' / ' + Math.round(r.signals.fast_follow_ratio * 100) + '% / ' + Number(r.signals.span_hours).toFixed(1) + 'h</td>';
+          tb.appendChild(tr);
+        });
+        rkMsg('预演完成 (未保存)');
+      } catch (e) { rkMsg(e.message, true); }
+    });
     // 套餐
     async function loadPlans() {
       const d = await api('/admin/api/cards/plans');

@@ -647,6 +647,14 @@ async fn main() -> anyhow::Result<()> {
             get(admin::api_cost_model_get).post(admin::api_cost_model_set),
         )
         .route(
+            "/admin/api/cards/risk-policy",
+            get(admin::api_risk_policy_get).post(admin::api_risk_policy_set),
+        )
+        .route(
+            "/admin/api/cards/risk-policy/preview",
+            post(admin::api_risk_policy_preview),
+        )
+        .route(
             "/admin/api/cards/pricing-table",
             get(admin::api_pricing_table),
         )
@@ -1947,7 +1955,7 @@ async fn inference_handler_inner(
                         if est > 0.0 {
                             local_out_est += est;
                             // B7 匀速流出: 喂该卡的共享桶 (同卡多流合计 ≤ pace_tps), 完整内容只是打字慢一点
-                            if let Some(p) = card_permit_s.as_ref() {
+                            if let Some(p) = card_permit_s.as_mut() {
                                 let wait = p.pace_admit(est);
                                 if !wait.is_zero() {
                                     pace_wait_ms += wait.as_millis() as u64;

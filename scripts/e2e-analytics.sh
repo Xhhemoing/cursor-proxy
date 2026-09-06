@@ -167,5 +167,20 @@ print("  speed what-if 全量: $/槽·时 %.1f → @25 %.1f (-%.0f%%) → @12 %.
 for r in d["by_model"][:3]: print("   ", r["model"][:30], "native tok/s", r["speed"]["upstream_tps_p50"] and round(r["speed"]["upstream_tps_p50"]), "@25 -%.0f%%" % (r["whatif"][0]["saving_ratio"]*100 if r["whatif"][0]["saving_ratio"] is not None else 0))
 ' && ok "speed what-if 单调 (更低 pace 省更多, $/槽·时 只降不升)" || ko "speed what-if 异常"
 
+echo "── 风控策略: GET/POST/preview + 校验 + 落盘 ──"
+RP=$(curl -s "$B/admin/api/cards/risk-policy" -H "$A")
+echo "$RP" | py 'import sys,json;d=json.load(sys.stdin);p=d["policy"];assert p["enabled"] is True and "weights" in p and "model_rules" in p and d["defaults"]["relief_after_tokens"]==3000' && ok "risk-policy GET 结构" || ko "risk-policy GET 异常: $RP"
+BAD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/admin/api/cards/risk-policy" -H "$A" -H 'Content-Type: application/json' -d "$(echo "$RP" | py 'import sys,json;p=json.load(sys.stdin)["policy"];p["soften_ratio_of_threshold"]=1.5;print(json.dumps(p))')")
+[ "$BAD" = "400" ] && ok "非法 soften_ratio → 400" || ko "非法策略未拒: $BAD"
+NEWP=$(echo "$RP" | py 'import sys,json;p=json.load(sys.stdin)["policy"];p["pace_normal_tps"]=40;p["abuse_threshold_override"]=45;p["model_rules"]=[{"prefix":"grok","exempt":True,"note":"e2e"},{"prefix":"claude-fable","pace_normal_tps":20}];p["hard_cap_usd"]=250;p["hard_cap_allow_prefixes"]=["kimi-k3"];print(json.dumps(p))')
+curl -s -X POST "$B/admin/api/cards/risk-policy" -H "$A" -H 'Content-Type: application/json' -d "$NEWP" | py 'import sys,json;d=json.load(sys.stdin);assert d["ok"] and d["policy"]["pace_normal_tps"]==40 and len(d["policy"]["model_rules"])==2' && ok "risk-policy POST 生效" || ko "POST 失败"
+python3 -c "import json,sys;d=json.load(open('$E/cards.json'));p=d['risk_policy'];assert p['hard_cap_usd']==250 and p['model_rules'][0]['prefix']=='grok';print('  cards.json risk_policy 已落盘')" && ok "risk_policy 持久化到 cards.json" || ko "未落盘"
+PV=$(curl -s -X POST "$B/admin/api/cards/risk-policy/preview" -H "$A" -H 'Content-Type: application/json' -d "$NEWP")
+echo "$PV" | py 'import sys,json;d=json.load(sys.stdin);s=d["summary"];assert set(["cards","normal","soften","degraded","hard_cap"])<=set(s);print("  preview:",s)' && ok "risk-policy preview 结构" || ko "preview 异常: $PV"
+# 卡状态里 pace_tps 应反映全局覆盖 (Normal → 40)
+curl -s "$B/admin/api/cards" -H "$A" | py 'import sys,json;d=json.load(sys.stdin);rows=d if isinstance(d,list) else d.get("cards",d.get("rows",[]));ok=[r for r in rows if r.get("throttle")=="normal"];assert all(r.get("pace_tps")==40 for r in ok), [(r["card_key"][:12],r.get("pace_tps")) for r in ok][:3];print("  normal 卡 pace_tps=40:",len(ok))' && ok "卡状态 pace_tps 反映全局覆盖" || ko "pace_tps 未反映"
+# 恢复缺省
+curl -s -X POST "$B/admin/api/cards/risk-policy" -H "$A" -H 'Content-Type: application/json' -d "$(echo "$RP" | py 'import sys,json;print(json.dumps(json.load(sys.stdin)["defaults"]))')" >/dev/null
+
 echo; echo "══ RESULT: $pass passed, $fail failed ══"
 exit $fail

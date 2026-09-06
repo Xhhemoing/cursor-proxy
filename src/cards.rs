@@ -445,6 +445,184 @@ impl Card {
 
 // ─────────────────────────── 行为评分 (脚本识别) ───────────────────────────
 
+// ─────────────────────────── 风控策略 (面板可调, 持久化在 cards.json) ───────────────────────────
+
+/// 行为评分权重/阈值. 全部可在面板调; 缺省 = 2026-09-05 用 61k 条流量校准的值.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScoreWeights {
+    /// 活跃 5 分钟格: ≥ hi 格 +hi 分; ≥ lo 格 +lo 分
+    pub slots_hi: u32,
+    pub slots_hi_pts: u32,
+    pub slots_lo: u32,
+    pub slots_lo_pts: u32,
+    /// 秒接率 (0–1): ≥ hi +hi 分; ≥ lo +lo 分
+    pub fast_hi: f64,
+    pub fast_hi_pts: u32,
+    pub fast_lo: f64,
+    pub fast_lo_pts: u32,
+    /// 长时无停顿: 跨度 ≥ span_hi h 且 最长空闲 < no_break_secs 且 格 ≥ span_min_slots → +span_hi_pts;
+    /// 跨度 ≥ span_lo h 且 格 ≥ span_min_slots → +span_lo_pts
+    pub span_hi_hours: f64,
+    pub span_hi_pts: u32,
+    pub span_lo_hours: f64,
+    pub span_lo_pts: u32,
+    pub span_min_slots: u32,
+    pub no_break_secs: u64,
+    /// 日消耗 ≥ quota_usd → +quota_pts
+    pub quota_usd: f64,
+    pub quota_pts: u32,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self {
+            slots_hi: 200,
+            slots_hi_pts: 30,
+            slots_lo: 150,
+            slots_lo_pts: 15,
+            fast_hi: 0.40,
+            fast_hi_pts: 30,
+            fast_lo: 0.25,
+            fast_lo_pts: 15,
+            span_hi_hours: 20.0,
+            span_hi_pts: 25,
+            span_lo_hours: 18.0,
+            span_lo_pts: 10,
+            span_min_slots: 100,
+            no_break_secs: NO_BREAK_SECS,
+            quota_usd: 250.0,
+            quota_pts: 15,
+        }
+    }
+}
+
+/// 某个模型 (前缀匹配) 的限速覆盖. `pace_*_tps` 为 None = 沿用全局/套餐; `exempt` = 该模型完全不限速
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModelPaceRule {
+    /// 模型名前缀 (如 "grok-4.6", "claude-fable-5-1-thinking")
+    pub prefix: String,
+    #[serde(default)]
+    pub exempt: bool,
+    #[serde(default)]
+    pub pace_normal_tps: Option<u32>,
+    #[serde(default)]
+    pub pace_soften_tps: Option<u32>,
+    #[serde(default)]
+    pub pace_degraded_tps: Option<u32>,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// 全局风控策略. 生效优先级 (高→低): 模型规则 exempt > 模型规则 pace > 全局 pace 覆盖 > 套餐 pace_*.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiskPolicy {
+    /// 总开关: false = 行为评分不生效 (全部 Normal)、不限速 (pace 0)
+    pub enabled: bool,
+    /// 评分权重
+    pub weights: ScoreWeights,
+    /// 全局压制阈值覆盖 (0 = 沿用各套餐 abuse_score_threshold)
+    pub abuse_threshold_override: u32,
+    /// 软化阈值 = 压制阈值 × 此比例
+    pub soften_ratio_of_threshold: f64,
+    /// 全局 pace 覆盖 (tok/s). None = 沿用套餐; Some(0) = 强制不限
+    pub pace_normal_tps: Option<u32>,
+    pub pace_soften_tps: Option<u32>,
+    pub pace_degraded_tps: Option<u32>,
+    /// 按模型前缀的规则 (最长前缀优先)
+    pub model_rules: Vec<ModelPaceRule>,
+    /// 长输出放开: 单请求已放出 ≥ relief_after_tokens 后, 限速改为 relief_tps (0 = 完全放开).
+    /// 目的: 输出 p90 4.7k tok @25 tok/s 要 3 分钟, 会撞客户端超时/触发重试 (重试更贵).
+    pub relief_after_tokens: u32,
+    pub relief_tps: u32,
+    /// 日面值硬帽 ($): 超过后仅放行 hard_cap_allow_prefixes 里的模型 (空 = 全拒 403). 0 = 关
+    pub hard_cap_usd: f64,
+    pub hard_cap_allow_prefixes: Vec<String>,
+}
+
+impl Default for RiskPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            weights: ScoreWeights::default(),
+            abuse_threshold_override: 0,
+            soften_ratio_of_threshold: 0.6,
+            pace_normal_tps: None,
+            pace_soften_tps: None,
+            pace_degraded_tps: None,
+            model_rules: vec![],
+            relief_after_tokens: 3000,
+            relief_tps: 0,
+            hard_cap_usd: 0.0,
+            hard_cap_allow_prefixes: vec![],
+        }
+    }
+}
+
+impl RiskPolicy {
+    /// 最长前缀匹配的模型规则
+    pub fn rule_for(&self, model: &str) -> Option<&ModelPaceRule> {
+        let m = model.strip_prefix("cursor-").unwrap_or(model);
+        self.model_rules
+            .iter()
+            .filter(|r| {
+                !r.prefix.is_empty() && (m.starts_with(&r.prefix) || model.starts_with(&r.prefix))
+            })
+            .max_by_key(|r| r.prefix.len())
+    }
+    /// 该 (套餐, 档位, 模型) 生效的 pace (tok/s, 0 = 不限)
+    pub fn pace_for(&self, plan: &CardPlan, throttle: Throttle, model: &str) -> u32 {
+        if !self.enabled {
+            return 0;
+        }
+        let plan_pace = match throttle {
+            Throttle::Normal => plan.pace_normal_tps,
+            Throttle::Soften => plan.pace_soften_tps,
+            Throttle::Degraded => plan.pace_degraded_tps,
+        };
+        let global = match throttle {
+            Throttle::Normal => self.pace_normal_tps,
+            Throttle::Soften => self.pace_soften_tps,
+            Throttle::Degraded => self.pace_degraded_tps,
+        };
+        let mut pace = global.unwrap_or(plan_pace);
+        if let Some(r) = self.rule_for(model) {
+            if r.exempt {
+                return 0;
+            }
+            let o = match throttle {
+                Throttle::Normal => r.pace_normal_tps,
+                Throttle::Soften => r.pace_soften_tps,
+                Throttle::Degraded => r.pace_degraded_tps,
+            };
+            if let Some(v) = o {
+                pace = v;
+            }
+        }
+        pace
+    }
+    /// 该套餐生效的压制阈值 (0 = 关闭评分)
+    pub fn threshold_for(&self, plan: &CardPlan) -> u32 {
+        if !self.enabled {
+            return 0;
+        }
+        if self.abuse_threshold_override > 0 {
+            self.abuse_threshold_override
+        } else {
+            plan.abuse_score_threshold
+        }
+    }
+    pub fn hard_cap_hit(&self, day_quota_usd: f64, model: &str) -> bool {
+        if !self.enabled || self.hard_cap_usd <= 0.0 || day_quota_usd < self.hard_cap_usd {
+            return false;
+        }
+        let m = model.strip_prefix("cursor-").unwrap_or(model);
+        !self
+            .hard_cap_allow_prefixes
+            .iter()
+            .any(|p| !p.is_empty() && (m.starts_with(p.as_str()) || model.starts_with(p.as_str())))
+    }
+}
+
 /// 5 分钟格数 / 天
 const SLOTS_PER_DAY: usize = 288;
 /// 「秒接」阈值: 上一条响应结束到下一条请求到达 < 3s
@@ -557,35 +735,48 @@ pub struct AbuseScore {
 }
 
 pub fn abuse_score(sig: &BehaviorSignals, day_quota_usd: f64, now: u64) -> AbuseScore {
+    abuse_score_with(sig, day_quota_usd, now, &ScoreWeights::default())
+}
+
+pub fn abuse_score_with(
+    sig: &BehaviorSignals,
+    day_quota_usd: f64,
+    now: u64,
+    w: &ScoreWeights,
+) -> AbuseScore {
     let slots = sig.active_slots();
     let fast = sig.fast_follow_ratio();
     let span = sig.span_hours(now);
     let idle = sig.max_idle.load(Ordering::Relaxed);
     let mut score = 0u32;
     let mut reasons = Vec::new();
-    if slots >= 200 {
-        score += 30;
+    if slots >= w.slots_hi {
+        score += w.slots_hi_pts;
         reasons.push(format!("活跃 {}/288 格", slots));
-    } else if slots >= 150 {
-        score += 15;
+    } else if slots >= w.slots_lo {
+        score += w.slots_lo_pts;
         reasons.push(format!("活跃 {} 格", slots));
     }
-    if fast >= 0.40 {
-        score += 30;
+    if fast >= w.fast_hi {
+        score += w.fast_hi_pts;
         reasons.push(format!("秒接 {:.0}%", fast * 100.0));
-    } else if fast >= 0.25 {
-        score += 15;
+    } else if fast >= w.fast_lo {
+        score += w.fast_lo_pts;
         reasons.push(format!("秒接 {:.0}%", fast * 100.0));
     }
-    if span >= 20.0 && idle < NO_BREAK_SECS && slots >= 100 {
-        score += 25;
-        reasons.push("20h+ 无 30min 停顿".into());
-    } else if span >= 18.0 && slots >= 100 {
-        score += 10;
+    if span >= w.span_hi_hours && idle < w.no_break_secs && slots >= w.span_min_slots {
+        score += w.span_hi_pts;
+        reasons.push(format!(
+            "{:.0}h+ 无 {}min 停顿",
+            w.span_hi_hours,
+            w.no_break_secs / 60
+        ));
+    } else if span >= w.span_lo_hours && slots >= w.span_min_slots {
+        score += w.span_lo_pts;
         reasons.push(format!("{:.0}h 活跃", span));
     }
-    if day_quota_usd >= 250.0 {
-        score += 15;
+    if w.quota_usd > 0.0 && day_quota_usd >= w.quota_usd {
+        score += w.quota_pts;
         reasons.push(format!("日消耗 ${:.0}", day_quota_usd));
     }
     AbuseScore {
@@ -670,6 +861,8 @@ pub struct CardStore {
     cards: DashMap<String, Card>,
     runtimes: DashMap<String, Arc<CardRuntime>>,
     cost_model: std::sync::RwLock<CostModel>,
+    /// 全局风控策略 (面板可调)
+    risk: std::sync::RwLock<RiskPolicy>,
     tz_offset_minutes: i32,
     path: std::path::PathBuf,
     /// B4: 定额卡余额账本 (cards.db, SQLite WAL). 热路径只写这一行, 不再每请求全量重写 cards.json.
@@ -691,6 +884,7 @@ impl CardStore {
             cards: DashMap::new(),
             runtimes: DashMap::new(),
             cost_model: std::sync::RwLock::new(CostModel::default()),
+            risk: std::sync::RwLock::new(RiskPolicy::default()),
             tz_offset_minutes,
             path,
             ledger,
@@ -865,6 +1059,15 @@ impl CardStore {
         }
         self.save();
     }
+    pub fn risk_policy(&self) -> RiskPolicy {
+        self.risk.read().map(|c| c.clone()).unwrap_or_default()
+    }
+    pub fn set_risk_policy(&self, p: RiskPolicy) {
+        if let Ok(mut g) = self.risk.write() {
+            *g = p;
+        }
+        self.save();
+    }
     pub fn tz_offset_minutes(&self) -> i32 {
         self.tz_offset_minutes
     }
@@ -900,6 +1103,14 @@ impl CardStore {
                 *g = cm;
             }
         }
+        if let Some(rp) = data
+            .get("risk_policy")
+            .and_then(|v| serde_json::from_value::<RiskPolicy>(v.clone()).ok())
+        {
+            if let Ok(mut g) = self.risk.write() {
+                *g = rp;
+            }
+        }
         if let Some(plans) = data.get("plans").and_then(|v| v.as_array()) {
             for p in plans {
                 if let Ok(plan) = serde_json::from_value::<CardPlan>(p.clone()) {
@@ -928,7 +1139,7 @@ impl CardStore {
     pub fn save(&self) {
         let plans: Vec<CardPlan> = self.plans.iter().map(|r| r.value().clone()).collect();
         let cards: Vec<Card> = self.cards.iter().map(|r| r.value().clone()).collect();
-        let data = json!({ "cost_model": self.cost_model(), "plans": plans, "cards": cards });
+        let data = json!({ "cost_model": self.cost_model(), "risk_policy": self.risk_policy(), "plans": plans, "cards": cards });
         if let Ok(text) = serde_json::to_string_pretty(&data) {
             if let Err(e) = crate::config::atomic_write(&self.path, &text) {
                 tracing::warn!(event = "card_save", error = %e, "card persist failed");
@@ -1122,7 +1333,8 @@ impl CardStore {
             0.0
         };
         let load = quota_ratio.max(count_ratio);
-        let score = abuse_score(&rt.behavior, quota_used, now);
+        let policy = self.risk_policy();
+        let score = abuse_score_with(&rt.behavior, quota_used, now, &policy.weights);
         let mut t = if load > 1.0 {
             Throttle::Degraded
         } else if load >= plan.soften_ratio {
@@ -1130,9 +1342,9 @@ impl CardStore {
         } else {
             Throttle::Normal
         };
-        if plan.abuse_score_threshold > 0 {
-            let th = plan.abuse_score_threshold;
-            let soft_th = (th as f64 * 0.6) as u32;
+        let th = policy.threshold_for(plan);
+        if th > 0 {
+            let soft_th = (th as f64 * policy.soften_ratio_of_threshold) as u32;
             if score.score >= th {
                 t = Throttle::Degraded;
             } else if score.score >= soft_th && t == Throttle::Normal {
@@ -1199,7 +1411,9 @@ impl CardStore {
                 }
             }
         }
-        let pace_tps = Self::pace_for(&plan, throttle);
+        let policy = self.risk_policy();
+        let pace_tps = policy.pace_for(&plan, throttle, model);
+        let relief = (policy.relief_after_tokens, policy.relief_tps);
         // B7: 档位变化时重置该卡共享桶的速率 (同卡多流共用一个桶)
         if let Ok(mut g) = rt.pacer.lock() {
             match (&mut *g, pace_tps) {
@@ -1217,6 +1431,9 @@ impl CardStore {
                 pace_tps,
                 model: model.to_string(),
                 key: key.to_string(),
+                relief_after: relief.0 as f64,
+                relief_tps: relief.1,
+                sent_tokens: 0.0,
                 hold_micro: hold,
                 settled: false,
             },
@@ -1240,7 +1457,9 @@ impl CardStore {
                 format!("card concurrency limit exceeded (max {})", cap),
             ));
         }
-        let pace_tps = Self::pace_for(&plan, throttle);
+        let policy = self.risk_policy();
+        let pace_tps = policy.pace_for(&plan, throttle, model);
+        let relief = (policy.relief_after_tokens, policy.relief_tps);
         Ok((
             card,
             plan,
@@ -1250,6 +1469,9 @@ impl CardStore {
                 pace_tps,
                 model: model.to_string(),
                 key: key.to_string(),
+                relief_after: relief.0 as f64,
+                relief_tps: relief.1,
+                sent_tokens: 0.0,
                 hold_micro: hold,
                 settled: false,
             },
@@ -1271,14 +1493,6 @@ impl CardStore {
             {
                 return true;
             }
-        }
-    }
-
-    fn pace_for(plan: &CardPlan, throttle: Throttle) -> u32 {
-        match throttle {
-            Throttle::Normal => plan.pace_normal_tps,
-            Throttle::Soften => plan.pace_soften_tps,
-            Throttle::Degraded => plan.pace_degraded_tps,
         }
     }
 
@@ -1351,6 +1565,27 @@ impl CardStore {
             return Err((403, format!("{} (plan '{}')", reason, plan.id)));
         }
         let ds = self.roll_day(&rt, now);
+
+        // 日面值硬帽 (全局风控): 超帽后只放行白名单模型
+        {
+            let policy = self.risk_policy();
+            let used = rt.day_quota_micro.load(Ordering::Relaxed) as f64 / 1e6;
+            if policy.hard_cap_hit(used, model) {
+                return Err((
+                    429,
+                    format!(
+                        "daily face cap reached (${:.0} / ${:.0}); only {} allowed until tomorrow",
+                        used,
+                        policy.hard_cap_usd,
+                        if policy.hard_cap_allow_prefixes.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            policy.hard_cap_allow_prefixes.join("/")
+                        }
+                    ),
+                ));
+            }
+        }
 
         // RPM 闸门 (先于计数, 拒绝时不污染当日计数)
         let rpm_now = rt.rpm.tick(now);
@@ -1510,14 +1745,71 @@ impl CardStore {
             "face_left_usd": plan.as_ref().map(|p| (p.face_usd - face_used).max(0.0)).unwrap_or(0.0),
             "load": load,
             "throttle": throttle.as_str(),
-            "pace_tps": plan.as_ref().map(|p| match throttle {
-                Throttle::Normal => p.pace_normal_tps,
-                Throttle::Soften => p.pace_soften_tps,
-                Throttle::Degraded => p.pace_degraded_tps,
-            }),
+            "pace_tps": plan.as_ref().map(|p| self.risk_policy().pace_for(p, throttle, "")),
             "abuse": score,
             "rpm_now": rt.rpm.current(now),
         }))
+    }
+
+    /// 风控预演: 用各卡**今日已有**的行为信号, 按候选策略重算评分/档位/pace, 不落盘不生效.
+    /// 面板改权重前先看「谁会被压」.
+    pub fn preview_risk(&self, policy: &RiskPolicy) -> Vec<Value> {
+        let now = now_unix();
+        let ds = day_start(now, self.tz_offset_minutes);
+        let mut out = vec![];
+        for c in self.cards.iter() {
+            let card = c.value();
+            let Some(rt) = self.runtimes.get(&card.card_key).map(|r| r.clone()) else {
+                continue;
+            };
+            if rt.day_start.load(Ordering::Relaxed) != ds {
+                continue;
+            }
+            let Some(plan) = self.get_plan(&card.plan_id) else {
+                continue;
+            };
+            let quota_used = rt.day_quota_micro.load(Ordering::Relaxed) as f64 / 1e6;
+            let cur = abuse_score_with(&rt.behavior, quota_used, now, &self.risk_policy().weights);
+            let new = abuse_score_with(&rt.behavior, quota_used, now, &policy.weights);
+            let th = policy.threshold_for(&plan);
+            let soft = (th as f64 * policy.soften_ratio_of_threshold) as u32;
+            let t = if th > 0 && new.score >= th {
+                Throttle::Degraded
+            } else if th > 0 && new.score >= soft {
+                Throttle::Soften
+            } else {
+                Throttle::Normal
+            };
+            let (cur_t, _, _) = self.eval_throttle(&plan, &rt, now);
+            out.push(json!({
+                "card_key": card.card_key,
+                "owner": card.owner,
+                "plan_id": card.plan_id,
+                "day_quota_usd": quota_used,
+                "day_used": rt.day_count.load(Ordering::Relaxed),
+                "current": { "score": cur.score, "throttle": cur_t.as_str(), "reasons": cur.reasons },
+                "preview": {
+                    "score": new.score,
+                    "throttle": t.as_str(),
+                    "reasons": new.reasons,
+                    "threshold": th,
+                    "pace_tps": policy.pace_for(&plan, t, ""),
+                    "hard_cap_hit": policy.hard_cap_hit(quota_used, ""),
+                },
+                "signals": {
+                    "active_slots": new.active_slots,
+                    "fast_follow_ratio": new.fast_follow_ratio,
+                    "span_hours": new.span_hours,
+                    "max_idle_secs": new.max_idle_secs,
+                },
+            }));
+        }
+        out.sort_by(|a, b| {
+            b["preview"]["score"]
+                .as_u64()
+                .cmp(&a["preview"]["score"].as_u64())
+        });
+        out
     }
 
     pub fn list_status(&self) -> Vec<Value> {
@@ -1555,6 +1847,11 @@ pub struct CardPermit {
     pace_tps: u32,
     model: String,
     key: String,
+    /// 长输出放开: 本请求已放出 ≥ relief_after 后, 限速改 relief_tps (0 = 放开). 0 = 不启用
+    relief_after: f64,
+    relief_tps: u32,
+    /// 本请求累计放出 token (估算)
+    sent_tokens: f64,
     /// B1: 本请求在 rt.hold_micro 里预占的 micro-$, 结算/丢弃时归还
     hold_micro: u64,
     /// 是否已结算 (幂等; 未结算就 Drop 说明调用方漏了 settle —— 仍归还 hold, 但记警告)
@@ -1580,9 +1877,27 @@ impl CardPermit {
     }
     /// B7: 向该卡的共享匀速桶放一帧 (估算 token 数), 返回调用方应 sleep 的时长.
     /// 同卡所有并发流共用一个桶 → 卡总输出 ≤ pace_tps. pace=0 时恒 ZERO.
-    pub fn pace_admit(&self, tokens: f64) -> std::time::Duration {
+    pub fn pace_admit(&mut self, tokens: f64) -> std::time::Duration {
         if self.pace_tps == 0 || tokens <= 0.0 {
             return std::time::Duration::ZERO;
+        }
+        self.sent_tokens += tokens;
+        // 长输出放开 (风控策略 relief): 单请求已超阈值 → 不再喂共享桶 (relief_tps=0)
+        // 或按 relief_tps 单独匀速 (简化: relief_tps>0 时仍走共享桶但等待按比例缩短)
+        if self.relief_after > 0.0 && self.sent_tokens >= self.relief_after {
+            if self.relief_tps == 0 {
+                return std::time::Duration::ZERO;
+            }
+            let w = match self.rt.pacer.lock() {
+                Ok(mut g) => match g.as_mut() {
+                    Some(p) => p.admit(tokens),
+                    None => std::time::Duration::ZERO,
+                },
+                Err(_) => std::time::Duration::ZERO,
+            };
+            // 放开档速度更高 → 等待按 pace/relief 缩放
+            let scale = (self.pace_tps as f64 / self.relief_tps as f64).min(1.0);
+            return w.mul_f64(scale);
         }
         match self.rt.pacer.lock() {
             Ok(mut g) => match g.as_mut() {
@@ -1591,6 +1906,9 @@ impl CardPermit {
             },
             Err(_) => std::time::Duration::ZERO,
         }
+    }
+    pub fn sent_tokens(&self) -> f64 {
+        self.sent_tokens
     }
     fn release_hold(&mut self) {
         if self.hold_micro > 0 {
@@ -1930,7 +2248,7 @@ mod tests {
         s.upsert_plan(p);
         let c = s.issue_card("lq", "queue").unwrap();
         let key = c.card_key.clone();
-        let (_, _, g1, _) = s.acquire(&key, "kimi-k3", 0).await.unwrap();
+        let (_, _, mut g1, _) = s.acquire(&key, "kimi-k3", 0).await.unwrap();
         // 第二个请求在后台排队 (把 permit 一起带回, 否则在 task 里就 drop 了)
         let s2 = s.clone();
         let k2 = key.clone();
@@ -2011,8 +2329,8 @@ mod tests {
         p.pace_normal_tps = 10;
         s.upsert_plan(p);
         let c = s.issue_card("sp", "pace").unwrap();
-        let (_, _, g1, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
-        let (_, _, g2, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
+        let (_, _, mut g1, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
+        let (_, _, mut g2, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
         assert_eq!(g1.pace_tps(), 10);
         // 流 1 用掉 1s burst (10 tok) 不等
         assert_eq!(g1.pace_admit(10.0), std::time::Duration::ZERO);
@@ -2027,7 +2345,7 @@ mod tests {
             ..CardPlan::default()
         });
         let c0 = s0.issue_card("np", "x").unwrap();
-        let (_, _, g0, _) = s0.acquire(&c0.card_key, "kimi-k3", 0).await.unwrap();
+        let (_, _, mut g0, _) = s0.acquire(&c0.card_key, "kimi-k3", 0).await.unwrap();
         assert_eq!(g0.pace_admit(1e6), std::time::Duration::ZERO);
     }
 
@@ -2329,6 +2647,123 @@ mod tests {
         p.face_usd = 0.0;
         s.upsert_plan(p);
         assert!(s.issue_card("q0", "x").is_err());
+    }
+
+    #[test]
+    fn risk_policy_pace_precedence_and_hard_cap() {
+        let mut plan = CardPlan::default();
+        plan.pace_normal_tps = 40;
+        plan.pace_soften_tps = 25;
+        plan.pace_degraded_tps = 12;
+        plan.abuse_score_threshold = 55;
+        let mut p = RiskPolicy::default();
+        // 缺省: 沿用套餐
+        assert_eq!(
+            p.pace_for(&plan, Throttle::Normal, "claude-fable-5-1-thinking-high"),
+            40
+        );
+        assert_eq!(p.pace_for(&plan, Throttle::Degraded, "x"), 12);
+        assert_eq!(p.threshold_for(&plan), 55);
+        // 全局覆盖
+        p.pace_normal_tps = Some(30);
+        p.abuse_threshold_override = 45;
+        assert_eq!(p.pace_for(&plan, Throttle::Normal, "x"), 30);
+        assert_eq!(p.pace_for(&plan, Throttle::Soften, "x"), 25);
+        assert_eq!(p.threshold_for(&plan), 45);
+        // 模型规则 > 全局: grok 免限; fable 单独 20; cursor- 前缀也匹配; 最长前缀优先
+        p.model_rules = vec![
+            ModelPaceRule {
+                prefix: "grok-4.6".into(),
+                exempt: true,
+                ..Default::default()
+            },
+            ModelPaceRule {
+                prefix: "claude-fable".into(),
+                pace_normal_tps: Some(20),
+                ..Default::default()
+            },
+            ModelPaceRule {
+                prefix: "claude-fable-5-1-thinking-max".into(),
+                pace_normal_tps: Some(10),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(p.pace_for(&plan, Throttle::Normal, "grok-4.6"), 0);
+        assert_eq!(
+            p.pace_for(&plan, Throttle::Normal, "cursor-grok-4.6-xhigh"),
+            0
+        );
+        assert_eq!(
+            p.pace_for(&plan, Throttle::Normal, "claude-fable-5-1-thinking-high"),
+            20
+        );
+        assert_eq!(
+            p.pace_for(&plan, Throttle::Normal, "claude-fable-5-1-thinking-max"),
+            10
+        );
+        assert_eq!(
+            p.pace_for(&plan, Throttle::Soften, "claude-fable-5-1-thinking-high"),
+            25
+        ); // 规则未覆盖软化 → 全局/套餐
+           // 总开关关: 全部 0 / 阈值 0
+        p.enabled = false;
+        assert_eq!(p.pace_for(&plan, Throttle::Degraded, "x"), 0);
+        assert_eq!(p.threshold_for(&plan), 0);
+        p.enabled = true;
+        // 硬帽
+        p.hard_cap_usd = 250.0;
+        p.hard_cap_allow_prefixes = vec!["kimi-k3".into(), "grok".into()];
+        assert!(!p.hard_cap_hit(249.0, "claude-fable-5"));
+        assert!(p.hard_cap_hit(250.0, "claude-fable-5"));
+        assert!(!p.hard_cap_hit(300.0, "kimi-k3-high"));
+        assert!(!p.hard_cap_hit(300.0, "cursor-grok-4.6-xhigh"));
+        p.hard_cap_allow_prefixes.clear();
+        assert!(p.hard_cap_hit(300.0, "kimi-k3-high"));
+    }
+
+    #[test]
+    fn score_weights_are_tunable() {
+        let sig = BehaviorSignals::new();
+        let ds = 1_700_000_000u64;
+        // 60 个 5 分钟格 (每格 1 条), 每格里再补 1 条秒接 → 秒接率 ≈ 50%
+        let mut t = ds;
+        for _ in 0..60u64 {
+            sig.on_arrive(t, ds);
+            sig.on_done(t + 10);
+            sig.on_arrive(t + 11, ds); // 秒接
+            sig.on_done(t + 20);
+            t += 300;
+        }
+        let d = abuse_score(&sig, 0.0, t);
+        // 缺省: 60 格不到 150 → 0; 秒接 50% ≥ 40% → 30
+        assert_eq!(d.score, 30, "default {} {:?}", d.score, d.reasons);
+        let mut w = ScoreWeights::default();
+        w.slots_lo = 50;
+        w.slots_lo_pts = 40;
+        let s = abuse_score_with(&sig, 0.0, t, &w);
+        assert!(s.score >= 70, "tuned {} {:?}", s.score, s.reasons);
+        // 日消耗关 (quota_usd=0) 不加分
+        w.quota_usd = 0.0;
+        let s2 = abuse_score_with(&sig, 9999.0, t, &w);
+        assert_eq!(s2.score, s.score);
+    }
+
+    #[test]
+    fn risk_policy_persists_in_cards_json() {
+        let st = store();
+        let mut p = RiskPolicy::default();
+        p.pace_normal_tps = Some(33);
+        p.model_rules.push(ModelPaceRule {
+            prefix: "grok".into(),
+            exempt: true,
+            ..Default::default()
+        });
+        p.hard_cap_usd = 123.0;
+        st.set_risk_policy(p.clone());
+        let re = CardStore::open(&st.path, st.tz_offset_minutes);
+        assert_eq!(re.risk_policy(), p);
+        let _ = std::fs::remove_file(&st.path);
+        let _ = std::fs::remove_file(st.path.with_extension("db"));
     }
 
     #[test]

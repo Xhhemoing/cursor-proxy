@@ -79,3 +79,14 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - analytics: speed{upstream_tps_p50, paced_requests, pace_wait_hours, pace_lane_share}; simulate_pace what-if
 - /admin/api/analytics/speed?paces=25,15,12,8 → 按模型 原生速度 + 各档限速后 $/槽·时 与省幅; 面板「消耗分析 → 速度/限速」tab
 - 隔离 E2E 24/24; cargo test 163/163
+
+## 2026-09-06 UTC — 本机 8800 面板可调风控 (RiskPolicy)
+- 备份 *.bak-risk-*; md5 见 swap 输出
+- 新 cards::RiskPolicy (cards.json.risk_policy 落盘, 热更新): 总开关 / 评分权重 ScoreWeights (格/秒接/跨度/日消耗 四类阈值+分值) /
+  压制阈值覆盖 + 软化比例 / 全局 pace 三档覆盖 / 按模型前缀规则 (免限 或 单独 pace, 最长前缀优先, 兼容 cursor-) /
+  长输出放开 (单请求 ≥N tok 后放开或降档) / 日面值硬帽 (超帽只放白名单前缀, 其余 429)
+- 优先级: 模型规则 exempt > 模型规则 pace > 全局覆盖 > 套餐 pace_*; enabled=false → 全部 Normal 不限速
+- API: GET/POST /admin/api/cards/risk-policy, POST .../preview (用今日各卡真实信号按候选参数重算档位, 不落盘)
+- 面板: 套餐卡 → 「风控」tab (总控 / 权重 / 模型规则表 / 预演表 / 恢复缺省)
+- 缺省策略 = 现行为 (权重同旧硬编码, pace 沿用套餐, relief 3000 tok 放开, 硬帽关) → 换后行为不变
+- 隔离 E2E 30/30; cargo test 166/166
