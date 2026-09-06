@@ -97,3 +97,8 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 加 RiskPolicy.pace_min_output_price_per_m (缺省 0 关): 输出价 < $N/M 自动免限, 显式模型规则仍优先. 面板加字段. 设为 $10 → gemini/grok 免限, kimi($15)/sol/opus/fable 仍限
 - 备份 *.bak-cheap-exempt-20260906-131736; md5 56af3f3b377f6894db611703573fc836; 166 tests
 - 13:32 追加: 账本列 out_visible_est (流式可见输出估算); simulate_pace 用可见输出 (思考模型 output 含不流式的思考 token, 实测 fable-max 40 tok/s 限速下客户端仍 84–89 tok/s = 可见部分只占一半); speed tab 加「可见比」列. md5 4b93fb1c90f22f0711e68792423d35cd; 167 tests
+
+## 2026-09-06 16:30 UTC — 本机 8800 修利润报表口径
+- 利润报表 (/admin/api/cards/profit, 面板「套餐卡→利润」+ 概览「套餐卡利润」) 逐条重算面值时没按 input_incl_cache 扣缓存
+  → day50 成本显示 ¥302 (消耗分析同数据 ¥72), 毛利 -1%. 现与 analytics::normalize_input 同口径
+- md5 da45efffdce38f93f4147d4dbbeaf5ad; 167 tests

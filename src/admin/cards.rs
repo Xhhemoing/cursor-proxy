@@ -520,7 +520,7 @@ pub async fn api_cards_profit(
         }
     };
     let mut sql = String::from(
-        "SELECT key_name, model, ts_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, status
+        "SELECT key_name, model, ts_ms, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, status, input_incl_cache
          FROM billing_records WHERE key_name LIKE 'card-%'",
     );
     let mut params: Vec<i64> = Vec::new();
@@ -577,7 +577,15 @@ pub async fn api_cards_profit(
         let cr: i64 = r.get(5).unwrap_or(0);
         let cw: i64 = r.get(6).unwrap_or(0);
         let status: i64 = r.get(7).unwrap_or(200);
-        let usd = if it == 0 && ot == 0 {
+        let incl: i64 = r.get(8).unwrap_or(1);
+        // 与消耗分析同口径: 老行 input 含缓存 → 扣掉, 否则缓存按 input 全价重复计 (曾让利润表成本高估 4×)
+        let it = crate::analytics::normalize_input(
+            it.max(0) as u64,
+            cr.max(0) as u64,
+            cw.max(0) as u64,
+            incl != 0,
+        ) as i64;
+        let usd = if it == 0 && ot == 0 && cr == 0 {
             0.0 // 失败/无 usage 不计面值
         } else {
             cards::estimate_quota_cost_full(&model, it as u64, ot as u64, cr as u64, cw as u64)
