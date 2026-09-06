@@ -1043,6 +1043,7 @@
                   <label title="放开后的速度; 0 = 完全不限">放开后 tok/s (0=不限) <input id="rk-rt" type="number" min="0" step="1"></label>
                   <label title="卡当日面值 ≥ 此值后, 只放行白名单前缀的模型 (其余 429). 0 = 关">日面值硬帽 $ (0=关) <input id="rk-cap" type="number" min="0" step="10"></label>
                   <label title="逗号分隔前缀, 如 kimi-k3,grok">硬帽后仍放行的模型前缀 <input id="rk-cap-allow" type="text" placeholder="kimi-k3, grok"></label>
+                  <label title="官方输出价 $/M 低于此值的模型自动不限速 (限了省不到钱只伤体验: gemini-flash 3800 tok/s 压到 40 = 1s 变 37s). 参考: gemini 3.75 / grok 6 / kimi-k3 15 / sol 20 / opus 25 / fable 50. 0 = 关">便宜模型自动免限: 输出价 &lt; $/M <input id="rk-cheap" type="number" min="0" step="1"></label>
                 </div>
               </div>
             </div>
@@ -1754,6 +1755,7 @@
       document.getElementById('rk-rt').value = p.relief_tps ?? 0;
       document.getElementById('rk-cap').value = p.hard_cap_usd ?? 0;
       document.getElementById('rk-cap-allow').value = (p.hard_cap_allow_prefixes || []).join(', ');
+      document.getElementById('rk-cheap').value = p.pace_min_output_price_per_m ?? 0;
       RK_W.forEach(([k, id]) => { document.getElementById(id).value = (p.weights || {})[k] ?? ''; });
       rkRules = (p.model_rules || []).map((r) => Object.assign({}, r));
       rkRenderRules();
@@ -1789,6 +1791,7 @@
         relief_tps: Number(v('rk-rt')) || 0,
         hard_cap_usd: Number(v('rk-cap')) || 0,
         hard_cap_allow_prefixes: v('rk-cap-allow').split(',').map((x) => x.trim()).filter(Boolean),
+        pace_min_output_price_per_m: Number(v('rk-cheap')) || 0,
       };
     }
     let rkDefaults = null;

@@ -537,6 +537,10 @@ pub struct RiskPolicy {
     /// 日面值硬帽 ($): 超过后仅放行 hard_cap_allow_prefixes 里的模型 (空 = 全拒 403). 0 = 关
     pub hard_cap_usd: f64,
     pub hard_cap_allow_prefixes: Vec<String>,
+    /// 便宜模型自动免限: 官方输出价 ($/M) 低于此值的模型不限速 (限了省不到钱只伤体验:
+    /// gemini-flash 原生 3800 tok/s 压到 40 = 1s 变 37s, 面值 $2/槽·时). 0 = 关
+    #[serde(default)]
+    pub pace_min_output_price_per_m: f64,
 }
 
 impl Default for RiskPolicy {
@@ -554,6 +558,7 @@ impl Default for RiskPolicy {
             relief_tps: 0,
             hard_cap_usd: 0.0,
             hard_cap_allow_prefixes: vec![],
+            pace_min_output_price_per_m: 0.0,
         }
     }
 }
@@ -585,6 +590,10 @@ impl RiskPolicy {
             Throttle::Degraded => self.pace_degraded_tps,
         };
         let mut pace = global.unwrap_or(plan_pace);
+        // 便宜模型自动免限 (显式模型规则仍优先: 规则里给了 pace 就按规则)
+        let cheap = self.pace_min_output_price_per_m > 0.0
+            && !model.is_empty()
+            && model_price(model).1 < self.pace_min_output_price_per_m;
         if let Some(r) = self.rule_for(model) {
             if r.exempt {
                 return 0;
@@ -595,8 +604,11 @@ impl RiskPolicy {
                 Throttle::Degraded => r.pace_degraded_tps,
             };
             if let Some(v) = o {
-                pace = v;
+                return v;
             }
+        }
+        if cheap {
+            return 0;
         }
         pace
     }
@@ -2719,6 +2731,28 @@ mod tests {
         assert!(!p.hard_cap_hit(300.0, "cursor-grok-4.6-xhigh"));
         p.hard_cap_allow_prefixes.clear();
         assert!(p.hard_cap_hit(300.0, "kimi-k3-high"));
+        // 便宜模型自动免限: 输出价 < $10/M → 0; fable ($50) 仍限; 规则显式 pace 优先于自动免限
+        let mut p2 = RiskPolicy::default();
+        p2.pace_normal_tps = Some(40);
+        p2.pace_min_output_price_per_m = 10.0;
+        assert_eq!(p2.pace_for(&plan, Throttle::Normal, "gemini-3.8-flash"), 0); // $3.75
+        assert_eq!(p2.pace_for(&plan, Throttle::Normal, "grok-4.6"), 0); // $6
+        assert_eq!(p2.pace_for(&plan, Throttle::Normal, "kimi-k3-max"), 40); // $15
+        assert_eq!(
+            p2.pace_for(&plan, Throttle::Normal, "claude-fable-5-1-thinking-high"),
+            40
+        );
+        p2.model_rules = vec![ModelPaceRule {
+            prefix: "gemini".into(),
+            pace_normal_tps: Some(100),
+            ..Default::default()
+        }];
+        assert_eq!(
+            p2.pace_for(&plan, Throttle::Normal, "gemini-3.8-flash"),
+            100
+        );
+        // 空模型名 (card_status 展示用) 不触发自动免限
+        assert_eq!(p2.pace_for(&plan, Throttle::Normal, ""), 40);
     }
 
     #[test]

@@ -90,3 +90,9 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 面板: 套餐卡 → 「风控」tab (总控 / 权重 / 模型规则表 / 预演表 / 恢复缺省)
 - 缺省策略 = 现行为 (权重同旧硬编码, pace 沿用套餐, relief 3000 tok 放开, 硬帽关) → 换后行为不变
 - 隔离 E2E 30/30; cargo test 166/166
+
+## 2026-09-06 13:17 UTC — 本机 8800 风控策略上线 + 便宜模型自动免限
+- 12:56 用 scripts/apply-risk-recommended.sh 应用: 全局 pace 40/25/12, grok 规则免限, relief 3000 tok, 硬帽 $250 (白名单 kimi-k3/grok); 权重缺省
+- 实测: grok 行 pace_tps=0 ✓; gemini-3.8-flash 行 pace_tps=40, pace_wait 25–35s (原生 3800 tok/s 被压到 37) → 便宜模型限了只伤体验
+- 加 RiskPolicy.pace_min_output_price_per_m (缺省 0 关): 输出价 < $N/M 自动免限, 显式模型规则仍优先. 面板加字段. 设为 $10 → gemini/grok 免限, kimi($15)/sol/opus/fable 仍限
+- 备份 *.bak-cheap-exempt-20260906-131736; md5 56af3f3b377f6894db611703573fc836; 166 tests

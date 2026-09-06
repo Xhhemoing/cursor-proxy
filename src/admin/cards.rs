@@ -266,8 +266,8 @@ fn validate_policy(p: &RiskPolicy) -> Result<(), String> {
             return Err("model rule prefix empty".into());
         }
     }
-    if p.hard_cap_usd < 0.0 {
-        return Err("hard_cap_usd must be ≥ 0".into());
+    if p.hard_cap_usd < 0.0 || p.pace_min_output_price_per_m < 0.0 {
+        return Err("hard_cap_usd / pace_min_output_price_per_m must be ≥ 0".into());
     }
     let w = &p.weights;
     if !(0.0..=1.0).contains(&w.fast_hi) || !(0.0..=1.0).contains(&w.fast_lo) {
