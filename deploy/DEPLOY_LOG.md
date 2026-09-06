@@ -96,3 +96,4 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 实测: grok 行 pace_tps=0 ✓; gemini-3.8-flash 行 pace_tps=40, pace_wait 25–35s (原生 3800 tok/s 被压到 37) → 便宜模型限了只伤体验
 - 加 RiskPolicy.pace_min_output_price_per_m (缺省 0 关): 输出价 < $N/M 自动免限, 显式模型规则仍优先. 面板加字段. 设为 $10 → gemini/grok 免限, kimi($15)/sol/opus/fable 仍限
 - 备份 *.bak-cheap-exempt-20260906-131736; md5 56af3f3b377f6894db611703573fc836; 166 tests
+- 13:32 追加: 账本列 out_visible_est (流式可见输出估算); simulate_pace 用可见输出 (思考模型 output 含不流式的思考 token, 实测 fable-max 40 tok/s 限速下客户端仍 84–89 tok/s = 可见部分只占一半); speed tab 加「可见比」列. md5 4b93fb1c90f22f0711e68792423d35cd; 167 tests

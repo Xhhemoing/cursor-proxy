@@ -50,6 +50,8 @@ pub struct Req {
     pub pace_tps: u32,
     /// 因限速累计 sleep (ms)
     pub pace_wait_ms: i64,
+    /// 可见输出估算 (0 = 未知 → 按 output 算)
+    pub out_visible_est: u64,
 }
 
 impl Req {
@@ -224,8 +226,14 @@ pub fn simulate_pace(reqs: &[Req], pace_tps: f64, gap_secs: Option<f64>) -> (f64
             .unwrap_or(false);
         let ttft = r.ttft_ms.unwrap_or(0).max(0);
         let native_gen = (r.latency_ms() - ttft - r.pace_wait_ms.max(0)).max(0);
-        let paced_gen = if r.output > 0 {
-            ((r.output as f64 / pace_tps) * 1000.0) as i64
+        // 限速只作用于可见输出: 思考模型的 output 含不流式的思考 token, 有估算就用估算
+        let visible = if r.out_visible_est > 0 {
+            r.out_visible_est.min(r.output.max(r.out_visible_est))
+        } else {
+            r.output
+        };
+        let paced_gen = if visible > 0 {
+            ((visible as f64 / pace_tps) * 1000.0) as i64
         } else {
             0
         };
@@ -292,6 +300,9 @@ pub struct Agg {
     /// 被限速的请求数 / 累计 sleep 小时
     pub paced_requests: u64,
     pub pace_wait_hours: f64,
+    /// 有可见输出估算的行: Σ可见 / Σoutput → 思考模型的「可见比」
+    pub vis_est_sum: u64,
+    pub vis_out_sum: u64,
 }
 
 /// 速度样本最少输出 token 数
@@ -327,6 +338,10 @@ impl Agg {
             if r.pace_tps > 0 {
                 self.paced_requests += 1;
             }
+            if r.out_visible_est > 0 && r.output > 0 {
+                self.vis_est_sum += r.out_visible_est.min(r.output);
+                self.vis_out_sum += r.output;
+            }
             self.pace_wait_hours += r.pace_wait_ms.max(0) as f64 / 3_600_000.0;
         }
     }
@@ -348,6 +363,8 @@ impl Agg {
             "pace_wait_hours": self.pace_wait_hours,
             // 限速把槽·时拉长了多少 → 等效降低的 $/槽·时 (lane_hours 已含 sleep 时间)
             "pace_lane_share": if self.lane_hours > 1e-6 { Some((self.pace_wait_hours / self.lane_hours).min(1.0)) } else { None },
+            // 可见输出占比 (思考模型 <1: 限速只能压这部分)
+            "visible_ratio": if self.vis_out_sum > 0 { Some(self.vis_est_sum as f64 / self.vis_out_sum as f64) } else { None },
         })
     }
     pub fn usd_per_online_hour(&self) -> Option<f64> {
@@ -525,6 +542,7 @@ pub fn req_from_row(
         ttft_ms: None,
         pace_tps: 0,
         pace_wait_ms: 0,
+        out_visible_est: 0,
     }
 }
 
@@ -550,7 +568,7 @@ pub fn load_reqs(
     let mut sql = String::from(
         "SELECT ts_ms, latency_ms, key_name, model, input_tokens, output_tokens,
                 cache_read_tokens, cache_write_tokens, status, input_incl_cache, ttft_ms,
-                pace_tps, pace_wait_ms
+                pace_tps, pace_wait_ms, out_visible_est
          FROM billing_records WHERE 1=1",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -580,6 +598,7 @@ pub fn load_reqs(
         let ttft: Option<i64> = r.get(10)?;
         let pace_tps: i64 = r.get(11)?;
         let pace_wait: i64 = r.get(12)?;
+        let vis: i64 = r.get(13)?;
         let mut q = req_from_row(
             r.get(0)?,
             r.get(1)?,
@@ -594,6 +613,7 @@ pub fn load_reqs(
         q.ttft_ms = ttft;
         q.pace_tps = pace_tps.max(0) as u32;
         q.pace_wait_ms = pace_wait.max(0);
+        q.out_visible_est = vis.max(0) as u64;
         Ok(q)
     })?;
     let mut v: Vec<Req> = rows.flatten().collect();
@@ -620,7 +640,28 @@ mod tests {
             ttft_ms: None,
             pace_tps: 0,
             pace_wait_ms: 0,
+            out_visible_est: 0,
         }
+    }
+
+    #[test]
+    fn simulate_pace_uses_visible_output_when_known() {
+        // 10 条秒接, output 500 但可见只 100 (思考模型): @25 tok/s 每条 4s 而不是 20s
+        let mut agent = vec![];
+        for i in 0..10 {
+            let mut q = r("a", "m", i * 6, 5, 1.0);
+            q.output = 500;
+            q.out_visible_est = 100;
+            agent.push(q);
+        }
+        let (before, after, _) = simulate_pace(&agent, 25.0, Some(600.0));
+        // 4s < 原生 5s → 不拉长
+        assert!((after - before).abs() < 1e-6, "b {before} a {after}");
+        for q in &mut agent {
+            q.out_visible_est = 250; // 10s > 5s → 每条多 5s, 后 9 条累计 45s
+        }
+        let (b2, a2, _) = simulate_pace(&agent, 25.0, Some(600.0));
+        assert!((a2 - b2 - 50.0).abs() < 1.0, "b {b2} a {a2}");
     }
 
     #[test]

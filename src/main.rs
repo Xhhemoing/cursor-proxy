@@ -2060,7 +2060,11 @@ async fn inference_handler_inner(
                     &client_ip,
                 )
                 .with_ttft(ttft_ms)
-                .with_pace(pace_tps_applied, pace_wait_ms),
+                .with_pace(
+                    pace_tps_applied,
+                    pace_wait_ms,
+                    local_out_est.round() as u64,
+                ),
             );
             pool.record_success(&aid);
             // 成功时检查是否需要重新启用（连续错误已重置）

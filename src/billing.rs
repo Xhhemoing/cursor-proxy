@@ -169,6 +169,10 @@ pub struct BillingRecord {
     /// 有了这两列才能把「模型本来慢」和「我们压的」分开, 算限速真正省了多少.
     pub pace_tps: u32,
     pub pace_wait_ms: u64,
+    /// 本地估算的**可见**输出 token (流式帧里 content/text/reasoning 的字数). 思考模型 (fable-thinking)
+    /// 的 output_tokens 含 Cursor 不流式吐出的思考 token, 可见部分只占一半左右 —— 限速只能压可见部分,
+    /// what-if 要用这个而不是 output_tokens. 非流式 / 老行 = 0
+    pub out_visible_est: u64,
     pub client_ip: String,
     pub tags: Vec<String>,
 }
@@ -202,6 +206,7 @@ impl BillingRecord {
             "upstream_tps": self.upstream_tps(),
             "pace_tps": self.pace_tps,
             "pace_wait_ms": self.pace_wait_ms,
+            "out_visible_est": self.out_visible_est,
             "status": self.status,
             "ok": self.status == 200,
             "stream": self.stream,
@@ -237,10 +242,11 @@ impl BillingRecord {
         self.ttft_ms = ttft_ms;
         self
     }
-    /// 补限速信息
-    pub fn with_pace(mut self, pace_tps: u32, pace_wait_ms: u64) -> Self {
+    /// 补限速信息 + 可见输出估算
+    pub fn with_pace(mut self, pace_tps: u32, pace_wait_ms: u64, out_visible_est: u64) -> Self {
         self.pace_tps = pace_tps;
         self.pace_wait_ms = pace_wait_ms;
+        self.out_visible_est = out_visible_est;
         self
     }
 
@@ -284,6 +290,7 @@ impl BillingRecord {
             ttft_ms: None,
             pace_tps: 0,
             pace_wait_ms: 0,
+            out_visible_est: 0,
             client_ip: client_ip.to_string(),
             tags: ctx.tags.clone(),
         }
@@ -484,6 +491,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("ttft_ms", "ALTER TABLE billing_records ADD COLUMN ttft_ms INTEGER"),
         ("pace_tps", "ALTER TABLE billing_records ADD COLUMN pace_tps INTEGER NOT NULL DEFAULT 0"),
         ("pace_wait_ms", "ALTER TABLE billing_records ADD COLUMN pace_wait_ms INTEGER NOT NULL DEFAULT 0"),
+        ("out_visible_est", "ALTER TABLE billing_records ADD COLUMN out_visible_est INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !cols.iter().any(|c| c == name) {
             conn.execute_batch(ddl)?;
@@ -581,8 +589,8 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 model, account, input_tokens, output_tokens, input_price_micro, output_price_micro,
                 priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags,
                 cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro,
-                input_incl_cache, ttft_ms, pace_tps, pace_wait_ms
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26,?27,?28)",
+                input_incl_cache, ttft_ms, pace_tps, pace_wait_ms, out_visible_est
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26,?27,?28,?29)",
         )?;
         let mut ins_tag = tx.prepare_cached(
             "INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)",
@@ -618,6 +626,7 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 r.ttft_ms.map(|v| v as i64),
                 r.pace_tps as i64,
                 r.pace_wait_ms as i64,
+                r.out_visible_est as i64,
             ])?;
             if n == 0 {
                 dups += 1;
@@ -826,7 +835,7 @@ mod tests {
         let r = r.with_ttft(Some(1000));
         assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9); // 200/(5-1)s
                                                                 // 限速 sleep 了 2s: 客户端看到 50 tok/s, 上游其实 100 tok/s
-        let r = r.with_pace(50, 2000);
+        let r = r.with_pace(50, 2000, 150);
         assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9);
         assert!((r.upstream_tps().unwrap() - 100.0).abs() < 1e-9);
         let r0 = BillingRecord::build(

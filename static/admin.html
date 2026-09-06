@@ -2600,7 +2600,7 @@
       document.getElementById('an-title').textContent = '速度 / 限速 what-if';
       const paces = d.paces || [];
       document.getElementById('an-sub').textContent = '原生 = 剔除网关 sleep 的上游速度; what-if: 把输出匀速压到 N tok/s 后, 只有秒接 (<3s) 的 agent 后继请求会被拉长, 面值不变 → $/槽·时 下降. 成本 ¥' + Number(d.rmb_per_usd || 0).toFixed(3) + '/$';
-      const cols = [['模型', ''], ['请求', 'num'], ['面值 $', 'num'], ['槽·时', 'num'], ['$/槽·时', 'num'], ['首字 p50/p90', 'num'], ['原生 tok/s p50', 'num'], ['客户端 tok/s p50/p10', 'num'], ['已限速 req / sleep h', 'num']];
+      const cols = [['模型', ''], ['请求', 'num'], ['面值 $', 'num'], ['槽·时', 'num'], ['$/槽·时', 'num'], ['首字 p50/p90', 'num'], ['原生 tok/s p50', 'num'], ['客户端 tok/s p50/p10', 'num'], ['可见比', 'num'], ['已限速 req / sleep h', 'num']];
       paces.forEach((p) => cols.push(['→' + p + ' tok/s: $/槽·时 (省)', 'num']));
       anHead(cols);
       const tb = document.getElementById('an-body'); tb.innerHTML = '';
@@ -2613,6 +2613,7 @@
           '<td class="mono">' + (sp.ttft_p50_ms == null ? '–' : (sp.ttft_p50_ms / 1000).toFixed(1) + 's <span class="muted">/' + (sp.ttft_p90_ms / 1000).toFixed(0) + '</span>') + '</td>' +
           '<td class="mono">' + (sp.upstream_tps_p50 == null ? '–' : Number(sp.upstream_tps_p50).toFixed(0)) + '</td>' +
           '<td class="mono' + (sp.tps_p50 != null && sp.tps_p50 < 15 ? ' warn' : '') + '">' + (sp.tps_p50 == null ? '–' : Number(sp.tps_p50).toFixed(0) + ' <span class="muted">/' + Number(sp.tps_p10 || 0).toFixed(0) + '</span>') + '</td>' +
+          '<td class="mono' + (sp.visible_ratio != null && sp.visible_ratio < 0.6 ? ' warn' : '') + '" title="流式可见输出 ÷ 计费 output token. 思考模型 <1: 限速只压得到可见部分">' + (sp.visible_ratio == null ? '–' : Math.round(sp.visible_ratio * 100) + '%') + '</td>' +
           '<td class="mono muted">' + fmtN(sp.paced_requests || 0) + ' / ' + fHrs(sp.pace_wait_hours || 0) + '</td>';
         (r.whatif || []).forEach((w) => {
           const sv = w.saving_ratio == null ? null : Math.round(w.saving_ratio * 100);
