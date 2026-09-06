@@ -71,3 +71,11 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 面板: 消耗分析各表 + 在线状态 + 时段明细 加「首字 p50/p90」「tok/s p50/p10」(<15 tok/s 标黄); 请求日志延迟列附首字/tok/s
 - 隔离 E2E 22/22; cargo test 157/157. 换后真实流量 ttft 落库待流量到达后核对 (/tmp/chk_ttft.sh)
 - 03:10 追加 ac28517: ttft 含 reasoning 帧; 换后 md5 95198551d32435a1807c16cc265b1497. 实测 fable-thinking-high 首字 7–15s (思考期无输出), 之后正文 90–180 tok/s 突发; sol-max 首字 5s / 78 tok/s
+
+## 2026-09-06 UTC — 本机 8800 限速记录 + 速度画像/what-if + 修 inputTokens 含缓存
+- 备份 *.bak-pace-rec-*; md5 见 swap 输出
+- translate::extract_usage: Cursor 实际字段是 inputTokens (非 promptTokens), 同样含缓存 → extendedUsage 容器一律扣 cr+cw (带 input≥cr+cw 保护). 之前 03:00 后写入的 ~1000 行仍含缓存 (input_incl_cache=0 但未扣) —— 分析端按 input≥cr+cw 兜底? 否: 这些行 normalize 不会再扣. 影响: 6 日 03:00–后此次 swap 间的行面值偏高 4–7×
+- 账本加列 pace_tps / pace_wait_ms (每请求生效限速与累计 sleep); BillingRecord.upstream_tps 剔 sleep
+- analytics: speed{upstream_tps_p50, paced_requests, pace_wait_hours, pace_lane_share}; simulate_pace what-if
+- /admin/api/analytics/speed?paces=25,15,12,8 → 按模型 原生速度 + 各档限速后 $/槽·时 与省幅; 面板「消耗分析 → 速度/限速」tab
+- 隔离 E2E 24/24; cargo test 163/163

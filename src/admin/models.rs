@@ -312,6 +312,7 @@ pub async fn api_groups_list() -> impl IntoResponse {
             let resolved: Vec<&String> = known.iter().filter(|m| g.contains(m)).collect();
             json!({
                 "id": g.id, "name": g.name, "members": g.members, "note": g.note,
+                "enabled": g.enabled,
                 "resolved_known": resolved,
             })
         })
@@ -325,6 +326,7 @@ pub struct GroupBody {
     pub name: Option<String>,
     pub members: Option<Vec<String>>,
     pub note: Option<String>,
+    pub enabled: Option<bool>,
 }
 
 pub async fn api_groups_upsert(
@@ -346,6 +348,7 @@ pub async fn api_groups_upsert(
         name: id.clone(),
         members: vec![],
         note: String::new(),
+        enabled: true,
     });
     let members: Vec<String> = b
         .members
@@ -363,6 +366,7 @@ pub async fn api_groups_upsert(
             .unwrap_or(cur.name),
         members,
         note: b.note.unwrap_or(cur.note),
+        enabled: b.enabled.unwrap_or(cur.enabled),
     };
     if let Err(e) = reg.upsert_group(g.clone()) {
         return (
@@ -407,12 +411,12 @@ pub async fn api_groups_delete(
     }
     match registry().delete_group(&id) {
         Ok(true) => {
-            state.audit.key_op("model_group_delete", &id, json!({}));
+            state.audit.key_op("group_delete", &id, json!({}));
             Json(json!({"ok": true})).into_response()
         }
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": "group not found"})),
+            Json(json!({"error": "no such group"})),
         )
             .into_response(),
         Err(e) => (
@@ -421,6 +425,19 @@ pub async fn api_groups_delete(
         )
             .into_response(),
     }
+}
+
+/// DELETE /admin/api/models/groups?id=xxx — 兼容旧前端 (无路径参数)
+#[derive(Deserialize)]
+pub struct GroupDeleteQuery {
+    pub id: String,
+}
+
+pub async fn api_groups_delete_by_query(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GroupDeleteQuery>,
+) -> Response {
+    api_groups_delete(State(state), Path(q.id)).await
 }
 
 // ── 上游可用模型 / litellm 一键同步 ──

@@ -151,6 +151,21 @@ for r in d["by_model"][:3]:
     if sp["tps_samples"]>0: assert 1<sp["tps_p50"]<500, sp
 print("  speed:", [(r["model"][:24], sp["tps_p50"] and round(sp["tps_p50"]), sp["tps_p10"] and round(sp["tps_p10"]), sp["ttft_p50_ms"], sp["latency_p50_ms"] and round(sp["latency_p50_ms"]/1000,1)) for r in d["by_model"][:3] for sp in [r["speed"]]])
 ' && ok "consumption 带 speed (tok/s p50/p10, ttft, latency)" || ko "speed 字段异常"
+sqlite3 $E/billing.db "pragma table_info(billing_records)" | grep -q pace_wait_ms && ok "老库补 pace_tps/pace_wait_ms 列" || ko "pace 列未建"
+SP=$(curl -s "$B/admin/api/analytics/speed?scope=all&paces=25,12" -H "$A")
+echo "$SP" | py '
+import sys,json;d=json.load(sys.stdin)
+assert d["paces"]==[25.0,12.0], d["paces"]
+t=d["totals"]; assert len(t["whatif"])==2
+for w in t["whatif"]:
+    assert w["lane_hours_after"]>=w["lane_hours_before"]-1e-9, w
+    assert w["usd_per_lane_hour_after"]<=w["usd_per_lane_hour_before"]+1e-9, w
+    assert 0<=w["saving_ratio"]<1, w
+w25,w12=t["whatif"]; assert w12["saving_ratio"]>=w25["saving_ratio"]-1e-9, "更低 pace 应省更多"
+m=d["by_model"][0]; assert "upstream_tps_p50" in m["speed"] and "whatif" in m
+print("  speed what-if 全量: $/槽·时 %.1f → @25 %.1f (-%.0f%%) → @12 %.1f (-%.0f%%); 拉长 %d/%d 条" % (w25["usd_per_lane_hour_before"],w25["usd_per_lane_hour_after"],w25["saving_ratio"]*100,w12["usd_per_lane_hour_after"],w12["saving_ratio"]*100,w25["stretched_requests"],d["rows_scanned"]))
+for r in d["by_model"][:3]: print("   ", r["model"][:30], "native tok/s", r["speed"]["upstream_tps_p50"] and round(r["speed"]["upstream_tps_p50"]), "@25 -%.0f%%" % (r["whatif"][0]["saving_ratio"]*100 if r["whatif"][0]["saving_ratio"] is not None else 0))
+' && ok "speed what-if 单调 (更低 pace 省更多, $/槽·时 只降不升)" || ko "speed what-if 异常"
 
 echo; echo "══ RESULT: $pass passed, $fail failed ══"
 exit $fail

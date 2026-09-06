@@ -78,6 +78,64 @@ pub struct AppState {
     quota_store: std::sync::Arc<quota::QuotaStore>,
     /// 套餐卡存储 (plans + cards + 运行时计数)
     card_store: std::sync::Arc<cards::CardStore>,
+    /// 模型价格缓存 (analytics 聚合, 5分钟刷新)
+    price_cache: std::sync::Arc<
+        std::sync::RwLock<Option<(std::time::Instant, std::collections::BTreeMap<String, f64>)>>,
+    >,
+}
+
+impl AppState {
+    /// 获取模型小时价格映射 (usd_per_lane_hour), 数据统计不足 1h 的不计入.
+    /// 缓存 5 分钟, 避免每次请求都查账本.
+    pub fn analytics_price_map(&self) -> Option<std::collections::BTreeMap<String, f64>> {
+        // 先读缓存 (带过期检查)
+        if let Ok(guard) = self.price_cache.read() {
+            if let Some((ts, ref map)) = *guard {
+                if ts.elapsed().as_secs() < 300 {
+                    return Some(map.clone());
+                }
+            }
+        }
+        // 缓存未命中或已过期, 从账本聚合 (最近 30 天, 按模型)
+        let ledger = self.ledger.clone();
+        let map = tokio::task::block_in_place(|| {
+            let conn = ledger.reader().ok()?;
+            let since = chrono::Utc::now().timestamp_millis() - 30 * 86_400_000;
+            // 从 billing_records 聚合: 按模型统计 face_usd 和 latency 估算 lane_hours
+            // lane_hours ≈ SUM(latency_ms) / 3600000 (简化估算, 实际应按 session 聚合)
+            let mut st = conn
+                .prepare(
+                    "SELECT model, SUM(face_usd), SUM(latency_ms) / 3600000.0 as lane_hours
+                 FROM billing_records
+                 WHERE ts_ms >= ?1 AND status = 200
+                 GROUP BY model
+                 HAVING lane_hours >= 1.0",
+                )
+                .ok()?;
+            let rows = st
+                .query_map([since], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
+                })
+                .ok()?;
+            let mut out = std::collections::BTreeMap::new();
+            for r in rows.flatten() {
+                let (model, face, lane_hours) = r;
+                if lane_hours > 1e-6 {
+                    out.insert(model, face / lane_hours);
+                }
+            }
+            Some(out)
+        })?;
+        // 写缓存 (带时间戳)
+        if let Ok(mut guard) = self.price_cache.write() {
+            *guard = Some((std::time::Instant::now(), map.clone()));
+        }
+        Some(map)
+    }
 }
 
 /// 按出口代理缓存 CursorClient. 直连共用一个, 每个 proxy_id 一个.
@@ -232,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
             &std::path::Path::new(&config.billing.db_file).with_file_name("cards.json"),
             config.billing.tz_offset_minutes,
         )),
+        price_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
     });
     info!(
         event = "billing_init",
@@ -526,6 +585,10 @@ async fn main() -> anyhow::Result<()> {
             "/admin/api/analytics/sessions",
             get(admin::api_analytics_sessions),
         )
+        .route(
+            "/admin/api/analytics/speed",
+            get(admin::api_analytics_speed),
+        )
         // 套餐卡
         .route(
             "/admin/api/cards/plans",
@@ -570,6 +633,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/api/models/groups/:id",
             axum::routing::delete(admin::api_groups_delete),
+        )
+        .route(
+            "/admin/api/models/groups",
+            axum::routing::delete(admin::api_groups_delete_by_query),
         )
         .route(
             "/admin/api/models/:model",
@@ -1323,17 +1390,20 @@ async fn inference_handler_inner(
     // 按 thinking_level / reasoning_effort / max_mode / 复杂度推断档位, 在该家族的
     // 上游变体里挑一个 (Max→-max>xhigh>high, High→high>medium>low, Low→low>minimal>none).
     // 客户端直接传变体全名则原样放行. 上游名单为空 (未拉过) 时跳过, 行为同旧版.
-    if let Some(resolved) = models::ModelRegistry::resolve_smart_model(
+    // 默认云端选择小时价格最低的模型 (数据统计不足 1h 的不计入).
+    let price_map = state.analytics_price_map();
+    if let Some(resolved) = models::ModelRegistry::resolve_smart_model_with_price(
         &model,
         &body,
         &state.card_store.upstream_names(),
+        price_map.as_ref(),
     ) {
         info!(
             event = "smart_model_route",
             req_id = %request_id,
             from = %model,
             to = %resolved,
-            "base model resolved to upstream variant by thinking level"
+            "base model resolved to upstream variant by thinking level + price"
         );
         model = resolved;
     }
@@ -1787,6 +1857,9 @@ async fn inference_handler_inner(
             let mut sent_terminal = false;
             // 首字延迟: 第一个有内容的帧到达时刻 (客户端真正开始看到输出)
             let mut ttft_ms: Option<u64> = None;
+            // 限速记录: 生效 pace 与累计 sleep
+            let pace_tps_applied: u32 = card_permit_s.as_ref().map(|p| p.pace_tps()).unwrap_or(0);
+            let mut pace_wait_ms: u64 = 0;
             // 空内容追踪: 上游返回 200 但无实际内容时, 流式也要返回错误而非静默 200
             let mut has_content = false;
             // 流中途上游错误 (error 帧 / 解码失败 / 连接被掐): 记下来, 收尾时向客户端发 error 帧
@@ -1877,6 +1950,7 @@ async fn inference_handler_inner(
                             if let Some(p) = card_permit_s.as_ref() {
                                 let wait = p.pace_admit(est);
                                 if !wait.is_zero() {
+                                    pace_wait_ms += wait.as_millis() as u64;
                                     tokio::time::sleep(wait).await;
                                 }
                             }
@@ -1977,7 +2051,8 @@ async fn inference_handler_inner(
                     latency,
                     &client_ip,
                 )
-                .with_ttft(ttft_ms),
+                .with_ttft(ttft_ms)
+                .with_pace(pace_tps_applied, pace_wait_ms),
             );
             pool.record_success(&aid);
             // 成功时检查是否需要重新启用（连续错误已重置）

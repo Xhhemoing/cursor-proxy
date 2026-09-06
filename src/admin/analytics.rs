@@ -43,6 +43,16 @@ pub struct ConsumptionQuery {
     pub key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SpeedQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub gap: Option<f64>,
+    pub scope: Option<String>,
+    /// what-if 限速档 (tok/s), 逗号分隔; 缺省 25,15,12,8
+    pub paces: Option<String>,
+}
+
 struct Ctx {
     from_ms: Option<i64>,
     to_ms: Option<i64>,
@@ -492,6 +502,113 @@ pub async fn api_analytics_sessions(
             "usd_per_lane_hour": if total_lane_secs > 0.0 { Some(total_face / (total_lane_secs / 3600.0)) } else { None },
         },
         "sessions": out,
+    }))
+    .into_response()
+}
+
+/// 速度画像 + 限速 what-if: 按模型给 原生速度/首字/延迟 分位, 以及若压到各档 pace 后
+/// 槽·时被拉长多少 → $/槽·时 降到多少 (面值不变). 用于评估「限速换利润」的可行性.
+pub async fn api_analytics_speed(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SpeedQuery>,
+) -> Response {
+    let c = ctx(&state, q.from.as_deref(), q.to.as_deref(), q.gap);
+    let cards_only = q.scope.as_deref().unwrap_or("cards") != "all";
+    let paces: Vec<f64> = q
+        .paces
+        .as_deref()
+        .unwrap_or("25,15,12,8")
+        .split(',')
+        .filter_map(|x| x.trim().parse::<f64>().ok())
+        .filter(|x| *x > 0.0)
+        .take(8)
+        .collect();
+    let ledger = state.ledger.clone();
+    let (from_ms, to_ms) = (c.from_ms, c.to_ms);
+    let reqs: Vec<Req> = match tokio::task::spawn_blocking(move || {
+        let conn = ledger.reader()?;
+        analytics::load_reqs(&conn, from_ms, to_ms, cards_only, None, MAX_ROWS)
+    })
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return err(e),
+        Err(e) => return err(e),
+    };
+    let rmb = c.rmb_per_usd;
+    // 按模型: 速度分位 + what-if
+    let by_model = analytics::aggregate(&reqs, |r| vec![r.model.clone()], c.gap);
+    let mut per_key_model: BTreeMap<String, BTreeMap<String, Vec<Req>>> = BTreeMap::new();
+    let mut per_key: BTreeMap<String, Vec<Req>> = BTreeMap::new();
+    for r in &reqs {
+        per_key_model
+            .entry(r.model.clone())
+            .or_default()
+            .entry(r.key_name.clone())
+            .or_default()
+            .push(r.clone());
+        per_key
+            .entry(r.key_name.clone())
+            .or_default()
+            .push(r.clone());
+    }
+    let whatif = |groups: &BTreeMap<String, Vec<Req>>, face: f64| -> Vec<Value> {
+        paces
+            .iter()
+            .map(|p| {
+                let mut before = 0.0;
+                let mut after = 0.0;
+                let mut stretched = 0usize;
+                for rs in groups.values() {
+                    let (b, a, n) = analytics::simulate_pace(rs, *p, c.gap);
+                    before += b;
+                    after += a;
+                    stretched += n;
+                }
+                let (bh, ah) = (before / 3600.0, after / 3600.0);
+                json!({
+                    "pace_tps": p,
+                    "lane_hours_before": bh,
+                    "lane_hours_after": ah,
+                    "stretched_requests": stretched,
+                    "usd_per_lane_hour_before": if bh > 1e-6 { Some(face / bh) } else { None },
+                    "usd_per_lane_hour_after": if ah > 1e-6 { Some(face / ah) } else { None },
+                    "saving_ratio": if ah > 1e-6 && bh > 1e-6 { Some(1.0 - bh / ah) } else { None },
+                })
+            })
+            .collect()
+    };
+    let mut models: Vec<Value> = by_model
+        .iter()
+        .map(|(m, a)| {
+            let groups = per_key_model.get(m).cloned().unwrap_or_default();
+            let mut v = a.to_json(rmb);
+            v["model"] = json!(m);
+            v["whatif"] = json!(whatif(&groups, a.face_usd));
+            v
+        })
+        .collect();
+    models.sort_by(|a, b| {
+        b["face_usd"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&a["face_usd"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total = analytics::aggregate(&reqs, |_| vec!["all".to_string()], c.gap)
+        .remove("all")
+        .unwrap_or_default();
+    let mut t = total.to_json(rmb);
+    t["whatif"] = json!(whatif(&per_key, total.face_usd));
+    Json(json!({
+        "range": { "from_ms": c.from_ms, "to_ms": c.to_ms, "tz_offset_minutes": c.tz },
+        "scope": if cards_only { "cards" } else { "all" },
+        "paces": paces,
+        "rmb_per_usd": rmb,
+        "rows_scanned": reqs.len(),
+        "totals": t,
+        "by_model": models,
+        "note": "what-if 假设: 面值不变; 只有秒接 (<3s) 的后继请求会被拉长; 人类停顿吸收拉长. 已限速行先剔除现有 sleep.",
     }))
     .into_response()
 }

@@ -87,12 +87,14 @@ fn pick_u64(u: &Value, keys: &[&str]) -> Option<u64> {
 
 /// 从上游帧提取 usage (兼容 Cursor extendedUsage / OpenAI / Anthropic 命名)
 fn extract_usage(obj: &Value) -> Option<Usage> {
+    let is_cursor = obj.get("extendedUsage").is_some();
     let u = obj.get("extendedUsage").or_else(|| obj.get("usage"))?;
-    // prompt* 系 (Cursor extendedUsage / OpenAI) 的 promptTokens 是**含缓存**的 prompt 总数
-    // (2026-09-05 对账: promptTokens ≈ cacheReadTokens + cacheWriteTokens + 几百未命中);
-    // input* 系 (Anthropic) 的 input_tokens 本身不含缓存. 两者要分别处理, 否则缓存部分按
-    // input 全价重复计一遍, 面值高估 4–7 倍.
+    // Cursor extendedUsage 的 inputTokens/promptTokens 与 OpenAI prompt_tokens 都是**含缓存**的
+    // 输入总数 (2026-09-06 实测行: inputTokens 250426 = cacheRead 250267 + cacheWrite 156 + 3);
+    // Anthropic usage.input_tokens 本身不含缓存. 不区分就会把缓存按 input 全价再计一遍, 面值高估 4–7 倍.
+    // 判据: 容器是 extendedUsage 或用 prompt* 命名 → 含缓存; 再加 input ≥ cr+cw 的保护 (真不含时不会误减).
     let prompt_total = pick_u64(u, &["promptTokens", "prompt_tokens"]);
+    let input_incl_cache = is_cursor || prompt_total.is_some();
     let mut input = prompt_total
         .or_else(|| pick_u64(u, &["inputTokens", "input_tokens"]))
         .unwrap_or(0);
@@ -138,9 +140,9 @@ fn extract_usage(obj: &Value) -> Option<Usage> {
             cache_read = cached;
             input = input.saturating_sub(cached);
         }
-    } else if prompt_total.is_some() {
-        // prompt 总数里已含 cacheRead/cacheWrite → 扣掉, input 只留未命中部分
-        input = input.saturating_sub(cache_read + cache_write);
+    } else if input_incl_cache && input >= cache_read + cache_write {
+        // 输入总数里已含 cacheRead/cacheWrite → 扣掉, input 只留未命中部分
+        input -= cache_read + cache_write;
     }
     Some(Usage {
         input,
@@ -1578,6 +1580,20 @@ mod tests {
                 cache_write: 460
             }
         );
+        // Cursor 实际用的是 inputTokens 命名 (2026-09-06 实测) — 同样含缓存, 必须扣
+        let cur2 = extract_usage(&json!({"extendedUsage": {
+            "inputTokens": 250426, "outputTokens": 170,
+            "cacheReadTokens": 250267, "cacheWriteTokens": 156 }}))
+        .unwrap();
+        assert_eq!(
+            (cur2.input, cur2.output, cur2.cache_read, cur2.cache_write),
+            (3, 170, 250267, 156)
+        );
+        // 保护: extendedUsage 若某天改成不含缓存 (input < cr+cw), 不误减
+        let cur3 = extract_usage(&json!({"extendedUsage": {
+            "inputTokens": 3, "outputTokens": 170, "cacheReadTokens": 250267, "cacheWriteTokens": 156 }}))
+        .unwrap();
+        assert_eq!(cur3.input, 3);
         // Anthropic: input_tokens 本身不含缓存 → 不扣
         let ant = extract_usage(&json!({"usage": {
             "input_tokens": 120, "output_tokens": 9,

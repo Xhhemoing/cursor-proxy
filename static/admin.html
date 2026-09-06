@@ -643,6 +643,7 @@
             <button type="button" data-tab="plan">按套餐</button>
             <button type="button" data-tab="key">按卡</button>
             <button type="button" data-tab="hourly">时间轴</button>
+            <button type="button" data-tab="speed" title="各模型原生速度/首字/延迟 + 若限速到 N tok/s 能省多少">速度/限速</button>
           </div>
           <form id="an-filter" class="filter">
             <div class="fields">
@@ -1993,19 +1994,24 @@
       document.getElementById('mg-count').textContent = '(' + mdGroups.length + ')';
       const tb = document.getElementById('mg-body');
       tb.innerHTML = '';
-      if (!mdGroups.length) tb.innerHTML = '<tr><td colspan="6" class="muted">还没有模型组。建一个后，可在 API Key / 套餐里限定「只能用这些组」</td></tr>';
+      if (!mdGroups.length) tb.innerHTML = '<tr><td colspan="7" class="muted">还没有模型组。建一个后，可在 API Key / 套餐里限定「只能用这些组」</td></tr>';
       mdGroups.forEach((g) => {
         const u = groupUsage(g.id);
         const tr = document.createElement('tr');
         tr.innerHTML = '<td class="mono">' + esc(g.id) + '</td><td>' + esc(g.name) + '</td>' +
           '<td class="mono" style="font-size:11px">' + (g.members || []).map(esc).join('<br>') + '</td>' +
           '<td class="mono" style="font-size:11px" title="' + esc((g.resolved_known || []).join('\n')) + '">' + (g.resolved_known || []).length + ' 个: ' + esc((g.resolved_known || []).slice(0, 4).join(', ')) + ((g.resolved_known || []).length > 4 ? ' …' : '') + '</td>' +
-          '<td style="font-size:11px">' + (u.keys.length ? 'key: ' + esc(u.keys.join(', ')) : '') + (u.plans.length ? (u.keys.length ? '<br>' : '') + '套餐: ' + esc(u.plans.join(', ')) : '') + (!u.keys.length && !u.plans.length ? '<span class="muted">—</span>' : '') + '</td><td></td>';
+          '<td style="font-size:11px">' + (u.keys.length ? 'key: ' + esc(u.keys.join(', ')) : '') + (u.plans.length ? (u.keys.length ? '<br>' : '') + '套餐: ' + esc(u.plans.join(', ')) : '') + (!u.keys.length && !u.plans.length ? '<span class="muted">—</span>' : '') + '</td>' +
+          '<td>' + (g.enabled !== false ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td><td></td>';
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => {
           document.getElementById('mg-id').value = g.id; document.getElementById('mg-name').value = g.name; document.getElementById('mg-note').value = g.note || '';
           document.getElementById('mg-members').value = (g.members || []).join('\n'); previewGroup();
           document.getElementById('mg-id').scrollIntoView({ block: 'center' });
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, g.enabled !== false ? '禁用' : '启用')).addEventListener('click', async () => {
+          try { await api('/admin/api/models/groups', { method: 'POST', body: JSON.stringify({ id: g.id, enabled: g.enabled === false }) }); await loadModelsPage(); }
+          catch (e) { mdMsg(e.message, true); }
         });
         act.appendChild(el('button', { class: 'danger', type: 'button' }, '删')).addEventListener('click', async () => {
           if (!confirm('删除模型组 ' + g.id + '？被 key/套餐引用时会拒绝')) return;
@@ -2375,6 +2381,7 @@
       anMsg('');
       const tb = document.getElementById('an-body');
       if (anTab === 'presence') return loadPresence();
+      if (anTab === 'speed') return loadSpeed();
       const d = await api('/admin/api/analytics/consumption?' + anQuery().toString());
       anData = d;
       anTotals(d.totals || {}, d);
@@ -2435,6 +2442,37 @@
         });
       }
       if (!rows.length) tb.innerHTML = '<tr><td colspan="22" class="muted">范围内无数据</td></tr>';
+    }
+    async function loadSpeed() {
+      const q = anQuery(); q.delete('key');
+      const d = await api('/admin/api/analytics/speed?' + q.toString());
+      anData = d;
+      anTotals(d.totals || {}, d);
+      document.getElementById('an-title').textContent = '速度 / 限速 what-if';
+      const paces = d.paces || [];
+      document.getElementById('an-sub').textContent = '原生 = 剔除网关 sleep 的上游速度; what-if: 把输出匀速压到 N tok/s 后, 只有秒接 (<3s) 的 agent 后继请求会被拉长, 面值不变 → $/槽·时 下降. 成本 ¥' + Number(d.rmb_per_usd || 0).toFixed(3) + '/$';
+      const cols = [['模型', ''], ['请求', 'num'], ['面值 $', 'num'], ['槽·时', 'num'], ['$/槽·时', 'num'], ['首字 p50/p90', 'num'], ['原生 tok/s p50', 'num'], ['客户端 tok/s p50/p10', 'num'], ['已限速 req / sleep h', 'num']];
+      paces.forEach((p) => cols.push(['→' + p + ' tok/s: $/槽·时 (省)', 'num']));
+      anHead(cols);
+      const tb = document.getElementById('an-body'); tb.innerHTML = '';
+      const rows = [Object.assign({ model: '全部', _total: true }, d.totals || {})].concat(d.by_model || []);
+      rows.forEach((r) => {
+        const sp = r.speed || {};
+        const tr = document.createElement('tr');
+        if (r._total) tr.style.fontWeight = '600';
+        let html = '<td class="mono">' + esc(r.model) + '</td><td class="mono">' + fmtN(r.requests) + '</td><td class="mono">' + fUsd(r.face_usd) + '</td><td class="mono">' + fHrs(r.lane_hours) + '</td><td class="mono"><b>' + (r.usd_per_lane_hour == null ? '–' : Number(r.usd_per_lane_hour).toFixed(1)) + '</b></td>' +
+          '<td class="mono">' + (sp.ttft_p50_ms == null ? '–' : (sp.ttft_p50_ms / 1000).toFixed(1) + 's <span class="muted">/' + (sp.ttft_p90_ms / 1000).toFixed(0) + '</span>') + '</td>' +
+          '<td class="mono">' + (sp.upstream_tps_p50 == null ? '–' : Number(sp.upstream_tps_p50).toFixed(0)) + '</td>' +
+          '<td class="mono' + (sp.tps_p50 != null && sp.tps_p50 < 15 ? ' warn' : '') + '">' + (sp.tps_p50 == null ? '–' : Number(sp.tps_p50).toFixed(0) + ' <span class="muted">/' + Number(sp.tps_p10 || 0).toFixed(0) + '</span>') + '</td>' +
+          '<td class="mono muted">' + fmtN(sp.paced_requests || 0) + ' / ' + fHrs(sp.pace_wait_hours || 0) + '</td>';
+        (r.whatif || []).forEach((w) => {
+          const sv = w.saving_ratio == null ? null : Math.round(w.saving_ratio * 100);
+          html += '<td class="mono' + (sv != null && sv >= 40 ? ' ok' : '') + '" title="槽·时 ' + fHrs(w.lane_hours_before) + ' → ' + fHrs(w.lane_hours_after) + ', 拉长 ' + w.stretched_requests + ' 条">' + (w.usd_per_lane_hour_after == null ? '–' : Number(w.usd_per_lane_hour_after).toFixed(1) + ' <span class="muted">(' + (sv == null ? '–' : '-' + sv + '%') + ')</span>') + '</td>';
+        });
+        tr.innerHTML = html;
+        tb.appendChild(tr);
+      });
+      if (!(d.by_model || []).length) tb.innerHTML = '<tr><td colspan="14" class="muted">范围内无数据</td></tr>';
     }
     async function loadPresence() {
       const d = await api('/admin/api/analytics/presence');

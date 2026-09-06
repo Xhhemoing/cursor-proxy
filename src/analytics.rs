@@ -46,6 +46,10 @@ pub struct Req {
     pub face_usd: f64,
     /// 首字延迟 (ms); 老行 / 非流式 / 失败 = None
     pub ttft_ms: Option<i64>,
+    /// 网关限速目标 tok/s (0 = 未限)
+    pub pace_tps: u32,
+    /// 因限速累计 sleep (ms)
+    pub pace_wait_ms: i64,
 }
 
 impl Req {
@@ -64,6 +68,15 @@ impl Req {
             return None;
         }
         let gen_ms = self.latency_ms() - self.ttft_ms.unwrap_or(0).max(0);
+        (gen_ms > 0).then(|| self.output as f64 / (gen_ms as f64 / 1000.0))
+    }
+    /// 上游原生速度 (剔掉网关 sleep). 未限速时 = output_tps
+    pub fn upstream_tps(&self) -> Option<f64> {
+        if !self.ok() || self.output == 0 {
+            return None;
+        }
+        let gen_ms =
+            self.latency_ms() - self.ttft_ms.unwrap_or(0).max(0) - self.pace_wait_ms.max(0);
         (gen_ms > 0).then(|| self.output as f64 / (gen_ms as f64 / 1000.0))
     }
 }
@@ -186,6 +199,61 @@ pub fn key_online_and_lanes(reqs: &[Req], gap_secs: Option<f64>) -> (f64, usize,
     (online, sessions.len(), lane_secs, lanes.len())
 }
 
+/// 限速 what-if: 对一条 key 的请求流, 若把输出匀速压到 `pace_tps`, 会话会被拉长多少.
+///
+/// 逐条: 交付时长 = max(原生成时长, output/pace) — 多出来的 `added` 只有在下一条请求「等着上一条结束
+/// 才发」(agent 循环, 间隔 < FAST_FOLLOW) 时才会真的拉长会话; 人类思考间隔通常 > added, 会话总长不变.
+/// 面值不变 (token 数没少), 槽·时变长 → $/槽·时 下降; 对「按小时卖」的畅饮卡等价于省钱.
+/// 返回 (原槽·秒, 新槽·秒, 被拉长的请求数). 已限速的行先剔掉现有 sleep 再算.
+pub fn simulate_pace(reqs: &[Req], pace_tps: f64, gap_secs: Option<f64>) -> (f64, f64, usize) {
+    if pace_tps <= 0.0 || reqs.is_empty() {
+        let (_, _, lane, _) = key_online_and_lanes(reqs, gap_secs);
+        return (lane, lane, 0);
+    }
+    let mut v: Vec<Req> = reqs.to_vec();
+    v.sort_by_key(|r| (r.start_ms, r.end_ms));
+    let (_, _, lane_before, _) = key_online_and_lanes(&v, gap_secs);
+    // 逐条重排: 请求 i 的新开始 = 原开始 + 之前累计的 shift (若它是秒接的); 新结束 = 新开始 + 新时长
+    let mut shift_ms: i64 = 0;
+    let mut stretched = 0usize;
+    let mut prev_end_orig: Option<i64> = None;
+    let mut out: Vec<Req> = Vec::with_capacity(v.len());
+    for r in &v {
+        let follows_fast = prev_end_orig
+            .map(|pe| (r.start_ms - pe).abs() < FAST_FOLLOW_MS)
+            .unwrap_or(false);
+        let ttft = r.ttft_ms.unwrap_or(0).max(0);
+        let native_gen = (r.latency_ms() - ttft - r.pace_wait_ms.max(0)).max(0);
+        let paced_gen = if r.output > 0 {
+            ((r.output as f64 / pace_tps) * 1000.0) as i64
+        } else {
+            0
+        };
+        let new_gen = native_gen.max(paced_gen);
+        let added = new_gen - native_gen;
+        let new_start = r.start_ms + if follows_fast { shift_ms } else { 0 };
+        if !follows_fast {
+            // 人类停顿吸收了之前的拉长
+            shift_ms = 0;
+        }
+        let new_end = new_start + ttft + new_gen;
+        if added > 0 && follows_fast {
+            stretched += 1;
+        }
+        shift_ms += added;
+        prev_end_orig = Some(r.end_ms);
+        let mut q = r.clone();
+        q.start_ms = new_start;
+        q.end_ms = new_end;
+        out.push(q);
+    }
+    let (_, _, lane_after, _) = key_online_and_lanes(&out, gap_secs);
+    (lane_before, lane_after, stretched)
+}
+
+/// 秒接阈值 (ms): 下一条请求在上一条结束后多久内到达算 agent 循环
+pub const FAST_FOLLOW_MS: i64 = 3000;
+
 /// 一个维度值 (某模型 / 某组 / 某套餐 / 某卡) 的聚合
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Agg {
@@ -218,6 +286,12 @@ pub struct Agg {
     /// 端到端延迟样本 (ms, 成功请求)
     #[serde(skip)]
     pub latency_samples: Vec<f64>,
+    /// 上游原生速度样本 (剔限速 sleep)
+    #[serde(skip)]
+    pub upstream_tps_samples: Vec<f64>,
+    /// 被限速的请求数 / 累计 sleep 小时
+    pub paced_requests: u64,
+    pub pace_wait_hours: f64,
 }
 
 /// 速度样本最少输出 token 数
@@ -246,7 +320,14 @@ impl Agg {
                 if let Some(tps) = r.output_tps() {
                     self.tps_samples.push(tps);
                 }
+                if let Some(tps) = r.upstream_tps() {
+                    self.upstream_tps_samples.push(tps);
+                }
             }
+            if r.pace_tps > 0 {
+                self.paced_requests += 1;
+            }
+            self.pace_wait_hours += r.pace_wait_ms.max(0) as f64 / 3_600_000.0;
         }
     }
     /// 速度/延迟摘要
@@ -261,6 +342,12 @@ impl Agg {
             "tps_samples": self.tps_samples.len(),
             "latency_p50_ms": percentile(&self.latency_samples, 0.5),
             "latency_p90_ms": percentile(&self.latency_samples, 0.9),
+            // 上游原生速度 (剔限速): 与 tps_p50 之差 = 我们压掉的
+            "upstream_tps_p50": percentile(&self.upstream_tps_samples, 0.5),
+            "paced_requests": self.paced_requests,
+            "pace_wait_hours": self.pace_wait_hours,
+            // 限速把槽·时拉长了多少 → 等效降低的 $/槽·时 (lane_hours 已含 sleep 时间)
+            "pace_lane_share": if self.lane_hours > 1e-6 { Some((self.pace_wait_hours / self.lane_hours).min(1.0)) } else { None },
         })
     }
     pub fn usd_per_online_hour(&self) -> Option<f64> {
@@ -436,6 +523,8 @@ pub fn req_from_row(
         status,
         face_usd,
         ttft_ms: None,
+        pace_tps: 0,
+        pace_wait_ms: 0,
     }
 }
 
@@ -460,7 +549,8 @@ pub fn load_reqs(
 ) -> rusqlite::Result<Vec<Req>> {
     let mut sql = String::from(
         "SELECT ts_ms, latency_ms, key_name, model, input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens, status, input_incl_cache, ttft_ms
+                cache_read_tokens, cache_write_tokens, status, input_incl_cache, ttft_ms,
+                pace_tps, pace_wait_ms
          FROM billing_records WHERE 1=1",
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -488,6 +578,8 @@ pub fn load_reqs(
         let cw = r.get::<_, i64>(7)?.max(0) as u64;
         let incl: i64 = r.get(9)?;
         let ttft: Option<i64> = r.get(10)?;
+        let pace_tps: i64 = r.get(11)?;
+        let pace_wait: i64 = r.get(12)?;
         let mut q = req_from_row(
             r.get(0)?,
             r.get(1)?,
@@ -500,6 +592,8 @@ pub fn load_reqs(
             r.get::<_, i64>(8)?.clamp(0, 999) as u16,
         );
         q.ttft_ms = ttft;
+        q.pace_tps = pace_tps.max(0) as u32;
+        q.pace_wait_ms = pace_wait.max(0);
         Ok(q)
     })?;
     let mut v: Vec<Req> = rows.flatten().collect();
@@ -524,7 +618,58 @@ mod tests {
             status: 200,
             face_usd: face,
             ttft_ms: None,
+            pace_tps: 0,
+            pace_wait_ms: 0,
         }
+    }
+
+    #[test]
+    fn simulate_pace_stretches_agent_loops_not_humans() {
+        // agent: 10 条串行秒接, 每条 5s 生成 500 tok (100 tok/s), 间隔 1s
+        let mut agent = vec![];
+        for i in 0..10 {
+            let mut q = r("a", "m", i * 6, 5, 1.0);
+            q.output = 500;
+            agent.push(q);
+        }
+        let (before, after, n) = simulate_pace(&agent, 25.0, Some(600.0));
+        // 25 tok/s → 每条 20s, 多 15s × 10 = 150s
+        assert_eq!(n, 9); // 首条无前驱不算「拉长」, 但 shift 照样累计
+        assert!(
+            (after - before - 150.0).abs() < 1.0,
+            "before {before} after {after}"
+        );
+        // 人类: 同样 10 条, 但间隔 120s → 拉长被停顿吸收, 会话只在最后一条多 15s
+        let mut human = vec![];
+        for i in 0..10 {
+            let mut q = r("h", "m", i * 125, 5, 1.0);
+            q.output = 500;
+            human.push(q);
+        }
+        let (b2, a2, n2) = simulate_pace(&human, 25.0, Some(600.0));
+        assert_eq!(n2, 0);
+        assert!((a2 - b2 - 15.0).abs() < 1.0, "b {b2} a {a2}");
+        // pace 高于原生速度 → 不变
+        let (b3, a3, _) = simulate_pace(&agent, 500.0, Some(600.0));
+        assert!((a3 - b3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn upstream_tps_removes_pace_sleep() {
+        // 10s 请求 (ttft 2s), 输出 200, 其中 4s 是限速 sleep → 客户端 25 tok/s, 上游 50 tok/s
+        let mut q = r("k", "m", 0, 10, 1.0);
+        q.output = 200;
+        q.ttft_ms = Some(2000);
+        q.pace_tps = 25;
+        q.pace_wait_ms = 4000;
+        assert!((q.output_tps().unwrap() - 25.0).abs() < 1e-9);
+        assert!((q.upstream_tps().unwrap() - 50.0).abs() < 1e-9);
+        let agg = aggregate(&[q], |x| vec![x.model.clone()], Some(600.0));
+        let sp = agg["m"].speed_json();
+        assert_eq!(sp["paced_requests"], 1);
+        assert!((sp["upstream_tps_p50"].as_f64().unwrap() - 50.0).abs() < 1e-9);
+        // lane_hours = 10s, sleep 4s → 40%
+        assert!((sp["pace_lane_share"].as_f64().unwrap() - 0.4).abs() < 1e-6);
     }
 
     #[test]

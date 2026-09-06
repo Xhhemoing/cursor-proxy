@@ -165,6 +165,10 @@ pub struct BillingRecord {
     pub latency_ms: u64,
     /// 首个内容帧到达耗时 (ms). 流式 = 客户端看到第一个字的等待; 非流式 = 整段延迟; 失败/无内容 = None
     pub ttft_ms: Option<u64>,
+    /// 网关主动限速: 该请求生效的匀速目标 (tok/s, 0=不限) 与因限速累计 sleep 的毫秒数.
+    /// 有了这两列才能把「模型本来慢」和「我们压的」分开, 算限速真正省了多少.
+    pub pace_tps: u32,
+    pub pace_wait_ms: u64,
     pub client_ip: String,
     pub tags: Vec<String>,
 }
@@ -195,6 +199,9 @@ impl BillingRecord {
             "latency_ms": self.latency_ms,
             "ttft_ms": self.ttft_ms,
             "output_tps": self.output_tps(),
+            "upstream_tps": self.upstream_tps(),
+            "pace_tps": self.pace_tps,
+            "pace_wait_ms": self.pace_wait_ms,
             "status": self.status,
             "ok": self.status == 200,
             "stream": self.stream,
@@ -212,9 +219,28 @@ impl BillingRecord {
         }
     }
 
+    /// 上游原生输出速度 tok/s: 把网关限速 sleep 的时间剔掉 → 模型本身多快
+    pub fn upstream_tps(&self) -> Option<f64> {
+        let gen_ms = self
+            .latency_ms
+            .saturating_sub(self.ttft_ms.unwrap_or(0))
+            .saturating_sub(self.pace_wait_ms);
+        if self.output_tokens == 0 || gen_ms == 0 {
+            None
+        } else {
+            Some(self.output_tokens as f64 / (gen_ms as f64 / 1000.0))
+        }
+    }
+
     /// 补首字延迟 (build 之后链式调用)
     pub fn with_ttft(mut self, ttft_ms: Option<u64>) -> Self {
         self.ttft_ms = ttft_ms;
+        self
+    }
+    /// 补限速信息
+    pub fn with_pace(mut self, pace_tps: u32, pace_wait_ms: u64) -> Self {
+        self.pace_tps = pace_tps;
+        self.pace_wait_ms = pace_wait_ms;
         self
     }
 
@@ -256,6 +282,8 @@ impl BillingRecord {
             status,
             latency_ms,
             ttft_ms: None,
+            pace_tps: 0,
+            pace_wait_ms: 0,
             client_ip: client_ip.to_string(),
             tags: ctx.tags.clone(),
         }
@@ -454,6 +482,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("input_incl_cache", "ALTER TABLE billing_records ADD COLUMN input_incl_cache INTEGER NOT NULL DEFAULT 1"),
         // 首字延迟 (ms), 老行 NULL
         ("ttft_ms", "ALTER TABLE billing_records ADD COLUMN ttft_ms INTEGER"),
+        ("pace_tps", "ALTER TABLE billing_records ADD COLUMN pace_tps INTEGER NOT NULL DEFAULT 0"),
+        ("pace_wait_ms", "ALTER TABLE billing_records ADD COLUMN pace_wait_ms INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !cols.iter().any(|c| c == name) {
             conn.execute_batch(ddl)?;
@@ -551,8 +581,8 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 model, account, input_tokens, output_tokens, input_price_micro, output_price_micro,
                 priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags,
                 cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro,
-                input_incl_cache, ttft_ms
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26)",
+                input_incl_cache, ttft_ms, pace_tps, pace_wait_ms
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26,?27,?28)",
         )?;
         let mut ins_tag = tx.prepare_cached(
             "INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)",
@@ -586,6 +616,8 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 r.cache_read_price_micro as i64,
                 r.cache_write_price_micro as i64,
                 r.ttft_ms.map(|v| v as i64),
+                r.pace_tps as i64,
+                r.pace_wait_ms as i64,
             ])?;
             if n == 0 {
                 dups += 1;
@@ -793,6 +825,10 @@ mod tests {
         assert!((r.output_tps().unwrap() - 40.0).abs() < 1e-9); // 无 ttft: 200/5s
         let r = r.with_ttft(Some(1000));
         assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9); // 200/(5-1)s
+                                                                // 限速 sleep 了 2s: 客户端看到 50 tok/s, 上游其实 100 tok/s
+        let r = r.with_pace(50, 2000);
+        assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9);
+        assert!((r.upstream_tps().unwrap() - 100.0).abs() < 1e-9);
         let r0 = BillingRecord::build(
             &ctx,
             "y",

@@ -45,6 +45,9 @@ pub struct ModelGroup {
     pub members: Vec<String>,
     #[serde(default)]
     pub note: String,
+    /// 是否启用 (false = 该组不参与鉴权, 相当于临时禁用)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 impl ModelGroup {
@@ -263,6 +266,7 @@ impl ModelRegistry {
 
     /// 鉴权: `allowed_groups` 为空 = 不限; 否则模型须落在任一组内.
     /// 引用了不存在的组 id 视为空组 (不放行), 避免删组后意外放开.
+    /// 禁用的组 (enabled=false) 不参与鉴权 —— 相当于临时移除.
     pub fn allowed_by_groups(&self, allowed_groups: &[String], model: &str) -> bool {
         if allowed_groups.is_empty() {
             return true;
@@ -271,18 +275,18 @@ impl ModelRegistry {
         allowed_groups.iter().any(|gid| {
             d.groups
                 .iter()
-                .find(|g| &g.id == gid)
+                .find(|g| &g.id == gid && g.enabled)
                 .map_or(false, |g| g.contains(model))
         })
     }
 
-    /// 某模型属于哪些组 (面板展示)
+    /// 某模型属于哪些组 (面板展示) —— 只返回启用的组
     pub fn groups_of(&self, model: &str) -> Vec<String> {
         self.data
             .load()
             .groups
             .iter()
-            .filter(|g| g.contains(model))
+            .filter(|g| g.enabled && g.contains(model))
             .map(|g| g.id.clone())
             .collect()
     }
@@ -323,6 +327,17 @@ impl ModelRegistry {
         body: &serde_json::Value,
         upstream: &[String],
     ) -> Option<String> {
+        Self::resolve_smart_model_with_price(model, body, upstream, None)
+    }
+
+    /// 带价格数据的智能路由: 默认按小时价格最低选择 (数据统计不足 1h 的不计入).
+    /// price_map: 模型名 → usd_per_lane_hour (来自 analytics 聚合).
+    pub fn resolve_smart_model_with_price(
+        model: &str,
+        body: &serde_json::Value,
+        upstream: &[String],
+        price_map: Option<&std::collections::BTreeMap<String, f64>>,
+    ) -> Option<String> {
         if upstream.is_empty() || upstream.iter().any(|u| u == model) {
             return None;
         }
@@ -352,10 +367,36 @@ impl ModelRegistry {
             Low => pick(&["low", "minimal", "none", "medium"]),
         };
         // 家族无任何档位变体 (如 default): 试试基名-fast, 再放弃
-        resolved.or_else(|| {
+        let resolved = resolved.or_else(|| {
             let fast = format!("{base}-fast");
             upstream.iter().any(|u| u == &fast).then_some(fast)
-        })
+        });
+        // 如果有价格数据且解析成功, 检查是否有更便宜的同族变体 (数据统计 ≥1h)
+        // 注意: 只在「同档位」内比较价格, 避免把 high 档请求路由到 low 档
+        if let (Some(resolved_model), Some(prices)) = (&resolved, price_map) {
+            let mut best = resolved_model.clone();
+            let mut best_price = prices.get(resolved_model).copied().unwrap_or(f64::MAX);
+            // 获取当前解析结果的档位后缀, 只在同档位变体中比较
+            let resolved_suffix = resolved_model.strip_prefix(&format!("{base}-"));
+            for u in upstream {
+                if Self::family_base(u) == base && u != resolved_model {
+                    // 只比较同档位变体 (如都是 -high, 或都是 -fast)
+                    let u_suffix = u.strip_prefix(&format!("{base}-"));
+                    if resolved_suffix != u_suffix {
+                        continue;
+                    }
+                    // 同族同档变体, 检查价格是否更低 (且数据量 ≥1h)
+                    if let Some(p) = prices.get(u) {
+                        if *p < best_price && *p > 0.0 {
+                            best = u.clone();
+                            best_price = *p;
+                        }
+                    }
+                }
+            }
+            return Some(best);
+        }
+        resolved
     }
 
     /// 模型是否对客户端可见 (进 /v1/models 与套餐可调清单).
@@ -408,6 +449,7 @@ impl ModelRegistry {
     /// 客户端可见的模型清单: 注册表(enabled) ∪ 上游家族基名 ∪ 上游无变体独立模型.
     /// 变体名 (claude-opus-5-high-fast) 不进列表 —— 客户端选基名, 网关按思考强度
     /// 路由到具体变体 (resolve_smart_model). extra 里的账本 seen 名同样按家族折叠.
+    /// 注意: fast 档 (如 claude-opus-5-fast) 价格不同, 不合并到基名, 单独列出.
     pub fn visible_models(&self, upstream: &[String], extra: &[String]) -> Vec<String> {
         let d = self.data.load();
         let mut out: Vec<String> = vec![];
@@ -423,7 +465,14 @@ impl ModelRegistry {
         }
         for m in upstream.iter().chain(extra.iter()) {
             let base = Self::family_base(m);
-            if self.is_visible(base, upstream) {
+            // fast 档价格不同, 不合并到基名 —— 检查是否带 -fast 后缀
+            let is_fast_variant = m.ends_with("-fast") && Self::family_base(m) != *m;
+            if is_fast_variant {
+                // fast 变体单独列出 (不折叠到基名)
+                if self.is_visible(m, upstream) {
+                    push(m.clone());
+                }
+            } else if self.is_visible(base, upstream) {
                 push(base.to_string());
             }
         }
@@ -657,6 +706,7 @@ mod tests {
             vis,
             vec![
                 "claude-opus-5",
+                "gpt-5.4-low-fast", // fast 档价格不同, 单独列出
                 "gpt-5.4",
                 "gemini-3-flash",
                 "kimi-k2.7-code"
@@ -723,6 +773,7 @@ mod tests {
             name: "便宜".into(),
             members: vec!["kimi-*".into(), "grok-4.6".into()],
             note: String::new(),
+            enabled: true,
         })
         .unwrap();
         r.upsert_group(ModelGroup {
@@ -730,6 +781,7 @@ mod tests {
             name: "opus".into(),
             members: vec!["claude-opus-*".into()],
             note: String::new(),
+            enabled: true,
         })
         .unwrap();
         let none: Vec<String> = vec![];
@@ -768,10 +820,11 @@ mod tests {
         r.upsert_model(entry("kimi-k3", 3.0, 15.0, "economy"))
             .unwrap();
         r.upsert_group(ModelGroup {
-            id: "g".into(),
-            name: "g".into(),
+            id: "test-g".into(),
+            name: "t".into(),
             members: vec!["kimi-*".into()],
             note: String::new(),
+            enabled: true,
         })
         .unwrap();
         let r2 = ModelRegistry::open(&p);

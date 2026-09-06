@@ -2070,6 +2070,7 @@ mod tests {
                 name: "kimi".into(),
                 members: vec!["kimi-*".into()],
                 note: String::new(),
+                enabled: true,
             })
             .unwrap();
         let s = store();
@@ -2102,6 +2103,7 @@ mod tests {
                 name: "t".into(),
                 members: vec!["kimi-*".into()],
                 note: String::new(),
+                enabled: true,
             })
             .unwrap();
         assert!(f(&["test-pam".into()], &[], "kimi-k3").is_ok());
