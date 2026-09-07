@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 
-fn now_unix() -> u64 {
+pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -441,6 +441,42 @@ pub struct Card {
     /// 定额卡已用面值 (micro-$, 持久化 — 重启不能清零余额)
     #[serde(default)]
     pub face_used_micro: u64,
+    /// 申诉 (客户经 /v1/appeal 提交, 面板审批). 批准后 trust_until 之前行为评分不生效
+    #[serde(default)]
+    pub appeal: Appeal,
+}
+
+/// 申诉记录. 一张卡同时只有一条; 再提交覆盖 (pending 期间不能重复提)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct Appeal {
+    /// "" | pending | approved | rejected
+    #[serde(default)]
+    pub status: String,
+    /// 客户留言 (≤500 字)
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub requested_at: u64,
+    #[serde(default)]
+    pub decided_at: u64,
+    /// 管理员备注 (客户可见)
+    #[serde(default)]
+    pub note: String,
+    /// 批准后的信任期截止 (unix 秒). now < trust_until → 行为评分不生效 (Normal)
+    #[serde(default)]
+    pub trust_until: u64,
+    /// 累计申诉次数 (审批参考)
+    #[serde(default)]
+    pub count: u32,
+}
+
+impl Appeal {
+    pub fn trusted(&self, now: u64) -> bool {
+        self.trust_until > now
+    }
+    pub fn pending(&self) -> bool {
+        self.status == "pending"
+    }
 }
 
 impl Card {
@@ -477,9 +513,31 @@ pub struct ScoreWeights {
     pub span_lo_pts: u32,
     pub span_min_slots: u32,
     pub no_break_secs: u64,
-    /// 日消耗 ≥ quota_usd → +quota_pts
+    /// 日消耗 ≥ quota_usd → +quota_pts (绝对值; 缺省关, 用价值比代替)
     pub quota_usd: f64,
     pub quota_pts: u32,
+    /// 价值比 = 今日成本¥ ÷ 卡的日均实收¥ (paid_rmb ÷ 天数). ≥ hi → +hi 分; ≥ lo → +lo 分.
+    /// 「用掉的成本超过付的钱的 60% / 80%」. 0 = 关
+    #[serde(default = "d_value_lo")]
+    pub value_ratio_lo: f64,
+    #[serde(default = "d_value_lo_pts")]
+    pub value_ratio_lo_pts: u32,
+    #[serde(default = "d_value_hi")]
+    pub value_ratio_hi: f64,
+    #[serde(default = "d_value_hi_pts")]
+    pub value_ratio_hi_pts: u32,
+}
+fn d_value_lo() -> f64 {
+    0.6
+}
+fn d_value_lo_pts() -> u32 {
+    10
+}
+fn d_value_hi() -> f64 {
+    0.8
+}
+fn d_value_hi_pts() -> u32 {
+    20
 }
 
 impl Default for ScoreWeights {
@@ -499,8 +557,12 @@ impl Default for ScoreWeights {
             span_lo_pts: 10,
             span_min_slots: 100,
             no_break_secs: NO_BREAK_SECS,
-            quota_usd: 250.0,
-            quota_pts: 15,
+            quota_usd: 0.0,
+            quota_pts: 0,
+            value_ratio_lo: 0.6,
+            value_ratio_lo_pts: 10,
+            value_ratio_hi: 0.8,
+            value_ratio_hi_pts: 20,
         }
     }
 }
@@ -543,9 +605,19 @@ pub struct RiskPolicy {
     /// 目的: 输出 p90 4.7k tok @25 tok/s 要 3 分钟, 会撞客户端超时/触发重试 (重试更贵).
     pub relief_after_tokens: u32,
     pub relief_tps: u32,
-    /// 日面值硬帽 ($): 超过后仅放行 hard_cap_allow_prefixes 里的模型 (空 = 全拒 403). 0 = 关
+    /// [已停用 2026-09-07] 日面值硬帽. 字段保留只为读旧 cards.json; 准入不再检查, 面板已移除.
+    /// 替代: 价值比评分信号 (weights.value_ratio_*) —— 成本超过付费只加分, 不拒绝.
+    #[serde(default)]
     pub hard_cap_usd: f64,
+    #[serde(default)]
     pub hard_cap_allow_prefixes: Vec<String>,
+    /// 压制粘滞秒数: 进入压制后至少保持这么久才允许回落 (脚本被限速后分数会掉再冲上来,
+    /// 不粘滞就来回震荡). 0 = 不粘滞
+    #[serde(default = "d_hold")]
+    pub degraded_hold_secs: u64,
+    /// 申诉批准后的信任期 (小时): 期间该卡评分不生效
+    #[serde(default = "d_trust_hours")]
+    pub appeal_trust_hours: u32,
     /// 便宜模型自动免限: 官方输出价 ($/M) 低于此值的模型不限速 (限了省不到钱只伤体验:
     /// gemini-flash 原生 3800 tok/s 压到 40 = 1s 变 37s, 面值 $2/槽·时). 0 = 关
     #[serde(default)]
@@ -567,9 +639,17 @@ impl Default for RiskPolicy {
             relief_tps: 0,
             hard_cap_usd: 0.0,
             hard_cap_allow_prefixes: vec![],
+            degraded_hold_secs: 1800,
+            appeal_trust_hours: 24,
             pace_min_output_price_per_m: 0.0,
         }
     }
+}
+fn d_hold() -> u64 {
+    1800
+}
+fn d_trust_hours() -> u32 {
+    24
 }
 
 impl RiskPolicy {
@@ -632,15 +712,9 @@ impl RiskPolicy {
             plan.abuse_score_threshold
         }
     }
-    pub fn hard_cap_hit(&self, day_quota_usd: f64, model: &str) -> bool {
-        if !self.enabled || self.hard_cap_usd <= 0.0 || day_quota_usd < self.hard_cap_usd {
-            return false;
-        }
-        let m = model.strip_prefix("cursor-").unwrap_or(model);
-        !self
-            .hard_cap_allow_prefixes
-            .iter()
-            .any(|p| !p.is_empty() && (m.starts_with(p.as_str()) || model.starts_with(p.as_str())))
+    /// 硬帽已停用 (2026-09-07): 永远 false. 用价值比评分代替.
+    pub fn hard_cap_hit(&self, _day_quota_usd: f64, _model: &str) -> bool {
+        false
     }
 }
 
@@ -752,6 +826,8 @@ pub struct AbuseScore {
     pub span_hours: f64,
     pub max_idle_secs: u64,
     pub day_quota_usd: f64,
+    /// 今日成本 ÷ 日均实收 (0 = 无法计算: 未付费)
+    pub value_ratio: f64,
     pub reasons: Vec<String>,
 }
 
@@ -762,6 +838,17 @@ pub fn abuse_score(sig: &BehaviorSignals, day_quota_usd: f64, now: u64) -> Abuse
 pub fn abuse_score_with(
     sig: &BehaviorSignals,
     day_quota_usd: f64,
+    now: u64,
+    w: &ScoreWeights,
+) -> AbuseScore {
+    abuse_score_value(sig, day_quota_usd, 0.0, now, w)
+}
+
+/// 含价值比的评分. `value_ratio` = 今日成本¥ ÷ 该卡日均实收¥ (调用方算好传入; 0 = 不计)
+pub fn abuse_score_value(
+    sig: &BehaviorSignals,
+    day_quota_usd: f64,
+    value_ratio: f64,
     now: u64,
     w: &ScoreWeights,
 ) -> AbuseScore {
@@ -800,13 +887,23 @@ pub fn abuse_score_with(
         score += w.quota_pts;
         reasons.push(format!("日消耗 ${:.0}", day_quota_usd));
     }
+    if value_ratio > 0.0 {
+        if w.value_ratio_hi > 0.0 && value_ratio >= w.value_ratio_hi {
+            score += w.value_ratio_hi_pts;
+            reasons.push(format!("成本达付费 {:.0}%", value_ratio * 100.0));
+        } else if w.value_ratio_lo > 0.0 && value_ratio >= w.value_ratio_lo {
+            score += w.value_ratio_lo_pts;
+            reasons.push(format!("成本达付费 {:.0}%", value_ratio * 100.0));
+        }
+    }
     AbuseScore {
-        score,
+        score: score.min(100),
         active_slots: slots,
         fast_follow_ratio: fast,
         span_hours: span,
         max_idle_secs: idle,
         day_quota_usd,
+        value_ratio,
         reasons,
     }
 }
@@ -827,6 +924,8 @@ pub struct CardRuntime {
     pub rpm: RpmBucket,
     /// 行为信号
     pub behavior: BehaviorSignals,
+    /// 进入压制档的时间 (unix 秒, 0 = 不在压制). 粘滞用
+    pub degraded_since: AtomicU64,
     /// B8: 并发车道释放通知 — 等待者 FIFO 排队而非自旋/立即 429
     pub lane_freed: tokio::sync::Notify,
     /// B7: 每卡共享的匀速器 — 该卡所有并发流喂同一个桶, 卡总输出 ≤ pace_tps
@@ -1250,6 +1349,7 @@ impl CardStore {
             enabled: true,
             paid_rmb: paid_rmb.unwrap_or(plan.price),
             face_used_micro: 0,
+            appeal: Appeal::default(),
         };
         self.cards.insert(card.card_key.clone(), card.clone());
         self.save();
@@ -1307,6 +1407,7 @@ impl CardStore {
                     day_start: AtomicU64::new(0),
                     rpm: RpmBucket::new(),
                     behavior: BehaviorSignals::new(),
+                    degraded_since: AtomicU64::new(0),
                     lane_freed: tokio::sync::Notify::new(),
                     pacer: std::sync::Mutex::new(None),
                     hold_micro: AtomicU64::new(0),
@@ -1327,9 +1428,28 @@ impl CardStore {
         {
             rt.day_count.store(0, Ordering::Relaxed);
             rt.day_quota_micro.store(0, Ordering::Relaxed);
+            rt.degraded_since.store(0, Ordering::Relaxed);
             rt.behavior.reset();
         }
         ds
+    }
+
+    /// 该卡的「日均实收」(¥): paid_rmb ÷ 套餐天数 (不足 1 天按 1 天). 0 = 未付费
+    pub fn daily_paid_rmb(card: &Card, plan: &CardPlan) -> f64 {
+        if card.paid_rmb <= 0.0 {
+            return 0.0;
+        }
+        let days = (plan.duration_hours as f64 / 24.0).max(1.0);
+        card.paid_rmb / days
+    }
+
+    /// 价值比 = 今日成本¥ ÷ 日均实收¥. 0 = 无法计算
+    pub fn value_ratio(&self, card: &Card, plan: &CardPlan, day_quota_usd: f64) -> f64 {
+        let daily = Self::daily_paid_rmb(card, plan);
+        if daily <= 0.0 {
+            return 0.0;
+        }
+        self.cost_model().cost_rmb(day_quota_usd) / daily
     }
 
     /// 计算当前档位 (不含并发闸门). 三个维度取最紧:
@@ -1337,6 +1457,17 @@ impl CardStore {
     /// 2. 行为评分 ≥ 阈值 → 压制; ≥ 阈值×0.6 → 软化
     fn eval_throttle(
         &self,
+        plan: &CardPlan,
+        rt: &CardRuntime,
+        now: u64,
+    ) -> (Throttle, f64, AbuseScore) {
+        self.eval_throttle_card(None, plan, rt, now)
+    }
+
+    /// 同 eval_throttle, 带卡信息: 价值比信号 (成本 vs 实收) + 申诉信任期 (评分不生效) + 压制粘滞.
+    fn eval_throttle_card(
+        &self,
+        card: Option<&Card>,
         plan: &CardPlan,
         rt: &CardRuntime,
         now: u64,
@@ -1355,7 +1486,14 @@ impl CardStore {
         };
         let load = quota_ratio.max(count_ratio);
         let policy = self.risk_policy();
-        let score = abuse_score_with(&rt.behavior, quota_used, now, &policy.weights);
+        let vr = card
+            .map(|c| self.value_ratio(c, plan, quota_used))
+            .unwrap_or(0.0);
+        let mut score = abuse_score_value(&rt.behavior, quota_used, vr, now, &policy.weights);
+        let trusted = card.map(|c| c.appeal.trusted(now)).unwrap_or(false);
+        if trusted {
+            score.reasons.insert(0, "申诉信任期, 评分不生效".into());
+        }
         let mut t = if load > 1.0 {
             Throttle::Degraded
         } else if load >= plan.soften_ratio {
@@ -1364,12 +1502,31 @@ impl CardStore {
             Throttle::Normal
         };
         let th = policy.threshold_for(plan);
-        if th > 0 {
+        if th > 0 && !trusted {
             let soft_th = (th as f64 * policy.soften_ratio_of_threshold) as u32;
             if score.score >= th {
                 t = Throttle::Degraded;
             } else if score.score >= soft_th && t == Throttle::Normal {
                 t = Throttle::Soften;
+            }
+        }
+        // 压制粘滞: 进入压制后 degraded_hold_secs 内不回落
+        if policy.degraded_hold_secs > 0 && !trusted {
+            let since = rt.degraded_since.load(Ordering::Relaxed);
+            if t == Throttle::Degraded {
+                if since == 0 {
+                    rt.degraded_since.store(now, Ordering::Relaxed);
+                }
+            } else if since > 0 {
+                if now < since + policy.degraded_hold_secs {
+                    t = Throttle::Degraded;
+                    score.reasons.push(format!(
+                        "压制粘滞 (还剩 {}min)",
+                        (since + policy.degraded_hold_secs - now) / 60
+                    ));
+                } else {
+                    rt.degraded_since.store(0, Ordering::Relaxed);
+                }
             }
         }
         (t, load, score)
@@ -1587,27 +1744,6 @@ impl CardStore {
         }
         let ds = self.roll_day(&rt, now);
 
-        // 日面值硬帽 (全局风控): 超帽后只放行白名单模型
-        {
-            let policy = self.risk_policy();
-            let used = rt.day_quota_micro.load(Ordering::Relaxed) as f64 / 1e6;
-            if policy.hard_cap_hit(used, model) {
-                return Err((
-                    429,
-                    format!(
-                        "daily face cap reached (${:.0} / ${:.0}); only {} allowed until tomorrow",
-                        used,
-                        policy.hard_cap_usd,
-                        if policy.hard_cap_allow_prefixes.is_empty() {
-                            "nothing".to_string()
-                        } else {
-                            policy.hard_cap_allow_prefixes.join("/")
-                        }
-                    ),
-                ));
-            }
-        }
-
         // RPM 闸门 (先于计数, 拒绝时不污染当日计数)
         let rpm_now = rt.rpm.tick(now);
         if rpm_now > plan.rpm_limit as u64 {
@@ -1619,7 +1755,7 @@ impl CardStore {
 
         // 行为信号 + 档位判定 (在 day_count 递增前评估, 用的是截至上一条的状态)
         rt.behavior.on_arrive(now, ds);
-        let (throttle, _load, _score) = self.eval_throttle(&plan, &rt, now);
+        let (throttle, _load, _score) = self.eval_throttle_card(Some(&card), &plan, &rt, now);
         rt.day_count.fetch_add(1, Ordering::Relaxed);
         rt.hold_micro.fetch_add(hold, Ordering::Relaxed);
 
@@ -1738,7 +1874,7 @@ impl CardStore {
             0.0
         };
         let (throttle, load, score) = match plan.as_ref() {
-            Some(p) if same_day => self.eval_throttle(p, &rt, now),
+            Some(p) if same_day => self.eval_throttle_card(Some(&card), p, &rt, now),
             _ => (Throttle::Normal, 0.0, abuse_score(&rt.behavior, 0.0, now)),
         };
         let cm = self.cost_model();
@@ -1769,6 +1905,115 @@ impl CardStore {
             "pace_tps": plan.as_ref().map(|p| self.risk_policy().pace_for(p, throttle, "")),
             "abuse": score,
             "rpm_now": rt.rpm.current(now),
+            "appeal": card.appeal,
+            "trusted": card.appeal.trusted(now),
+            "daily_paid_rmb": plan.as_ref().map(|p| Self::daily_paid_rmb(&card, p)).unwrap_or(0.0),
+        }))
+    }
+
+    // ── 申诉 ──
+
+    /// 客户提交申诉 (卡 bearer). pending 期间不可重复; 被拒后 6h 内不可再提
+    pub fn submit_appeal(&self, key: &str, message: &str) -> Result<Appeal, (u16, String)> {
+        let now = now_unix();
+        let mut card = self
+            .get_card(key)
+            .ok_or((401u16, "invalid card key".to_string()))?;
+        if card.appeal.pending() {
+            return Err((409, "appeal already pending".into()));
+        }
+        if card.appeal.status == "rejected" && now < card.appeal.decided_at + 6 * 3600 {
+            return Err((429, "appeal rejected recently; try again in a few hours".into()));
+        }
+        card.appeal = Appeal {
+            status: "pending".into(),
+            message: message.chars().take(500).collect(),
+            requested_at: now,
+            decided_at: 0,
+            note: String::new(),
+            trust_until: card.appeal.trust_until,
+            count: card.appeal.count + 1,
+        };
+        let a = card.appeal.clone();
+        self.cards.insert(card.card_key.clone(), card);
+        self.save();
+        Ok(a)
+    }
+
+    /// 管理员裁定. approve → 信任期 trust_hours (None/0 = 策略缺省), 并清零今日行为信号与压制粘滞
+    pub fn decide_appeal(
+        &self,
+        key: &str,
+        approve: bool,
+        note: &str,
+        trust_hours: Option<u32>,
+    ) -> Result<Appeal, String> {
+        let now = now_unix();
+        let mut card = self.get_card(key).ok_or("card not found")?;
+        card.appeal.decided_at = now;
+        card.appeal.note = note.chars().take(300).collect();
+        if approve {
+            let h = trust_hours
+                .filter(|h| *h > 0)
+                .unwrap_or(self.risk_policy().appeal_trust_hours);
+            card.appeal.status = "approved".into();
+            card.appeal.trust_until = now + h as u64 * 3600;
+            if let Some(rt) = self.runtimes.get(key) {
+                rt.degraded_since.store(0, Ordering::Relaxed);
+                rt.behavior.reset();
+            }
+        } else {
+            card.appeal.status = "rejected".into();
+        }
+        let a = card.appeal.clone();
+        self.cards.insert(card.card_key.clone(), card);
+        self.save();
+        Ok(a)
+    }
+
+    /// 管理员手动设信任期 (不经申诉); hours=0 撤销
+    pub fn set_trust(&self, key: &str, hours: u32) -> Result<Appeal, String> {
+        let now = now_unix();
+        let mut card = self.get_card(key).ok_or("card not found")?;
+        card.appeal.trust_until = if hours == 0 {
+            0
+        } else {
+            now + hours as u64 * 3600
+        };
+        if hours > 0 {
+            if let Some(rt) = self.runtimes.get(key) {
+                rt.degraded_since.store(0, Ordering::Relaxed);
+            }
+        }
+        let a = card.appeal.clone();
+        self.cards.insert(card.card_key.clone(), card);
+        self.save();
+        Ok(a)
+    }
+
+    /// 客户自查 (卡 bearer): 档位/评分原因/限速/申诉状态. 不暴露权重与其他卡
+    pub fn self_status(&self, key: &str) -> Option<Value> {
+        let st = self.card_status(key)?;
+        let plan = self.get_card(key).and_then(|c| self.get_plan(&c.plan_id));
+        Some(json!({
+            "plan": st["plan_name"],
+            "expires_at": st["expires_at"],
+            "remaining_secs": st["remaining_secs"],
+            "throttle": st["throttle"],
+            "pace_tps": st["pace_tps"],
+            "max_concurrency": plan.as_ref().map(|p| p.max_concurrency),
+            "score": st["abuse"]["score"],
+            "reasons": st["abuse"]["reasons"],
+            "day_requests": st["day_used"],
+            "appeal": {
+                "status": st["appeal"]["status"],
+                "requested_at": st["appeal"]["requested_at"],
+                "decided_at": st["appeal"]["decided_at"],
+                "note": st["appeal"]["note"],
+                "trust_until": st["appeal"]["trust_until"],
+            },
+            "trusted": st["trusted"],
+            "how_to_appeal": "POST /v1/appeal {\"message\": \"...\"} with this card key as Bearer",
         }))
     }
 
@@ -1790,8 +2035,9 @@ impl CardStore {
                 continue;
             };
             let quota_used = rt.day_quota_micro.load(Ordering::Relaxed) as f64 / 1e6;
-            let cur = abuse_score_with(&rt.behavior, quota_used, now, &self.risk_policy().weights);
-            let new = abuse_score_with(&rt.behavior, quota_used, now, &policy.weights);
+            let vr = self.value_ratio(card, &plan, quota_used);
+            let cur = abuse_score_value(&rt.behavior, quota_used, vr, now, &self.risk_policy().weights);
+            let new = abuse_score_value(&rt.behavior, quota_used, vr, now, &policy.weights);
             let th = policy.threshold_for(&plan);
             let soft = (th as f64 * policy.soften_ratio_of_threshold) as u32;
             let t = if th > 0 && new.score >= th {
@@ -1801,7 +2047,7 @@ impl CardStore {
             } else {
                 Throttle::Normal
             };
-            let (cur_t, _, _) = self.eval_throttle(&plan, &rt, now);
+            let (cur_t, _, _) = self.eval_throttle_card(Some(card), &plan, &rt, now);
             out.push(json!({
                 "card_key": card.card_key,
                 "owner": card.owner,
@@ -1822,7 +2068,10 @@ impl CardStore {
                     "fast_follow_ratio": new.fast_follow_ratio,
                     "span_hours": new.span_hours,
                     "max_idle_secs": new.max_idle_secs,
+                    "value_ratio": vr,
                 },
+                "trusted": card.appeal.trusted(now),
+                "appeal_status": card.appeal.status,
             }));
         }
         out.sort_by(|a, b| {
@@ -2745,14 +2994,12 @@ mod tests {
         assert_eq!(p.threshold_for(&plan), 0);
         p.enabled = true;
         // 硬帽
+        // 硬帽已停用: 无论怎么配都不命中 (用价值比评分代替)
         p.hard_cap_usd = 250.0;
         p.hard_cap_allow_prefixes = vec!["kimi-k3".into(), "grok".into()];
-        assert!(!p.hard_cap_hit(249.0, "claude-fable-5"));
-        assert!(p.hard_cap_hit(250.0, "claude-fable-5"));
-        assert!(!p.hard_cap_hit(300.0, "kimi-k3-high"));
-        assert!(!p.hard_cap_hit(300.0, "cursor-grok-4.6-xhigh"));
+        assert!(!p.hard_cap_hit(250.0, "claude-fable-5"));
         p.hard_cap_allow_prefixes.clear();
-        assert!(p.hard_cap_hit(300.0, "kimi-k3-high"));
+        assert!(!p.hard_cap_hit(300.0, "kimi-k3-high"));
         // 便宜模型自动免限: 输出价 < $10/M → 0; fable ($50) 仍限; 规则显式 pace 优先于自动免限
         let mut p2 = RiskPolicy::default();
         p2.pace_normal_tps = Some(40);
@@ -2967,5 +3214,125 @@ mod tests {
         let ds1 = day_start(1_700_000_000, 480);
         let ds2 = day_start(1_700_000_000 + 86400, 480);
         assert_eq!(ds2 - ds1, 86400);
+    }
+
+    #[test]
+    fn value_ratio_signal_scores_cost_vs_paid() {
+        let s = store();
+        // 套餐 24h ¥50 → 日均实收 ¥50; 成本率 0.13 ¥/$ → $231 = 60%, $308 = 80%
+        s.upsert_plan(plan("v"));
+        s.set_cost_model(CostModel {
+            account_price_rmb: 130.0,
+            weekly_quota_usd: 1000.0,
+            usable_weeks: 1.0,
+        });
+        let c = s.issue_card("v", "x").unwrap();
+        let p = s.get_plan("v").unwrap();
+        assert!((CardStore::daily_paid_rmb(&c, &p) - 50.0).abs() < 1e-9);
+        assert!((s.value_ratio(&c, &p, 100.0) - 0.26).abs() < 1e-6);
+        let sig = BehaviorSignals::new();
+        let w = ScoreWeights::default();
+        assert_eq!(abuse_score_value(&sig, 100.0, 0.26, 0, &w).score, 0);
+        let lo = abuse_score_value(&sig, 240.0, s.value_ratio(&c, &p, 240.0), 0, &w);
+        assert_eq!(lo.score, 10, "{:?}", lo.reasons);
+        assert!(lo.reasons[0].starts_with("成本达付费 62%"));
+        let hi = abuse_score_value(&sig, 320.0, s.value_ratio(&c, &p, 320.0), 0, &w);
+        assert_eq!(hi.score, 20);
+        // 未付费卡 (paid 0) 不计价值比
+        let mut free = c.clone();
+        free.paid_rmb = 0.0;
+        assert_eq!(s.value_ratio(&free, &p, 999.0), 0.0);
+        // 7 天卡按日均摊
+        let mut p7 = plan("v7");
+        p7.duration_hours = 168;
+        p7.price = 168.0;
+        s.upsert_plan(p7.clone());
+        let c7 = s.issue_card("v7", "x").unwrap();
+        assert!((CardStore::daily_paid_rmb(&c7, &p7) - 24.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn appeal_flow_and_trust_disables_scoring() {
+        let s = store();
+        let mut p = plan("a");
+        p.abuse_score_threshold = 20; // 让 value_ratio hi (20 分) 直接压制
+        p.fair_use_rpd = 0;
+        s.upsert_plan(p);
+        s.set_cost_model(CostModel {
+            account_price_rmb: 130.0,
+            weekly_quota_usd: 1000.0,
+            usable_weeks: 1.0,
+        });
+        let c = s.issue_card("a", "x").unwrap();
+        // 烧到 $400 (¥52 > 日均 ¥50 的 80%) → 压制
+        s.settle_usd(&c.card_key, 400.0);
+        let st = s.card_status(&c.card_key).unwrap();
+        assert_eq!(st["throttle"], "degraded", "{}", st["abuse"]);
+        assert!(st["abuse"]["value_ratio"].as_f64().unwrap() > 1.0);
+        // 客户提交申诉
+        let a = s.submit_appeal(&c.card_key, "我是真人在写代码").unwrap();
+        assert_eq!(a.status, "pending");
+        assert_eq!(a.count, 1);
+        assert_eq!(s.submit_appeal(&c.card_key, "again").unwrap_err().0, 409);
+        // 自查能看到
+        let me = s.self_status(&c.card_key).unwrap();
+        assert_eq!(me["appeal"]["status"], "pending");
+        assert_eq!(me["throttle"], "degraded");
+        // 批准 → 信任期内评分不生效 → Normal
+        let a = s.decide_appeal(&c.card_key, true, "核实为个人开发者", Some(12)).unwrap();
+        assert_eq!(a.status, "approved");
+        assert!(a.trust_until > now_unix() + 11 * 3600);
+        let st = s.card_status(&c.card_key).unwrap();
+        assert_eq!(st["throttle"], "normal", "{}", st["abuse"]);
+        assert_eq!(st["trusted"], true);
+        // 持久化
+        let path = s.path.clone();
+        drop(s);
+        let s2 = CardStore::open(&path, 480);
+        let c2 = s2.get_card(&c.card_key).unwrap();
+        assert_eq!(c2.appeal.status, "approved");
+        assert!(c2.appeal.trusted(now_unix()));
+        // 撤销信任 → 又压制 (成本没变)
+        s2.set_trust(&c.card_key, 0).unwrap();
+        s2.settle_usd(&c.card_key, 400.0);
+        let st = s2.card_status(&c.card_key).unwrap();
+        assert_eq!(st["throttle"], "degraded");
+        // 拒绝后 6h 内不能再提
+        s2.decide_appeal(&c.card_key, false, "脚本", None).unwrap();
+        assert_eq!(s2.submit_appeal(&c.card_key, "x").unwrap_err().0, 429);
+    }
+
+    #[test]
+    fn degraded_is_sticky_for_hold_secs() {
+        let s = store();
+        let mut p = plan("h");
+        p.abuse_score_threshold = 20;
+        p.fair_use_rpd = 0;
+        s.upsert_plan(p);
+        s.set_cost_model(CostModel {
+            account_price_rmb: 130.0,
+            weekly_quota_usd: 1000.0,
+            usable_weeks: 1.0,
+        });
+        let mut pol = s.risk_policy();
+        pol.degraded_hold_secs = 1800;
+        s.set_risk_policy(pol);
+        let c = s.issue_card("h", "x").unwrap();
+        s.settle_usd(&c.card_key, 400.0);
+        assert_eq!(s.card_status(&c.card_key).unwrap()["throttle"], "degraded");
+        // 模拟分数掉回去: 清行为信号 + 把今日消耗清零 (但 degraded_since 已记)
+        let rt = s.runtime(&c.card_key);
+        rt.day_quota_micro.store(0, Ordering::Relaxed);
+        let st = s.card_status(&c.card_key).unwrap();
+        assert_eq!(st["throttle"], "degraded", "粘滞期内不回落: {}", st["abuse"]);
+        assert!(st["abuse"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("粘滞")));
+        // 粘滞过期 → 回落
+        rt.degraded_since.store(now_unix() - 1801, Ordering::Relaxed);
+        assert_eq!(s.card_status(&c.card_key).unwrap()["throttle"], "normal");
+        assert_eq!(rt.degraded_since.load(Ordering::Relaxed), 0);
     }
 }

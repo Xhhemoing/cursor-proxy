@@ -659,6 +659,12 @@ async fn main() -> anyhow::Result<()> {
             get(admin::api_pricing_table),
         )
         .route("/admin/api/cards/profit", get(admin::api_cards_profit))
+        .route("/admin/api/cards/appeals", get(admin::api_appeals_list))
+        .route(
+            "/admin/api/cards/:key/appeal",
+            post(admin::api_appeal_decide),
+        )
+        .route("/admin/api/cards/:key/trust", post(admin::api_card_trust))
         .route("/admin/api/cards", get(admin::api_cards_list))
         .route("/admin/api/cards/issue", post(admin::api_cards_issue))
         .route("/admin/api/cards/report", get(admin::api_cards_report))
@@ -694,6 +700,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/v1/models", get(models_handler))
+        // 套餐卡客户自助: 查自己的档位/评分/限速, 提交申诉 (Bearer = 卡 key)
+        .route("/v1/card/status", get(card_self_status_handler))
+        .route("/v1/appeal", post(card_appeal_handler))
         // 1M-token 上下文请求体可达 ~3.2MB（kimi-k3 等长上下文模型），
         // axum 默认 DefaultBodyLimit 为 2MB 会以 413 拦截，这里放宽到 64MB。
         .route("/v1/chat/completions", post(chat_handler))
@@ -946,6 +955,67 @@ async fn admin_auth_mw(
 }
 
 /// GET /v1/models
+/// 卡自查: GET /v1/card/status (Bearer card-…). 非卡 token → 401
+async fn card_self_status_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let tok = extract_token(&headers);
+    if !tok.starts_with("card-") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(openai_error("card key required", "invalid_card", 401)),
+        )
+            .into_response();
+    }
+    match state.card_store.self_status(&tok) {
+        Some(v) => Json(v).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(openai_error("Invalid card key", "invalid_card", 401)),
+        )
+            .into_response(),
+    }
+}
+
+/// 卡申诉: POST /v1/appeal {"message": "..."} (Bearer card-…)
+async fn card_appeal_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let tok = extract_token(&headers);
+    if !tok.starts_with("card-") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(openai_error("card key required", "invalid_card", 401)),
+        )
+            .into_response();
+    }
+    let msg = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    if msg.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(openai_error("message required", "invalid_request", 400)),
+        )
+            .into_response();
+    }
+    match state.card_store.submit_appeal(&tok, msg.trim()) {
+        Ok(a) => {
+            info!(event = "appeal_submitted", card = %tok, count = a.count, "card appeal submitted");
+            Json(json!({ "ok": true, "appeal": a, "note": "审核通常在几小时内完成; 批准后 24h 内评分不生效. 查询: GET /v1/card/status" })).into_response()
+        }
+        Err((code, m)) => (
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(openai_error(&m, "appeal_rejected", code)),
+        )
+            .into_response(),
+    }
+}
+
 async fn models_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1425,7 +1495,6 @@ async fn inference_handler_inner(
         .map(|v| v as u32)
         .or(Some(crate::cursor::DEFAULT_MAX_TOKENS));
     // 注: 卡限流不再缩 max_tokens (截断答案 → agent 重试 → 更贵). 只做并发 + 匀速流出.
-    let _ = card_throttle;
     let max_mode = crate::cursor::max_mode_from_request(&body);
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
     let tools = body.get("tools").cloned();
@@ -2081,6 +2150,9 @@ async fn inference_handler_inner(
             // 客户端长时间收不到数据 (超高延时) 且长流易被反代超时掐断 (断流)。
             .header("x-accel-buffering", "no")
             .header("x-request-id", &request_id)
+            // 透明限流: 客户端能看到自己被降了档 (含申诉入口), 不用猜
+            .header("x-card-throttle", card_throttle.as_str())
+            .header("x-card-pace-tps", card_pace_tps.to_string())
             .body(body)
             .unwrap())
     } else {

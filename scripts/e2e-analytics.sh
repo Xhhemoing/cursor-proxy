@@ -182,5 +182,36 @@ curl -s "$B/admin/api/cards" -H "$A" | py 'import sys,json;d=json.load(sys.stdin
 # 恢复缺省
 curl -s -X POST "$B/admin/api/cards/risk-policy" -H "$A" -H 'Content-Type: application/json' -d "$(echo "$RP" | py 'import sys,json;print(json.dumps(json.load(sys.stdin)["defaults"]))')" >/dev/null
 
+echo "── 申诉 / 价值比 / 无硬帽 ──"
+# 缺省权重含价值比 60%/80%, 硬帽字段虽在但永不生效
+echo "$RP" | py 'import sys,json;w=json.load(sys.stdin)["defaults"]["weights"];assert w["value_ratio_lo"]==0.6 and w["value_ratio_hi"]==0.8 and w["value_ratio_lo_pts"]==10 and w["value_ratio_hi_pts"]==20 and w["quota_usd"]==0' && ok "缺省权重: 价值比 60%→+10 / 80%→+20, 绝对日消耗关" || ko "缺省权重不对"
+# 开一张 24h ¥50 卡, 用它走申诉流程
+curl -s -X POST "$B/admin/api/cards/plans/seed" -H "$A" >/dev/null
+PLAN=$(curl -s "$B/admin/api/cards/plans" -H "$A" | py 'import sys,json;d=json.load(sys.stdin);ps=d if isinstance(d,list) else d.get("plans",[]);print(ps[0]["id"])')
+AKEY=$(curl -s -X POST "$B/admin/api/cards/issue" -H "$A" -H 'Content-Type: application/json' -d "{\"plan_id\":\"$PLAN\",\"owner\":\"e2e-appeal\",\"paid_rmb\":50}" | py 'import sys,json;d=json.load(sys.stdin);print((d.get("issued") or d.get("cards") or [d.get("card",d)])[0]["card_key"])')
+[ -n "$AKEY" ] && ok "开卡 $PLAN ($AKEY)" || ko "开卡失败"
+ST=$(curl -s "$B/v1/card/status" -H "Authorization: Bearer $AKEY")
+echo "$ST" | py 'import sys,json;d=json.load(sys.stdin);assert d["throttle"]=="normal" and d["appeal"]["status"]=="" and "how_to_appeal" in d and "weights" not in json.dumps(d)' && ok "GET /v1/card/status 自查 (不暴露权重)" || ko "自查异常: $ST"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$B/v1/card/status" -H "Authorization: Bearer card-nope")" = "401" ] && ok "伪卡自查 → 401" || ko "伪卡自查未拒"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/appeal" -H "Authorization: Bearer $AKEY" -H 'Content-Type: application/json' -d '{"message":""}')" = "400" ] && ok "空留言 → 400" || ko "空留言未拒"
+AP=$(curl -s -X POST "$B/v1/appeal" -H "Authorization: Bearer $AKEY" -H 'Content-Type: application/json' -d '{"message":"我是个人开发者, 白天在写代码"}')
+echo "$AP" | py 'import sys,json;d=json.load(sys.stdin);assert d["ok"] and d["appeal"]["status"]=="pending" and d["appeal"]["count"]==1' && ok "POST /v1/appeal 提交" || ko "提交失败: $AP"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/appeal" -H "Authorization: Bearer $AKEY" -H 'Content-Type: application/json' -d '{"message":"again"}')" = "409" ] && ok "重复提交 → 409" || ko "重复提交未拒"
+curl -s "$B/admin/api/cards/appeals" -H "$A" | py 'import sys,json;d=json.load(sys.stdin);assert d["pending"]>=1 and any(r["appeal"]["status"]=="pending" and r["owner"]=="e2e-appeal" for r in d["rows"])' && ok "面板申诉列表有待审" || ko "申诉列表缺"
+DEC=$(curl -s -X POST "$B/admin/api/cards/$AKEY/appeal" -H "$A" -H 'Content-Type: application/json' -d '{"approve":true,"note":"e2e 批准","trust_hours":2}')
+echo "$DEC" | py 'import sys,json;d=json.load(sys.stdin);import time;a=d["appeal"];assert d["ok"] and a["status"]=="approved" and a["trust_until"]>time.time()+3600' && ok "批准 → 信任期 2h" || ko "批准失败: $DEC"
+curl -s "$B/v1/card/status" -H "Authorization: Bearer $AKEY" | py 'import sys,json;d=json.load(sys.stdin);assert d["trusted"] is True and d["appeal"]["note"]=="e2e 批准"' && ok "客户自查看到批准+备注" || ko "自查未反映批准"
+python3 -c "import json,sys;d=json.load(open('$E/cards.json'));c=[x for x in d['cards'] if x['card_key']=='$AKEY'][0];assert c['appeal']['status']=='approved'" && ok "申诉状态持久化 cards.json" || ko "申诉未落盘"
+curl -s -X POST "$B/admin/api/cards/$AKEY/trust" -H "$A" -H 'Content-Type: application/json' -d '{"hours":0}' | py 'import sys,json;d=json.load(sys.stdin);assert d["ok"] and d["appeal"]["trust_until"]==0' && ok "撤销信任" || ko "撤销失败"
+# 硬帽字段发 250 也不拒绝请求 (准入里已不检查): 卡请求到黑洞上游 → 502 而不是 429
+curl -s -X POST "$B/admin/api/cards/risk-policy" -H "$A" -H 'Content-Type: application/json' -d "$(echo "$RP" | py 'import sys,json;p=json.load(sys.stdin)["defaults"];p["hard_cap_usd"]=0.001;p["hard_cap_allow_prefixes"]=[];print(json.dumps(p))')" >/dev/null
+HC=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/v1/chat/completions" -H "Authorization: Bearer $AKEY" -H 'Content-Type: application/json' -d '{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}],"stream":false}')
+[ "$HC" != "429" ] && ok "硬帽字段不再拒绝请求 (HTTP $HC, 非 429)" || ko "硬帽仍生效: $HC"
+curl -s -X POST "$B/admin/api/cards/risk-policy" -H "$A" -H 'Content-Type: application/json' -d "$(echo "$RP" | py 'import sys,json;print(json.dumps(json.load(sys.stdin)["defaults"]))')" >/dev/null
+# 流式响应头带档位
+HDR=$(curl -s -D - -o /dev/null -X POST "$B/v1/chat/completions" -H "Authorization: Bearer $AKEY" -H 'Content-Type: application/json' -d '{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}],"stream":true}' | tr -d '\r')
+echo "$HDR" | grep -qi '^x-card-throttle: normal' && ok "流式响应头 x-card-throttle" || echo "  (上游黑洞 502 时无流式头, 跳过: $(echo "$HDR" | head -1))"
+curl -s -X DELETE "$B/admin/api/cards/$AKEY" -H "$A" >/dev/null
+
 echo; echo "══ RESULT: $pass passed, $fail failed ══"
 exit $fail

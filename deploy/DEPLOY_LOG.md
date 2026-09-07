@@ -112,3 +112,13 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - TokenPacer::estimate_tokens 补 `"arguments":"` (OpenAI 工具调用参数增量). 之前 agent 写文件的输出全绕过限速:
   实测 fable-max 可见比 27%, grok-4.6 7% → pace 40 形同虚设. md5 4c5464174e4562ff8baff0567f050c5f (pace-args); 167 tests
 - 待观察: 换后 out_visible_est/output_tokens 应升到 ≥60% (fable) / ≥90% (grok); pace_wait_ms 显著增大
+
+## 2026-09-07 03:30 UTC — 本机 8800 去硬帽 + 价值比评分 + 申诉 + 压制粘滞
+- 硬帽停用 (RiskPolicy.hard_cap_* 保留字段不生效, 面板移除). 替代: ScoreWeights.value_ratio_lo/hi (缺省 0.6→+10, 0.8→+20):
+  价值比 = 今日成本¥ ÷ (paid_rmb ÷ 套餐天数). 超过付费只加分不拒绝.
+- 申诉: 客户 POST /v1/appeal {"message"} / GET /v1/card/status (Bearer 卡 key, 不暴露权重); 管理 GET /admin/api/cards/appeals,
+  POST /admin/api/cards/:key/appeal {approve,note,trust_hours}, POST /admin/api/cards/:key/trust {hours}. 批准 → 信任期评分不生效 + 清今日信号;
+  拒绝 → 6h 内不可再提. 面板 套餐卡→申诉 tab (待审角标), 卡列表「信任24h/撤信任」.
+- 压制粘滞 degraded_hold_secs (缺省 1800): 进压制后 30min 内不回落. 流式响应头 x-card-throttle / x-card-pace-tps.
+- 策略落地 scripts/apply-risk-final.sh: fable/opus/sol 35/25/12, grok 70/40/20, gemini 80/60/30, kimi 免限; relief 3000; 无硬帽.
+- md5 ccac12fc88a6dcc5ebb44e52727aa9a6; 170 tests; E2E 43/43

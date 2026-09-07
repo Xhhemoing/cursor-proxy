@@ -269,11 +269,90 @@ fn validate_policy(p: &RiskPolicy) -> Result<(), String> {
     if p.hard_cap_usd < 0.0 || p.pace_min_output_price_per_m < 0.0 {
         return Err("hard_cap_usd / pace_min_output_price_per_m must be ≥ 0".into());
     }
+    if p.appeal_trust_hours > 24 * 30 {
+        return Err("appeal_trust_hours must be ≤ 720".into());
+    }
     let w = &p.weights;
     if !(0.0..=1.0).contains(&w.fast_hi) || !(0.0..=1.0).contains(&w.fast_lo) {
         return Err("fast_* must be in [0,1]".into());
     }
+    if w.value_ratio_lo < 0.0 || w.value_ratio_hi < 0.0 {
+        return Err("value_ratio_* must be ≥ 0".into());
+    }
+    if w.value_ratio_lo > 0.0 && w.value_ratio_hi > 0.0 && w.value_ratio_lo > w.value_ratio_hi {
+        return Err("value_ratio_lo must be ≤ value_ratio_hi".into());
+    }
     Ok(())
+}
+
+// ── 申诉 (管理端) ──
+
+/// 待审/近期申诉列表: 有 appeal.status 非空的卡, pending 优先, 其余按 decided_at 倒序
+pub async fn api_appeals_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let now = cards::now_unix();
+    let mut rows: Vec<Value> = state
+        .card_store
+        .list_status()
+        .into_iter()
+        .filter(|c| {
+            c["appeal"]["status"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
+                || c["trusted"].as_bool().unwrap_or(false)
+        })
+        .collect();
+    rows.sort_by_key(|c| {
+        let pending = c["appeal"]["status"] == "pending";
+        let t = c["appeal"]["requested_at"]
+            .as_u64()
+            .max(c["appeal"]["decided_at"].as_u64())
+            .unwrap_or(0);
+        (std::cmp::Reverse(pending as u8), std::cmp::Reverse(t))
+    });
+    let pending = rows.iter().filter(|c| c["appeal"]["status"] == "pending").count();
+    Json(json!({ "now": now, "pending": pending, "rows": rows }))
+}
+
+#[derive(Deserialize)]
+pub struct DecideBody {
+    pub approve: bool,
+    #[serde(default)]
+    pub note: String,
+    /// 批准时的信任期小时; 缺省 = 策略 appeal_trust_hours
+    #[serde(default)]
+    pub trust_hours: Option<u32>,
+}
+
+pub async fn api_appeal_decide(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(b): Json<DecideBody>,
+) -> Response {
+    match state
+        .card_store
+        .decide_appeal(&key, b.approve, &b.note, b.trust_hours)
+    {
+        Ok(a) => {
+            tracing::info!(event = "appeal_decided", card = %key, approve = b.approve, "appeal decided");
+            Json(json!({ "ok": true, "appeal": a })).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TrustBody {
+    /// 0 = 撤销信任
+    pub hours: u32,
+}
+
+pub async fn api_card_trust(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(b): Json<TrustBody>,
+) -> Response {
+    match state.card_store.set_trust(&key, b.hours) {
+        Ok(a) => Json(json!({ "ok": true, "appeal": a })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response(),
+    }
 }
 
 pub async fn api_risk_policy_set(

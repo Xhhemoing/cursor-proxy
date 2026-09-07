@@ -892,7 +892,8 @@
             <button type="button" data-tab="cards">卡</button>
             <button type="button" data-tab="profit">利润</button>
             <button type="button" data-tab="cost">成本模型 / 价格表</button>
-            <button type="button" data-tab="risk" title="行为评分权重、限速档位、按模型限速、日面值硬帽 — 全局生效, 即时热更新">风控</button>
+            <button type="button" data-tab="risk" title="行为评分权重、限速档位、按模型限速 — 全局生效, 即时热更新">风控</button>
+            <button type="button" data-tab="appeals" title="客户经 POST /v1/appeal 提交的申诉; 批准 = 信任期内评分不生效">申诉 <span id="cd-appeal-badge" class="pill warn" style="display:none"></span></button>
           </div>
           <div class="info" id="cd-msg" style="min-height:18px;margin-bottom:6px"></div>
 
@@ -1041,14 +1042,14 @@
                   <label>全局 pace 压制 tok/s <input id="rk-pd" type="number" min="0" step="1" placeholder="沿用套餐"></label>
                   <label title="单请求已放出 ≥ N tok 后放开限速, 避免长输出撞客户端超时 (输出 p90 4.7k tok @25 tok/s = 3 分钟). 0 = 不放开">长输出放开阈值 tok <input id="rk-ra" type="number" min="0" step="100"></label>
                   <label title="放开后的速度; 0 = 完全不限">放开后 tok/s (0=不限) <input id="rk-rt" type="number" min="0" step="1"></label>
-                  <label title="卡当日面值 ≥ 此值后, 只放行白名单前缀的模型 (其余 429). 0 = 关">日面值硬帽 $ (0=关) <input id="rk-cap" type="number" min="0" step="10"></label>
-                  <label title="逗号分隔前缀, 如 kimi-k3,grok">硬帽后仍放行的模型前缀 <input id="rk-cap-allow" type="text" placeholder="kimi-k3, grok"></label>
+                  <label title="进入压制后至少保持这么久才允许回落. 脚本被限速后分数会掉再冲上来, 不粘滞会来回震荡. 0 = 不粘滞">压制粘滞 秒 <input id="rk-hold" type="number" min="0" step="60"></label>
+                  <label title="申诉批准后, 这段时间内该卡评分不生效 (仍记录信号)">申诉信任期 小时 <input id="rk-trust" type="number" min="1" max="720" step="1"></label>
                   <label title="官方输出价 $/M 低于此值的模型自动不限速 (限了省不到钱只伤体验: gemini-flash 3800 tok/s 压到 40 = 1s 变 37s). 参考: gemini 3.75 / grok 6 / kimi-k3 15 / sol 20 / opus 25 / fable 50. 0 = 关">便宜模型自动免限: 输出价 &lt; $/M <input id="rk-cheap" type="number" min="0" step="1"></label>
                 </div>
               </div>
             </div>
             <div class="panel" style="flex:0 0 auto">
-              <div class="ph"><h3>行为评分权重</h3><p>四类信号加分, 满 100. 缺省值用 61k 条真实流量校准: 个人 0–25 分, 脚本 55–85 分</p></div>
+              <div class="ph"><h3>行为评分权重</h3><p>五类信号加分, 满 100. 前四类用 61k 条真实流量校准: 个人 0–25 分, 脚本 55–85 分. 「价值比」= 今日成本¥ ÷ 该卡日均实收¥ (实收 ÷ 套餐天数) — 用掉的钱超过付的钱的 60% / 80% 加分, 不拒绝. 无硬帽.</p></div>
               <div style="padding:10px 12px">
                 <div class="form-grid">
                   <label>活跃格 ≥ <input id="rk-w-slots-hi" type="number" min="0" max="288"> 格 → +<input id="rk-w-slots-hi-pts" type="number" min="0" max="100"> 分</label>
@@ -1059,7 +1060,9 @@
                   <label>跨度 ≥ <input id="rk-w-span-lo" type="number" min="0" max="24" step="0.5"> h → +<input id="rk-w-span-lo-pts" type="number" min="0" max="100"> 分</label>
                   <label title="跨度类信号至少要这么多活跃格才算">跨度类最少活跃格 <input id="rk-w-span-min" type="number" min="0" max="288"></label>
                   <label title="最长空闲小于此秒数 = 无停顿">无停顿阈值 秒 <input id="rk-w-nobreak" type="number" min="60" step="60"></label>
-                  <label>日消耗 ≥ $<input id="rk-w-quota" type="number" min="0" step="10"> → +<input id="rk-w-quota-pts" type="number" min="0" max="100"> 分 (0=关)</label>
+                  <label title="成本 ÷ 日均实收">价值比 ≥ <input id="rk-w-vr-lo" type="number" min="0" step="0.05" style="width:60px"> → +<input id="rk-w-vr-lo-pts" type="number" min="0" max="100"> 分</label>
+                  <label>价值比 ≥ <input id="rk-w-vr-hi" type="number" min="0" step="0.05" style="width:60px"> → +<input id="rk-w-vr-hi-pts" type="number" min="0" max="100"> 分</label>
+                  <label title="绝对值口径, 已被价值比替代; 0 = 关">日消耗 ≥ $<input id="rk-w-quota" type="number" min="0" step="10"> → +<input id="rk-w-quota-pts" type="number" min="0" max="100"> 分 (0=关)</label>
                 </div>
               </div>
             </div>
@@ -1083,8 +1086,20 @@
               <div class="ph"><h3>预演结果</h3><p id="rk-preview-sub">用今日各卡已有的行为信号, 按上面的候选参数重算 → 谁会被压. 保存前先看这里.</p></div>
               <div class="table-scroll">
                 <table class="nowrap">
-                  <thead><tr><th>卡</th><th>套餐</th><th class="num">今日 $</th><th class="num">请求</th><th>现档/分</th><th>预演档/分</th><th class="num">pace</th><th>触发原因</th><th class="num">格/秒接/跨度</th></tr></thead>
+                  <thead><tr><th>卡</th><th>套餐</th><th class="num">今日 $</th><th class="num">请求</th><th>现档/分</th><th>预演档/分</th><th class="num">pace</th><th>触发原因</th><th class="num">格/秒接/跨度/价值比</th></tr></thead>
                   <tbody id="rk-preview-body"><tr><td colspan="9" class="muted">点「预演」</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div id="cd-tab-appeals" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <div class="panel fill">
+              <div class="ph"><h3>申诉</h3><p id="ap-sub">客户用卡 key 调 <span class="mono">POST /v1/appeal {"message"}</span> 提交; 自查 <span class="mono">GET /v1/card/status</span>. 批准 → 信任期内评分不生效 + 清今日行为信号; 拒绝 → 6h 内不能再提. 响应头 <span class="mono">x-card-throttle / x-card-pace-tps</span> 让客户端看到自己的档位.</p>
+                <button type="button" class="ghost" id="ap-reload">刷新</button></div>
+              <div class="table-scroll">
+                <table class="nowrap">
+                  <thead><tr><th>卡</th><th>套餐 / 归属</th><th>状态</th><th>留言</th><th>提交</th><th>现档 / 分</th><th>今日 $ / 价值比</th><th>次数</th><th>信任到</th><th>备注</th><th></th></tr></thead>
+                  <tbody id="ap-body"><tr><td colspan="11" class="muted">加载中</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -1705,7 +1720,7 @@
     }
     // innerHTML 只拼接 esc() 转义后的服务端字段与固定模板, 数值直接 Number() 格式化
     // ---------- 套餐卡 ----------
-    const CD_TABS = ['plans', 'cards', 'profit', 'cost', 'risk'];
+    const CD_TABS = ['plans', 'cards', 'profit', 'cost', 'risk', 'appeals'];
     let cdTab = 'plans';
     let cdPlans = [];
     const cdMsg = (m, err) => toast('cd-msg', m, err);
@@ -1737,12 +1752,13 @@
       else if (cdTab === 'cards') await loadCards();
       else if (cdTab === 'profit') await loadProfit();
       else if (cdTab === 'risk') await loadRisk();
+      else if (cdTab === 'appeals') await loadAppeals();
       else await loadCostModel();
     }
 
     // ==== 风控 ====
     let rkRules = [];
-    const RK_W = [['slots_hi','rk-w-slots-hi'],['slots_hi_pts','rk-w-slots-hi-pts'],['slots_lo','rk-w-slots-lo'],['slots_lo_pts','rk-w-slots-lo-pts'],['fast_hi','rk-w-fast-hi'],['fast_hi_pts','rk-w-fast-hi-pts'],['fast_lo','rk-w-fast-lo'],['fast_lo_pts','rk-w-fast-lo-pts'],['span_hi_hours','rk-w-span-hi'],['span_hi_pts','rk-w-span-hi-pts'],['span_lo_hours','rk-w-span-lo'],['span_lo_pts','rk-w-span-lo-pts'],['span_min_slots','rk-w-span-min'],['no_break_secs','rk-w-nobreak'],['quota_usd','rk-w-quota'],['quota_pts','rk-w-quota-pts']];
+    const RK_W = [['slots_hi','rk-w-slots-hi'],['slots_hi_pts','rk-w-slots-hi-pts'],['slots_lo','rk-w-slots-lo'],['slots_lo_pts','rk-w-slots-lo-pts'],['fast_hi','rk-w-fast-hi'],['fast_hi_pts','rk-w-fast-hi-pts'],['fast_lo','rk-w-fast-lo'],['fast_lo_pts','rk-w-fast-lo-pts'],['span_hi_hours','rk-w-span-hi'],['span_hi_pts','rk-w-span-hi-pts'],['span_lo_hours','rk-w-span-lo'],['span_lo_pts','rk-w-span-lo-pts'],['span_min_slots','rk-w-span-min'],['no_break_secs','rk-w-nobreak'],['quota_usd','rk-w-quota'],['quota_pts','rk-w-quota-pts'],['value_ratio_lo','rk-w-vr-lo'],['value_ratio_lo_pts','rk-w-vr-lo-pts'],['value_ratio_hi','rk-w-vr-hi'],['value_ratio_hi_pts','rk-w-vr-hi-pts']];
     function rkMsg(m, err) { const e = document.getElementById('rk-msg'); e.textContent = m || ''; e.className = err ? 'bad' : 'muted'; }
     function rkFill(p) {
       document.getElementById('rk-enabled').value = String(!!p.enabled);
@@ -1753,8 +1769,8 @@
       document.getElementById('rk-pd').value = p.pace_degraded_tps == null ? '' : p.pace_degraded_tps;
       document.getElementById('rk-ra').value = p.relief_after_tokens ?? 0;
       document.getElementById('rk-rt').value = p.relief_tps ?? 0;
-      document.getElementById('rk-cap').value = p.hard_cap_usd ?? 0;
-      document.getElementById('rk-cap-allow').value = (p.hard_cap_allow_prefixes || []).join(', ');
+      document.getElementById('rk-hold').value = p.degraded_hold_secs ?? 1800;
+      document.getElementById('rk-trust').value = p.appeal_trust_hours ?? 24;
       document.getElementById('rk-cheap').value = p.pace_min_output_price_per_m ?? 0;
       RK_W.forEach(([k, id]) => { document.getElementById(id).value = (p.weights || {})[k] ?? ''; });
       rkRules = (p.model_rules || []).map((r) => Object.assign({}, r));
@@ -1789,8 +1805,10 @@
         model_rules: rkRules.filter((r) => (r.prefix || '').trim()).map((r) => ({ prefix: r.prefix.trim(), exempt: !!r.exempt, pace_normal_tps: r.pace_normal_tps ?? null, pace_soften_tps: r.pace_soften_tps ?? null, pace_degraded_tps: r.pace_degraded_tps ?? null, note: r.note || '' })),
         relief_after_tokens: Number(v('rk-ra')) || 0,
         relief_tps: Number(v('rk-rt')) || 0,
-        hard_cap_usd: Number(v('rk-cap')) || 0,
-        hard_cap_allow_prefixes: v('rk-cap-allow').split(',').map((x) => x.trim()).filter(Boolean),
+        hard_cap_usd: 0,
+        hard_cap_allow_prefixes: [],
+        degraded_hold_secs: Number(v('rk-hold')) || 0,
+        appeal_trust_hours: Number(v('rk-trust')) || 24,
         pace_min_output_price_per_m: Number(v('rk-cheap')) || 0,
       };
     }
@@ -1809,7 +1827,7 @@
       try {
         const d = await api('/admin/api/cards/risk-policy/preview', { method: 'POST', body: JSON.stringify(rkCollect()) });
         const s = d.summary || {};
-        document.getElementById('rk-preview-sub').textContent = '今日有活动 ' + s.cards + ' 张卡 → 正常 ' + s.normal + ' / 软化 ' + s.soften + ' / 压制 ' + s.degraded + (s.hard_cap ? ' / 触硬帽 ' + s.hard_cap : '');
+        document.getElementById('rk-preview-sub').textContent = '今日有活动 ' + s.cards + ' 张卡 → 正常 ' + s.normal + ' / 软化 ' + s.soften + ' / 压制 ' + s.degraded;
         const tb = document.getElementById('rk-preview-body'); tb.innerHTML = '';
         if (!(d.rows || []).length) tb.innerHTML = '<tr><td colspan="9" class="muted">今日无活动卡</td></tr>';
         (d.rows || []).forEach((r) => {
@@ -1817,14 +1835,51 @@
           const pill = (t) => '<span class="pill ' + (t === 'degraded' ? 'bad' : t === 'soften' ? 'warn' : 'ok') + '">' + t + '</span>';
           const chg = r.preview.throttle !== r.current.throttle;
           tr.innerHTML = '<td class="mono" title="' + esc(r.card_key) + '">' + esc(r.card_key.slice(5, 13)) + ' <span class="muted">' + esc(r.owner || '') + '</span></td><td>' + esc(r.plan_id) + '</td><td class="mono">' + fUsd(r.day_quota_usd) + '</td><td class="mono">' + fmtN(r.day_used) + '</td>' +
-            '<td>' + pill(r.current.throttle) + ' <span class="mono">' + r.current.score + '</span></td><td' + (chg ? ' style="font-weight:600"' : '') + '>' + pill(r.preview.throttle) + ' <span class="mono">' + r.preview.score + '</span>/' + r.preview.threshold + (r.preview.hard_cap_hit ? ' <span class="pill bad">硬帽</span>' : '') + '</td>' +
+            '<td>' + pill(r.current.throttle) + ' <span class="mono">' + r.current.score + '</span></td><td' + (chg ? ' style="font-weight:600"' : '') + '>' + pill(r.preview.throttle) + ' <span class="mono">' + r.preview.score + '</span>/' + r.preview.threshold + (r.trusted ? ' <span class="pill ok">信任</span>' : '') + '</td>' +
             '<td class="mono">' + (r.preview.pace_tps || '不限') + '</td><td style="font-size:11px">' + esc((r.preview.reasons || []).join(' · ')) + '</td>' +
-            '<td class="mono muted" style="font-size:11px">' + r.signals.active_slots + ' / ' + Math.round(r.signals.fast_follow_ratio * 100) + '% / ' + Number(r.signals.span_hours).toFixed(1) + 'h</td>';
+            '<td class="mono muted" style="font-size:11px">' + r.signals.active_slots + ' / ' + Math.round(r.signals.fast_follow_ratio * 100) + '% / ' + Number(r.signals.span_hours).toFixed(1) + 'h / ' + (r.signals.value_ratio ? Math.round(r.signals.value_ratio * 100) + '%' : '–') + '</td>';
           tb.appendChild(tr);
         });
         rkMsg('预演完成 (未保存)');
       } catch (e) { rkMsg(e.message, true); }
     });
+    // ==== 申诉 ====
+    async function loadAppeals() {
+      const d = await api('/admin/api/cards/appeals');
+      const badge = document.getElementById('cd-appeal-badge');
+      badge.textContent = d.pending || ''; badge.style.display = d.pending ? '' : 'none';
+      const tb = document.getElementById('ap-body'); tb.innerHTML = '';
+      if (!(d.rows || []).length) { tb.innerHTML = '<tr><td colspan="11" class="muted">无申诉记录</td></tr>'; return; }
+      d.rows.forEach((c) => {
+        const a = c.appeal || {};
+        const tr = document.createElement('tr');
+        const stPill = a.status === 'pending' ? '<span class="pill warn">待审</span>' : a.status === 'approved' ? '<span class="pill ok">已批准</span>' : a.status === 'rejected' ? '<span class="pill bad">已拒绝</span>' : '<span class="pill">–</span>';
+        const thr = c.throttle === 'normal' ? '<span class="pill ok">normal</span>' : c.throttle === 'soften' ? '<span class="pill warn">soften</span>' : '<span class="pill bad">degraded</span>';
+        tr.innerHTML = '<td class="mono" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(5, 13)) + '</td><td>' + esc(c.plan_name || c.plan_id) + ' <span class="muted">' + esc(c.owner || '') + '</span></td><td>' + stPill + (c.trusted ? ' <span class="pill ok">信任中</span>' : '') + '</td>' +
+          '<td style="max-width:320px;white-space:normal;font-size:12px">' + esc(a.message || '') + '</td><td class="mono" style="font-size:11px">' + tsDate(a.requested_at) + '</td>' +
+          '<td>' + thr + ' <span class="mono">' + (c.abuse ? c.abuse.score : 0) + '</span><div class="muted" style="font-size:11px">' + esc(((c.abuse && c.abuse.reasons) || []).join(' · ')) + '</div></td>' +
+          '<td class="mono">' + usd(c.day_quota_usd, 2) + (c.abuse && c.abuse.value_ratio ? ' <span class="muted">' + Math.round(c.abuse.value_ratio * 100) + '%</span>' : '') + '</td><td class="mono">' + (a.count || 0) + '</td>' +
+          '<td class="mono" style="font-size:11px">' + (a.trust_until ? tsDate(a.trust_until) : '–') + '</td><td style="font-size:12px">' + esc(a.note || '') + '</td><td></td>';
+        const act = tr.lastElementChild;
+        if (a.status === 'pending') {
+          act.appendChild(el('button', { type: 'button' }, '批准')).addEventListener('click', async () => {
+            const note = prompt('备注 (客户可见, 可空):', '核实为正常使用') ; if (note === null) return;
+            const h = prompt('信任期小时 (空 = 策略缺省):', ''); if (h === null) return;
+            await api('/admin/api/cards/' + c.card_key + '/appeal', { method: 'POST', body: JSON.stringify({ approve: true, note: note, trust_hours: h ? Number(h) : null }) }); await loadAppeals();
+          });
+          act.appendChild(el('button', { class: 'danger', type: 'button' }, '拒绝')).addEventListener('click', async () => {
+            const note = prompt('拒绝原因 (客户可见):', '行为特征与脚本一致'); if (note === null) return;
+            await api('/admin/api/cards/' + c.card_key + '/appeal', { method: 'POST', body: JSON.stringify({ approve: false, note: note }) }); await loadAppeals();
+          });
+        } else if (c.trusted) {
+          act.appendChild(el('button', { class: 'ghost', type: 'button' }, '撤信任')).addEventListener('click', async () => {
+            await api('/admin/api/cards/' + c.card_key + '/trust', { method: 'POST', body: JSON.stringify({ hours: 0 }) }); await loadAppeals();
+          });
+        }
+        tb.appendChild(tr);
+      });
+    }
+    document.getElementById('ap-reload').addEventListener('click', () => loadAppeals().catch((e) => cdMsg(e.message, true)));
     // 套餐
     async function loadPlans() {
       const d = await api('/admin/api/cards/plans');
@@ -1950,11 +2005,14 @@
           '<td class="mono">' + c.in_flight + '</td><td class="mono">' + c.day_used + (c.fair_use_rpd ? '/' + c.fair_use_rpd : '') + '</td>' +
           '<td class="mono">' + usd(c.day_quota_usd) + '</td><td class="mono">' + rmb(c.day_cost_rmb) + '</td>' +
           '<td class="mono">' + (c.plan_kind === 'quota' ? usd(c.face_left_usd, 2) + ' / ' + c.face_usd : '–') + '</td>' +
-          '<td class="mono ' + scoreCls + '" title="' + esc(((c.abuse && c.abuse.reasons) || []).join('; ')) + '">' + score + '</td><td>' + st + '</td><td></td>';
+          '<td class="mono ' + scoreCls + '" title="' + esc(((c.abuse && c.abuse.reasons) || []).join('; ')) + '">' + score + (c.abuse && c.abuse.value_ratio ? ' <span class="muted" style="font-size:11px">' + Math.round(c.abuse.value_ratio * 100) + '%</span>' : '') + (c.trusted ? ' <span class="pill ok" title="申诉信任期至 ' + tsDate(c.appeal && c.appeal.trust_until) + '">信任</span>' : '') + (c.appeal && c.appeal.status === 'pending' ? ' <span class="pill warn">申诉中</span>' : '') + '</td><td>' + st + '</td><td></td>';
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '复制')).addEventListener('click', async () => { await copyText(c.card_key); cdMsg('已复制 ' + c.card_key); });
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '+24h')).addEventListener('click', async () => {
           await api('/admin/api/cards/' + c.card_key + '/extend', { method: 'POST', body: JSON.stringify({ hours: 24 }) }); await loadCards();
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button', title: c.trusted ? '撤销信任 (评分重新生效)' : '手动给 24h 信任期 (评分不生效)' }, c.trusted ? '撤信任' : '信任24h')).addEventListener('click', async () => {
+          await api('/admin/api/cards/' + c.card_key + '/trust', { method: 'POST', body: JSON.stringify({ hours: c.trusted ? 0 : 24 }) }); await loadCards();
         });
         if (c.enabled) act.appendChild(el('button', { class: 'danger', type: 'button' }, '吊销')).addEventListener('click', async () => {
           if (!confirm('吊销该卡？')) return;
