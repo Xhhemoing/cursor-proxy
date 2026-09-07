@@ -328,12 +328,22 @@ impl AccountPool {
         &self,
         session_id: Option<&str>,
     ) -> Result<(Account, tokio::sync::OwnedSemaphorePermit), AcquireError> {
+        self.acquire_by_session_ex(session_id, false).await
+    }
+
+    /// 带避让标记的会话获取: avoid_sticky=true 时跳过粘性查找与绑定,
+    /// 用于「同号过载后让后续请求换号」的场景 (如 Claude Code 子代理打满主会话粘滞号).
+    pub async fn acquire_by_session_ex(
+        &self,
+        session_id: Option<&str>,
+        avoid_sticky: bool,
+    ) -> Result<(Account, tokio::sync::OwnedSemaphorePermit), AcquireError> {
         // 全部繁忙时在 acquire_wait 内指数退避排队, 而不是立刻 503;
         // 非流式请求持有槽位时间长, 没有排队会在到达并发上限时成功率断崖
         let deadline = Instant::now() + self.acquire_wait;
         let mut backoff = Duration::from_millis(10);
         loop {
-            match self.try_acquire_by_session(session_id) {
+            match self.try_acquire_by_session(session_id, avoid_sticky) {
                 AcquireTry::Got(pair) => return Ok(pair),
                 AcquireTry::Empty => return Err(AcquireError::Empty),
                 AcquireTry::Busy => {
@@ -355,17 +365,19 @@ impl AccountPool {
         self.acquire_by_session(None).await
     }
 
-    fn try_acquire_by_session(&self, session_id: Option<&str>) -> AcquireTry {
-        // 1. 会话粘性: O(1) 查找已绑定账号
-        if let Some(sid) = session_id {
-            if let Some(slot) = self.find_sticky_slot(sid) {
-                if self.is_slot_available_fast(&slot) {
-                    if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                        self.stats
-                            .entry(slot.account.id.clone())
-                            .or_default()
-                            .record_request();
-                        return AcquireTry::Got((slot.account.clone(), permit));
+    fn try_acquire_by_session(&self, session_id: Option<&str>, avoid_sticky: bool) -> AcquireTry {
+        // 1. 会话粘性: O(1) 查找已绑定账号 (avoid_sticky 时跳过 — 同号过载避让)
+        if !avoid_sticky {
+            if let Some(sid) = session_id {
+                if let Some(slot) = self.find_sticky_slot(sid) {
+                    if self.is_slot_available_fast(&slot) {
+                        if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
+                            self.stats
+                                .entry(slot.account.id.clone())
+                                .or_default()
+                                .record_request();
+                            return AcquireTry::Got((slot.account.clone(), permit));
+                        }
                     }
                 }
             }
@@ -425,8 +437,10 @@ impl AccountPool {
 
             // 普通轮询
             if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                if let Some(sid) = session_id {
-                    self.bind_session(sid, &slot.account.id);
+                if !avoid_sticky {
+                    if let Some(sid) = session_id {
+                        self.bind_session(sid, &slot.account.id);
+                    }
                 }
                 self.stats
                     .entry(slot.account.id.clone())
@@ -457,6 +471,11 @@ impl AccountPool {
                 None
             }
         }
+    }
+
+    /// 解除会话粘性绑定 (同号过载避让: 解绑后后续请求走轮询换号)
+    pub fn unbind_session(&self, session_id: &str) {
+        self.sessions.remove(session_id);
     }
 
     fn is_slot_available(&self, slot: &Arc<Slot>) -> bool {
@@ -1541,7 +1560,7 @@ mod tests {
     fn empty_pool_is_empty() {
         let pool = AccountPool::new(vec![], 1);
         assert!(matches!(
-            pool.try_acquire_by_session(None),
+            pool.try_acquire_by_session(None, false),
             AcquireTry::Empty
         ));
     }

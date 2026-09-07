@@ -2751,6 +2751,7 @@ mod tests {
                 cache_read_per_m: 0.3,
                 cache_write_per_m: 0.0,
                 enabled: false,
+                hidden: false,
                 upstream: false,
                 note: String::new(),
             })
@@ -2872,6 +2873,7 @@ mod tests {
             cache_read_per_m: i / 10.0,
             cache_write_per_m: 0.0,
             enabled: true,
+            hidden: false,
             upstream: false,
             note: String::new(),
         };

@@ -76,6 +76,7 @@ fn row(model: &str, source: &str, seen: u64) -> Value {
         "cache_read_per_m": c,
         "cache_write_per_m": w,
         "enabled": manual.as_ref().map(|e| e.enabled).unwrap_or(true),
+        "hidden": manual.as_ref().map(|e| e.hidden).unwrap_or(false),
         "upstream": manual.as_ref().map(|e| e.upstream).unwrap_or(false),
         "note": manual.as_ref().map(|e| e.note.clone()).unwrap_or_default(),
         "groups": reg.groups_of(model),
@@ -148,6 +149,7 @@ pub async fn api_models_upsert(
         cache_read_per_m: c,
         cache_write_per_m: w,
         enabled: true,
+        hidden: false,
         upstream: false,
         note: String::new(),
     });
@@ -158,6 +160,7 @@ pub async fn api_models_upsert(
         cache_read_per_m: b.cache_read_per_m.unwrap_or(cur.cache_read_per_m),
         cache_write_per_m: b.cache_write_per_m.unwrap_or(cur.cache_write_per_m),
         enabled: b.enabled.unwrap_or(cur.enabled),
+        hidden: cur.hidden,
         upstream: cur.upstream,
         note: b.note.unwrap_or(cur.note),
     };
@@ -238,6 +241,7 @@ pub async fn api_models_import_builtin(
             cache_read_per_m: c,
             cache_write_per_m: w,
             enabled: true,
+            hidden: false,
             upstream: false,
             note: "builtin".into(),
         };
@@ -255,14 +259,54 @@ pub async fn api_models_delete(
     State(state): State<Arc<AppState>>,
     Path(model): Path<String>,
 ) -> Response {
-    match registry().delete_model(&model) {
+    let reg = registry();
+    if reg.get_exact(&model).is_some() {
+        // 手动条目: 真删除, 回落内置价格
+        match reg.delete_model(&model) {
+            Ok(true) => {
+                state.audit.key_op("model_delete", &model, json!({}));
+                return Json(json!({"ok": true, "action": "deleted"})).into_response();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+        // 手动条目删除后, 同名内置/seen 行可能仍在 —— 继续走隐藏, 让列表真正消失
+    }
+    // 内置/seen 行: 软删除 (hidden), 从列表消失但计价/路由不变
+    match reg.hide_model(&model) {
+        Ok(()) => {
+            state
+                .audit
+                .key_op("model_hide", &model, json!({"source": "builtin_or_seen"}));
+            Json(json!({"ok": true, "action": "hidden"})).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// 取消隐藏 (面板「恢复」已隐藏的内置/seen 行)
+pub async fn api_models_unhide(
+    State(state): State<Arc<AppState>>,
+    Path(model): Path<String>,
+) -> Response {
+    match registry().unhide_model(&model) {
         Ok(true) => {
-            state.audit.key_op("model_delete", &model, json!({}));
+            state.audit.key_op("model_unhide", &model, json!({}));
             Json(json!({"ok": true})).into_response()
         }
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": "no manual entry"})),
+            Json(json!({"error": "not hidden"})),
         )
             .into_response(),
         Err(e) => (
@@ -647,6 +691,7 @@ pub async fn api_models_sync_litellm(
                     cache_read_per_m: (c * 100.0).round() / 100.0,
                     cache_write_per_m: (w * 100.0).round() / 100.0,
                     enabled: cur.as_ref().map(|x| x.enabled).unwrap_or(true),
+                    hidden: cur.as_ref().map(|x| x.hidden).unwrap_or(false),
                     upstream: cur.as_ref().map(|x| x.upstream).unwrap_or(false),
                     note: format!("litellm:{src}"),
                 };

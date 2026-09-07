@@ -643,6 +643,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::delete(admin::api_models_delete),
         )
         .route(
+            "/admin/api/models/:model/unhide",
+            post(admin::api_models_unhide),
+        )
+        .route(
             "/admin/api/cards/cost-model",
             get(admin::api_cost_model_get).post(admin::api_cost_model_set),
         )
@@ -1779,6 +1783,17 @@ async fn inference_handler_inner(
                         "upstream capacity/high-load; backing off without penalizing account"
                     );
                     state.metrics.observe_err();
+                    // 同号过载避让: 解绑会话粘性, 让该会话后续请求轮询换号,
+                    // 避免 Claude Code 子代理打满粘滞号后主会话一直撞同一号 (2026-09-07 实测 71 次 200→503).
+                    if let Some(sid) = session_id {
+                        state.pool.unbind_session(sid);
+                        info!(
+                            event = "sticky_unbound",
+                            req_id = %request_id,
+                            account = %account_id,
+                            "session unbound after capacity error; next request will round-robin"
+                        );
+                    }
                     if attempt == MAX_RETRIES - 1 {
                         state.ledger.record(billing::BillingRecord::build(
                             &bctx,

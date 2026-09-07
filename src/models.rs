@@ -24,6 +24,10 @@ pub struct ModelEntry {
     /// 是否允许调用 (false = 全局停用, 所有 key/卡都 403)
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 面板「删除」非手动条目时的软删除标记: 从模型列表隐藏 (内置/seen 行).
+    /// 只影响展示, 不影响计价/路由 —— 隐藏后请求该模型仍按内置价计费.
+    #[serde(default)]
+    pub hidden: bool,
     /// 该模型经上游 AvailableModels 确认存在 (面板「获取可用模型」标记).
     /// 仅作展示/提醒, 不参与闸门 —— 上游列表拉不到不代表模型不可用.
     #[serde(default)]
@@ -228,6 +232,54 @@ impl ModelRegistry {
         Ok(removed)
     }
 
+    /// 软删除: 把模型标记为 hidden (面板「删除」内置/seen 行用).
+    /// 没有手动条目时新建一个仅带 hidden 标记的条目, 价格回落内置表.
+    pub fn hide_model(&self, model: &str) -> anyhow::Result<()> {
+        let mut d = (*self.data.load_full()).clone();
+        match d.models.iter_mut().find(|e| e.model == model) {
+            Some(e) => e.hidden = true,
+            None => {
+                let (i, o, c, w) = crate::cards::model_price(model);
+                d.models.push(ModelEntry {
+                    model: model.to_string(),
+                    input_per_m: i,
+                    output_per_m: o,
+                    cache_read_per_m: c,
+                    cache_write_per_m: w,
+                    enabled: true,
+                    hidden: true,
+                    upstream: false,
+                    note: "hidden".into(),
+                });
+                d.models.sort_by(|a, b| a.model.cmp(&b.model));
+            }
+        }
+        self.save(d)
+    }
+
+    /// 取消隐藏 (面板「恢复」)
+    pub fn unhide_model(&self, model: &str) -> anyhow::Result<bool> {
+        let mut d = (*self.data.load_full()).clone();
+        match d.models.iter_mut().find(|e| e.model == model) {
+            Some(e) if e.hidden => {
+                e.hidden = false;
+                self.save(d)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// 模型是否被面板隐藏
+    pub fn is_hidden(&self, model: &str) -> bool {
+        self.data
+            .load()
+            .models
+            .iter()
+            .find(|e| e.model == model)
+            .map_or(false, |e| e.hidden)
+    }
+
     /// 整表替换 (面板「保存全部」)
     pub fn replace_models(&self, models: Vec<ModelEntry>) -> anyhow::Result<()> {
         let mut d = (*self.data.load_full()).clone();
@@ -353,7 +405,8 @@ impl ModelRegistry {
         {
             return None;
         }
-        let level = crate::cursor::auto_detect_thinking_level(body);
+        // 显式档位优先; 未显式指定时有价格数据按「同族 $/lane·h 最低」选, 无价格数据回落启发式
+        let level = crate::cursor::explicit_thinking_level(body);
         let pick = |cands: &[&str]| -> Option<String> {
             cands
                 .iter()
@@ -362,9 +415,26 @@ impl ModelRegistry {
         };
         use crate::cursor::ThinkingLevel::*;
         let resolved = match level {
-            Max => pick(&["max", "xhigh", "extra-high", "high"]),
-            High => pick(&["high", "medium", "low", "xhigh"]),
-            Low => pick(&["low", "minimal", "none", "medium"]),
+            Some(Max) => pick(&["max", "xhigh", "extra-high", "high"]),
+            Some(High) => pick(&["high", "medium", "low", "xhigh"]),
+            Some(Low) => pick(&["low", "minimal", "none", "medium"]),
+            None => {
+                // 未显式指定: 有价格数据选同族 $/lane·h 最低 (≥1h 数据才计入), 否则启发式
+                let cheapest = price_map.and_then(|prices| {
+                    upstream
+                        .iter()
+                        .filter(|u| Self::family_base(u) == base)
+                        .filter_map(|u| prices.get(u).map(|p| (u.clone(), *p)))
+                        .filter(|(_, p)| *p > 0.0)
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(u, _)| u)
+                });
+                cheapest.or_else(|| match crate::cursor::heuristic_thinking_level(body) {
+                    Max => pick(&["max", "xhigh", "extra-high", "high"]),
+                    High => pick(&["high", "medium", "low", "xhigh"]),
+                    Low => pick(&["low", "minimal", "none", "medium"]),
+                })
+            }
         };
         // 家族无任何档位变体 (如 default): 试试基名-fast, 再放弃
         let resolved = resolved.or_else(|| {
@@ -372,29 +442,32 @@ impl ModelRegistry {
             upstream.iter().any(|u| u == &fast).then_some(fast)
         });
         // 如果有价格数据且解析成功, 检查是否有更便宜的同族变体 (数据统计 ≥1h)
-        // 注意: 只在「同档位」内比较价格, 避免把 high 档请求路由到 low 档
-        if let (Some(resolved_model), Some(prices)) = (&resolved, price_map) {
-            let mut best = resolved_model.clone();
-            let mut best_price = prices.get(resolved_model).copied().unwrap_or(f64::MAX);
-            // 获取当前解析结果的档位后缀, 只在同档位变体中比较
-            let resolved_suffix = resolved_model.strip_prefix(&format!("{base}-"));
-            for u in upstream {
-                if Self::family_base(u) == base && u != resolved_model {
-                    // 只比较同档位变体 (如都是 -high, 或都是 -fast)
-                    let u_suffix = u.strip_prefix(&format!("{base}-"));
-                    if resolved_suffix != u_suffix {
-                        continue;
-                    }
-                    // 同族同档变体, 检查价格是否更低 (且数据量 ≥1h)
-                    if let Some(p) = prices.get(u) {
-                        if *p < best_price && *p > 0.0 {
-                            best = u.clone();
-                            best_price = *p;
+        // 注意: 只在「同档位」内比较价格, 避免把 high 档请求路由到 low 档;
+        // 未显式指定档位 (level=None) 时已在上面按全局最低价选过, 这里不再二次调整.
+        if level.is_some() {
+            if let (Some(resolved_model), Some(prices)) = (&resolved, price_map) {
+                let mut best = resolved_model.clone();
+                let mut best_price = prices.get(resolved_model).copied().unwrap_or(f64::MAX);
+                // 获取当前解析结果的档位后缀, 只在同档位变体中比较
+                let resolved_suffix = resolved_model.strip_prefix(&format!("{base}-"));
+                for u in upstream {
+                    if Self::family_base(u) == base && u != resolved_model {
+                        // 只比较同档位变体 (如都是 -high, 或都是 -fast)
+                        let u_suffix = u.strip_prefix(&format!("{base}-"));
+                        if resolved_suffix != u_suffix {
+                            continue;
+                        }
+                        // 同族同档变体, 检查价格是否更低 (且数据量 ≥1h)
+                        if let Some(p) = prices.get(u) {
+                            if *p < best_price && *p > 0.0 {
+                                best = u.clone();
+                                best_price = *p;
+                            }
                         }
                     }
                 }
+                return Some(best);
             }
-            return Some(best);
         }
         resolved
     }
@@ -459,7 +532,7 @@ impl ModelRegistry {
             }
         };
         for e in &d.models {
-            if e.enabled {
+            if e.enabled && !e.hidden {
                 push(e.model.clone());
             }
         }
@@ -469,10 +542,10 @@ impl ModelRegistry {
             let is_fast_variant = m.ends_with("-fast") && Self::family_base(m) != *m;
             if is_fast_variant {
                 // fast 变体单独列出 (不折叠到基名)
-                if self.is_visible(m, upstream) {
+                if self.is_visible(m, upstream) && !self.is_hidden(m) {
                     push(m.clone());
                 }
-            } else if self.is_visible(base, upstream) {
+            } else if self.is_visible(base, upstream) && !self.is_hidden(base) {
                 push(base.to_string());
             }
         }
@@ -548,6 +621,7 @@ mod tests {
             cache_read_per_m: 0.0,
             cache_write_per_m: 0.0,
             enabled: true,
+            hidden: false,
             upstream: false,
             note: String::new(),
         }
@@ -720,6 +794,7 @@ mod tests {
             cache_read_per_m: 0.0,
             cache_write_per_m: 0.0,
             enabled: true,
+            hidden: false,
             upstream: false,
             note: String::new(),
         })

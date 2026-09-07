@@ -2155,11 +2155,23 @@
           await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: !m.enabled }) });
           await loadModelsPage();
         });
-        if (m.source === 'manual') act.appendChild(el('button', { class: 'danger', type: 'button' }, '删')).addEventListener('click', async () => {
-          if (!confirm('删除手动条目 ' + m.model + '？将回落到内置价格')) return;
-          await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
-          await loadModelsPage();
-        });
+        if (m.hidden) {
+          // 已隐藏的内置/seen 行: 提供恢复
+          act.appendChild(el('button', { class: 'ghost', type: 'button' }, '恢复')).addEventListener('click', async () => {
+            await api('/admin/api/models/' + encodeURIComponent(m.model) + '/unhide', { method: 'POST' });
+            await loadModelsPage();
+          });
+        } else {
+          const delLabel = m.source === 'manual' ? '删' : '隐藏';
+          const delTip = m.source === 'manual'
+            ? ('删除手动条目 ' + m.model + '？将回落到内置价格')
+            : ('隐藏 ' + m.model + '？从列表与 /v1/models 消失，计价不受影响，可恢复');
+          act.appendChild(el('button', { class: 'danger', type: 'button' }, delLabel)).addEventListener('click', async () => {
+            if (!confirm(delTip)) return;
+            await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
+            await loadModelsPage();
+          });
+        }
         tb.appendChild(tr);
       });
     }

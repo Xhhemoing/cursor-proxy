@@ -70,7 +70,7 @@ pub fn model_for_thinking_level(level: ThinkingLevel) -> &'static str {
     }
 }
 
-/// 从请求体自动识别思考程度
+/// 从请求体自动识别思考程度 (启发式, 无价格数据时的兜底)
 /// 规则：
 /// 1. 显式指定 max_mode=true → Max
 /// 2. 显式指定 thinking_level 字段 → 对应档位
@@ -80,26 +80,26 @@ pub fn model_for_thinking_level(level: ThinkingLevel) -> &'static str {
 ///    - 消息数 > 5 或总长度 > 50k 字符 → High
 ///    - 其他 → Low
 pub fn auto_detect_thinking_level(body: &Value) -> ThinkingLevel {
+    explicit_thinking_level(body).unwrap_or_else(|| heuristic_thinking_level(body))
+}
+
+/// 只认客户端显式指定的思考档位; 未指定返回 None (调用方按价格选).
+pub fn explicit_thinking_level(body: &Value) -> Option<ThinkingLevel> {
     // 1. 显式 max_mode
     if let Some(mm) = max_mode_from_request(body) {
         if mm {
-            return ThinkingLevel::Max;
+            return Some(ThinkingLevel::Max);
         }
     }
     // 2. 显式 thinking_level 字段
     if let Some(tl) = body.get("thinking_level").and_then(|v| v.as_str()) {
         match tl.to_ascii_lowercase().as_str() {
-            "max" => return ThinkingLevel::Max,
-            "high" => return ThinkingLevel::High,
-            "low" => return ThinkingLevel::Low,
+            "max" => return Some(ThinkingLevel::Max),
+            "high" => return Some(ThinkingLevel::High),
+            "low" => return Some(ThinkingLevel::Low),
             _ => {}
         }
     }
-    // 3. 根据 messages 复杂度推断
-    let messages = body.get("messages").and_then(|v| v.as_array());
-    let tools = body.get("tools");
-    let tool_choice = body.get("tool_choice");
-
     // 2b. OpenAI 习惯: reasoning_effort / reasoning.effort
     if let Some(eff) = body
         .get("reasoning_effort")
@@ -111,13 +111,20 @@ pub fn auto_detect_thinking_level(body: &Value) -> ThinkingLevel {
         })
     {
         match eff.to_ascii_lowercase().as_str() {
-            "max" | "xhigh" | "extra-high" | "extra_high" => return ThinkingLevel::Max,
-            "high" | "medium" => return ThinkingLevel::High,
-            "low" | "minimal" | "none" => return ThinkingLevel::Low,
+            "max" | "xhigh" | "extra-high" | "extra_high" => return Some(ThinkingLevel::Max),
+            "high" | "medium" => return Some(ThinkingLevel::High),
+            "low" | "minimal" | "none" => return Some(ThinkingLevel::Low),
             _ => {}
         }
     }
+    None
+}
 
+/// 按 messages 复杂度推断 (原 auto_detect 的第 3 步, 无价格数据时的兜底)
+pub fn heuristic_thinking_level(body: &Value) -> ThinkingLevel {
+    let messages = body.get("messages").and_then(|v| v.as_array());
+    let tools = body.get("tools");
+    let tool_choice = body.get("tool_choice");
     if let Some(msgs) = messages {
         let msg_count = msgs.len();
         let total_len: usize = msgs
@@ -125,16 +132,12 @@ pub fn auto_detect_thinking_level(body: &Value) -> ThinkingLevel {
             .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
             .map(|s| s.len())
             .sum();
-
-        // 有工具调用 → Max
         if tools.is_some() || tool_choice.is_some() {
             return ThinkingLevel::Max;
         }
-        // 长上下文 → Max
         if msg_count > 10 || total_len > 100_000 {
             return ThinkingLevel::Max;
         }
-        // 中等上下文 → High
         if msg_count > 5 || total_len > 50_000 {
             return ThinkingLevel::High;
         }
