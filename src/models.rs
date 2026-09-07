@@ -621,6 +621,19 @@ pub fn console_key(model: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// console_key 折叠出的 fast 行 (如 gpt-5.4-fast) 是否对应一条可直接 upsert 的合法定价键.
+/// 注册表最长前缀匹配要求: 要么有 fast 专属条目, 要么基名条目本身以 -fast 结尾
+/// (否则录 gpt-5.4-fast 会被 gpt-5.4 前缀吃掉 → 请求侧再 ×2 = 收 4×, 比幽灵更贵).
+/// 总控页用它决定「直接编辑」还是「提示先录 fast 专属条目」.
+pub fn console_key_priceable(key: &str) -> bool {
+    if !key.ends_with("-fast") {
+        return true;
+    }
+    crate::models::registry()
+        .get_exact(key)
+        .map_or(false, |e| e.model.ends_with("-fast"))
+}
+
 /// 拒绝原因 (供 main.rs 组装 403 文案)
 pub fn deny_reason(allowed_groups: &[String], model: &str) -> String {
     format!(
@@ -1007,5 +1020,8 @@ mod tests {
         assert_eq!(console_key("gemini-3-flash").as_ref(), "gemini-3-flash"); // -flash 非变体
         assert_eq!(console_key("gpt-5.4-mini-high").as_ref(), "gpt-5.4-mini"); // mini 独立族
         assert_eq!(console_key("kimi-k3").as_ref(), "kimi-k3");
+        // 折叠键注册门: 基名行可录, 无 fast 专属条目的 gpt-5.4-fast 不可直接录 (防 ×4)
+        assert!(crate::models::console_key_priceable("gpt-5.4"));
+        assert!(!crate::models::console_key_priceable("gpt-5.4-fast"));
     }
 }
