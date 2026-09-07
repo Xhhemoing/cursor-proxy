@@ -49,6 +49,10 @@ impl AvailableSlot {
     const QUOTA_OK: u8 = 0b100;
     const ALL_OK: u8 = 0b111;
 
+    /// 重建时刻的快照判定. **仅供诊断/测试**; 选号热路径必须走 `AccountPool::slot_live_available`,
+    /// 否则 release(failed) 设的冷却 / auto_disable / quota 变化在下一次 rebuild 前全部对路由不可见
+    /// (2026-09-07 实测: acc-6/acc-8 被 auto_disable 后仍各收到 19/7 次请求全 502; 失败账号 30s 冷却期内
+    /// 仍收到 2357 次新请求 — 因为 rebuild 只在增删号/admin 开关时发生).
     #[inline]
     pub fn is_available(&self) -> bool {
         self.mask == Self::ALL_OK
@@ -111,6 +115,10 @@ pub struct AccountPool {
     query_cache: Arc<parking_lot::RwLock<Option<(u64, u64, serde_json::Value)>>>,
     /// 运行时状态落盘路径 (冷却/错误计数). None = 不持久化
     state_path: Arc<parking_lot::RwLock<Option<PathBuf>>>,
+    /// auto_disable 的隔离到期时间: id -> Instant. 到期后 `reap_auto_disabled` 自动恢复.
+    /// 之前 auto_disable 是永久的 (只有人工 toggle 能救), 一次上游模型级故障 (grok-4.6 09-07 05:30–07:00
+    /// 全池 502) 会把整个池逐个禁光, 故障恢复后仍无人可用. 隔离期随 auto_disabled_count 指数增长, 上限 30 分.
+    auto_disabled_until: Arc<DashMap<String, Instant>>,
 }
 
 #[derive(Debug, Default)]
@@ -198,6 +206,7 @@ impl AccountPool {
             version: Arc::new(AtomicU64::new(0)),
             query_cache: Arc::new(parking_lot::RwLock::new(None)),
             state_path: Arc::new(parking_lot::RwLock::new(None)),
+            auto_disabled_until: Arc::new(DashMap::new()),
         }
     }
 
@@ -411,8 +420,8 @@ impl AccountPool {
 
         // P4: 环形迭代消除取模
         for (i, avail) in available.iter().cycle().skip(start).take(len).enumerate() {
-            // P2: 位掩码检查（一次比较替代 3 次 DashMap 查找）
-            if !avail.is_available() {
+            // 实时可用性 (非重建时刻的 mask 快照): 冷却/auto_disable/quota 变化立即生效
+            if !self.slot_live_available(avail) {
                 continue;
             }
 
@@ -486,11 +495,20 @@ impl AccountPool {
         enabled && !cooling && quota_ok
     }
 
-    /// P2: 快速可用性检查 — 仅检查冷却（用于粘性会话路径）
-    /// 粘性路径的 disabled/quota 状态在 rebuild 时已验证，此处只需检查冷却
+    /// 选号热路径的**实时**可用性: enabled(DashMap 读) + 未冷却(Mutex 读) + 额度 OK(DashMap 读).
+    /// 三次 O(1) 查找换来 release(failed) 冷却 / auto_disable / set_quota 立即生效, 不再依赖 rebuild.
+    /// 之前的 mask 快照路径让「失败即冷却 30s」形同虚设: 冷却中的号照样被轮询选中, 一次上游故障
+    /// 会连续打同一个坏号直到 auto_disable, 而 auto_disable 之后照样继续被选.
+    #[inline]
+    fn slot_live_available(&self, avail: &AvailableSlot) -> bool {
+        self.is_slot_available(&avail.slot)
+    }
+
+    /// 粘性会话路径: 之前只查冷却, 注释声称 "disabled/quota 在 rebuild 时已验证" — 但 sessions 表
+    /// 与 available_slots 无关, 被 auto_disable / quota_blocked 的号仍会被粘性会话命中. 改为全量实时判定.
     #[inline]
     fn is_slot_available_fast(&self, slot: &Arc<Slot>) -> bool {
-        !slot.is_cooling_down()
+        self.is_slot_available(slot)
     }
 
     fn quota_blocks(&self, account_id: &str) -> bool {
@@ -549,27 +567,44 @@ impl AccountPool {
             .unwrap_or(false)
     }
 
-    /// 自动禁用账号
+    /// auto_disable 隔离时长: 第 n 次 = 60s × 2^(n-1), 上限 30 分钟.
+    /// 第一次 1 分 (上游抖动), 反复出问题的号越关越久, 但永远会回来再试 — 是否真坏由后续请求判定.
+    pub fn auto_disable_quarantine(times: u64) -> Duration {
+        let n = times.max(1).min(6); // 60,120,240,480,960,1920 → cap 1800
+        Duration::from_secs((60u64 << (n - 1)).min(1800))
+    }
+
+    /// 自动禁用账号 (带隔离期, 到期由 reap_auto_disabled 自动恢复)
     pub fn auto_disable(&self, account_id: &str) -> bool {
         if let Some(mut disabled) = self.disabled.get_mut(account_id) {
             *disabled = true;
+            let mut times = 1;
             if let Some(stats) = self.stats.get(account_id) {
-                stats.auto_disabled_count.fetch_add(1, Ordering::Relaxed);
+                times = stats.auto_disabled_count.fetch_add(1, Ordering::Relaxed) + 1;
                 stats.consecutive_errors.store(0, Ordering::Relaxed);
             }
+            self.auto_disabled_until.insert(
+                account_id.to_string(),
+                Instant::now() + Self::auto_disable_quarantine(times),
+            );
+            // 解绑所有粘在该号上的会话: 否则粘性路径会在 TTL 内持续命中一个已禁用的号
+            self.sessions
+                .retain(|_, (aid, _)| aid.as_str() != account_id);
             self.bump_version();
+            self.rebuild_available_slots();
             true
         } else {
             false
         }
     }
 
-    /// 手动启用/禁用
+    /// 手动启用/禁用 (人工操作优先: 清掉自动隔离记录, reaper 不再碰这个号)
     pub fn set_enabled(&self, account_id: &str, enabled: bool) -> Option<bool> {
         self.disabled.get_mut(account_id).map(|mut v| {
             let old = *v;
             *v = !enabled;
             drop(v);
+            self.auto_disabled_until.remove(account_id);
             self.bump_version();
             old
         })
@@ -580,8 +615,45 @@ impl AccountPool {
             *v = !*v;
             let new = !*v;
             drop(v);
+            self.auto_disabled_until.remove(account_id);
             self.bump_version();
             new
+        })
+    }
+
+    /// 后台定时: 隔离到期的 auto_disable 账号重新启用. 返回恢复的 id 列表.
+    /// 恢复 = 只放回轮询, 不清错误统计; 若上游仍坏, 5 次连续错误后会以更长隔离期再次关掉.
+    pub fn reap_auto_disabled(&self) -> Vec<String> {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .auto_disabled_until
+            .iter()
+            .filter(|e| *e.value() <= now)
+            .map(|e| e.key().clone())
+            .collect();
+        let mut restored = Vec::new();
+        for id in due {
+            self.auto_disabled_until.remove(&id);
+            if let Some(mut d) = self.disabled.get_mut(&id) {
+                if *d {
+                    *d = false;
+                    restored.push(id.clone());
+                }
+            }
+        }
+        if !restored.is_empty() {
+            self.bump_version();
+            self.rebuild_available_slots();
+        }
+        restored
+    }
+
+    /// 某号剩余自动隔离秒数 (admin 展示用); None = 非自动隔离
+    pub fn auto_disabled_remaining_secs(&self, account_id: &str) -> Option<u64> {
+        self.auto_disabled_until.get(account_id).map(|u| {
+            u.checked_duration_since(Instant::now())
+                .unwrap_or_default()
+                .as_secs()
         })
     }
 
@@ -1466,6 +1538,71 @@ mod tests {
         assert!(pool.acquire().await.is_err());
     }
 
+    /// 回归 (2026-09-07 生产实测): 池已「热」(available_slots 已重建) 之后, release(failed) 设的冷却
+    /// 对轮询选号不可见 — mask 是重建时刻的快照, 冷却中的号照样被选中, 一次上游故障连打同一坏号.
+    /// 账本证据: 失败后 30s 冷却期内该号仍收到 2357 次新请求.
+    #[tokio::test]
+    async fn cooldown_after_warm_pool_is_respected_by_round_robin() {
+        let pool = AccountPool::new(vec![acc("a", true), acc("b", true)], 8);
+        // 预热: 第一次 acquire 触发 rebuild, 之后不再重建
+        let (_first, p0) = pool.acquire().await.unwrap();
+        drop(p0);
+        pool.release("a", true, 30);
+        for _ in 0..20 {
+            let (got, _p) = pool.acquire().await.unwrap();
+            assert_eq!(got.id, "b", "cooling account 'a' must not be routed to");
+        }
+    }
+
+    /// 同上, auto_disable 之后 (生产实测 acc-6/acc-8 被 auto_disable 后仍各收 19/7 次请求全 502).
+    /// 且粘性会话必须被解绑: 否则 sticky 路径继续命中已禁用号.
+    #[tokio::test]
+    async fn auto_disable_after_warm_pool_is_respected_including_sticky() {
+        let pool = AccountPool::new(vec![acc("a", true), acc("b", true)], 8);
+        // 让 session s1 粘到 a: 反复取直到粘住 a (两号轮询, 最多几次)
+        let mut bound_a = false;
+        for _ in 0..10 {
+            let (got, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
+            if got.id == "a" {
+                bound_a = true;
+                break;
+            }
+            pool.unbind_session("s1");
+        }
+        assert!(bound_a, "test setup: could not bind s1 to a");
+        assert!(pool.auto_disable("a"));
+        for _ in 0..20 {
+            let (got, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
+            assert_eq!(
+                got.id, "b",
+                "disabled 'a' must not be routed to (sticky or rr)"
+            );
+        }
+        for _ in 0..20 {
+            let (got, _p) = pool.acquire().await.unwrap();
+            assert_eq!(got.id, "b");
+        }
+    }
+
+    /// quota_blocked 也要对已热的池立即生效 (set_quota 只 bump_version 不 rebuild)
+    #[tokio::test]
+    async fn quota_block_after_warm_pool_is_respected() {
+        let pool = AccountPool::new(vec![acc("a", true), acc("b", true)], 8);
+        let (_first, p0) = pool.acquire().await.unwrap();
+        drop(p0);
+        pool.set_quota(
+            "a",
+            QuotaSnapshot {
+                has_available_usage: Some(false),
+                ..Default::default()
+            },
+        );
+        for _ in 0..20 {
+            let (got, _p) = pool.acquire().await.unwrap();
+            assert_eq!(got.id, "b");
+        }
+    }
+
     #[tokio::test]
     async fn clear_cooldown_unblocks() {
         let pool = AccountPool::new(vec![acc("a", true)], 1);
@@ -1504,6 +1641,51 @@ mod tests {
         let (got, _p) = pool.acquire().await.unwrap();
         assert_eq!(got.id, "a");
         assert_eq!(pool.summary()["quota_blocked"], 0);
+    }
+
+    #[test]
+    fn auto_disable_quarantine_grows_and_caps() {
+        assert_eq!(AccountPool::auto_disable_quarantine(0).as_secs(), 60);
+        assert_eq!(AccountPool::auto_disable_quarantine(1).as_secs(), 60);
+        assert_eq!(AccountPool::auto_disable_quarantine(2).as_secs(), 120);
+        assert_eq!(AccountPool::auto_disable_quarantine(5).as_secs(), 960);
+        assert_eq!(AccountPool::auto_disable_quarantine(6).as_secs(), 1800);
+        assert_eq!(AccountPool::auto_disable_quarantine(40).as_secs(), 1800);
+    }
+
+    /// auto_disable 不再永久: 隔离到期 reap 后重新可选; 人工 set_enabled(false) 不受 reaper 影响.
+    #[tokio::test]
+    async fn auto_disable_recovers_after_quarantine_but_manual_disable_does_not() {
+        let pool = AccountPool::new(vec![acc("a", true), acc("b", true)], 8);
+        assert!(pool.auto_disable("a"));
+        assert!(pool.auto_disabled_remaining_secs("a").is_some());
+        assert!(pool.reap_auto_disabled().is_empty(), "not due yet");
+        // 把到期时间拨到过去
+        pool.auto_disabled_until
+            .insert("a".into(), Instant::now() - Duration::from_secs(1));
+        assert_eq!(pool.reap_auto_disabled(), vec!["a".to_string()]);
+        assert!(pool.auto_disabled_remaining_secs("a").is_none());
+        let mut seen_a = false;
+        for _ in 0..10 {
+            let (got, _p) = pool.acquire().await.unwrap();
+            if got.id == "a" {
+                seen_a = true;
+            }
+        }
+        assert!(seen_a, "recovered account must be routable again");
+        // 人工禁用: 无隔离记录, reaper 不会碰
+        pool.set_enabled("b", false);
+        assert!(pool.reap_auto_disabled().is_empty());
+        for _ in 0..10 {
+            let (got, _p) = pool.acquire().await.unwrap();
+            assert_eq!(got.id, "a");
+        }
+        // 人工启用一个自动隔离中的号: 隔离记录被清, 立即可用
+        assert!(pool.auto_disable("a"));
+        pool.set_enabled("a", true);
+        assert!(pool.auto_disabled_remaining_secs("a").is_none());
+        let (got, _p) = pool.acquire().await.unwrap();
+        assert_eq!(got.id, "a");
     }
 
     #[test]

@@ -402,14 +402,23 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 定时落盘用量 (每 30s)
+    // 定时落盘用量 (每 30s); 顺带恢复隔离到期的 auto_disable 账号
     {
         let usage = state.key_usage.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 tick.tick().await;
                 usage.save_to_disk();
+                let restored = state.pool.reap_auto_disabled();
+                if !restored.is_empty() {
+                    info!(
+                        event = "auto_disable_recover",
+                        accounts = ?restored,
+                        "auto-disabled accounts re-enabled after quarantine"
+                    );
+                }
             }
         });
     }
@@ -2013,7 +2022,9 @@ async fn inference_handler_inner(
                         event = "auto_disable",
                         req_id = %request_id,
                         account = %account_id,
-                        "account auto-disabled after 5 consecutive errors"
+                        quarantine_secs = state.pool.auto_disabled_remaining_secs(&account_id).unwrap_or(0),
+                        error = %last_error,
+                        "account auto-disabled after 5 consecutive errors; will auto-recover after quarantine"
                     );
                 }
 
