@@ -288,13 +288,15 @@
       </div>
       <nav id="nav">
         <a href="#overview" data-page="overview">概览</a>
+        <div class="grp">定价</div>
+        <a href="#models" data-page="models">模型<span class="badge" id="nav-models-badge"></span></a>
+        <a href="#model-console" data-page="model-console">模型总控<span class="badge" id="nav-console-badge"></span></a>
+        <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
+        <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
         <div class="grp">运营</div>
         <a href="#pool" data-page="pool">号池<span class="badge" id="nav-pool-badge"></span></a>
         <a href="#proxies" data-page="proxies">IP 代理池<span class="badge" id="nav-proxy-badge"></span></a>
-        <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
         <a href="#analytics" data-page="analytics">消耗分析<span class="badge" id="nav-analytics-badge"></span></a>
-        <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
-        <a href="#models" data-page="models">模型<span class="badge" id="nav-models-badge"></span></a>
         <div class="grp">观测</div>
         <a href="#health" data-page="health">健康诊断<span class="badge" id="nav-health-badge"></span></a>
         <a href="#logs" data-page="logs">请求日志</a>
@@ -798,6 +800,46 @@
                 </table>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 模型总控 ================= -->
+      <section class="page page-fill" id="page-model-console">
+        <div class="page-head">
+          <div><h2>模型总控</h2><p>定价 · 消耗 · 降速 · 风控规则 一页统览 · 行 = 定价单元 (思考档折叠, fast ×2 独立) · 风控列只读 (整表替换)</p></div>
+          <div class="actions">
+            <span class="seg">
+              <button type="button" data-mc-window="24h" class="active">24h</button>
+              <button type="button" data-mc-window="7d">7d</button>
+              <button type="button" data-mc-window="30d">30d</button>
+            </span>
+            <button type="button" class="ghost" id="mc-refresh">刷新</button>
+          </div>
+        </div>
+        <div class="info" id="mc-msg" style="min-height:18px;margin-bottom:6px"></div>
+        <div class="panel fill">
+          <div class="ph"><h3>定价单元 <span class="muted" id="mc-count"></span></h3>
+            <p id="mc-summary"></p>
+          </div>
+          <div class="table-scroll">
+            <table class="nowrap">
+              <thead><tr>
+                <th title="定价单元: 思考档折叠到家族基名, -fast 价格×2 独立成行">模型</th>
+                <th>上游变体</th>
+                <th>定价 in/out</th>
+                <th>来源</th>
+                <th title="官方成本 / 该模型日均实收">成本占比</th>
+                <th title="车道·小时">lane·h</th>
+                <th title="面值美元">消耗$</th>
+                <th title="1 - 我们的 tps / 上游原生 tps">降速</th>
+                <th title="TTFT 下限 / 速度比例 / 输出上限 / 豁免">风控规则</th>
+                <th>组</th>
+                <th>状态</th>
+                <th></th>
+              </tr></thead>
+              <tbody id="mc-body"><tr><td colspan="12" class="muted">加载中…</td></tr></tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -2167,10 +2209,13 @@
       tb.innerHTML = '';
       if (!rows.length) tb.innerHTML = '<tr><td colspan="11" class="muted">无匹配</td></tr>';
       const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', seen: '<span class="pill warn">未定价</span>' };
-      rows.forEach((m) => {
+      const visible = rows.filter((m) => !m.hidden);
+      const hiddenRows = rows.filter((m) => m.hidden);
+      const renderRow = (m) => {
         const tr = document.createElement('tr');
+        const ghostBadge = m.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游 AvailableModels 无此模型 —— 误录的幽灵条目, 计价仍按影子价兜底">幽灵·上游不存在</span>' : '';
         tr.innerHTML =
-          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td>' +
+          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + ghostBadge + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td>' +
           ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">$' + Number(m[k] || 0).toFixed(2) + '</td>').join('') +
           '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px">' + (m.groups || []).map(esc).join(', ') + '</td>' +
           '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td></td>';
@@ -2197,8 +2242,22 @@
             await loadModelsPage();
           });
         }
-        tb.appendChild(tr);
-      });
+        return tr;
+      };
+      visible.forEach((m) => tb.appendChild(renderRow(m)));
+      if (hiddenRows.length) {
+        const sep = document.createElement('tr');
+        sep.innerHTML = '<td colspan="11" style="padding:2px 8px"><span class="muted" style="font-size:11px">已隐藏 (' + hiddenRows.length + ') —— 软删的内置/账本行, 计价不受影响</span> <button type="button" class="ghost" id="md-hidden-toggle" style="font-size:11px">展开</button></td>';
+        tb.appendChild(sep);
+        const box = [];
+        hiddenRows.forEach((m) => { const r = renderRow(m); r.style.display = 'none'; r.style.opacity = '0.55'; tb.appendChild(r); box.push(r); });
+        sep.querySelector('#md-hidden-toggle').addEventListener('click', (e) => {
+          const btn = e.target;
+          const open = btn.textContent === '收起';
+          box.forEach((r) => { r.style.display = open ? 'none' : ''; });
+          btn.textContent = open ? '展开' : '收起';
+        });
+      }
     }
     ['md-q', 'md-src'].forEach((id) => document.getElementById(id).addEventListener('input', renderModels));
     function fillModelForm(m) {
@@ -2775,7 +2834,7 @@
     setInterval(() => { if (location.hash.startsWith('#analytics') && anTab === 'presence' && document.getElementById('an-sessions').style.display === 'none') loadPresence().catch(() => {}); }, 10000);
 
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'analytics', 'cards', 'models', 'settings', 'logs', 'health'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'analytics', 'cards', 'models', 'model-console', 'settings', 'logs', 'health'];
     function showPage(name) {
       // 支持 #analytics/presence 直达 tab
       const [base, sub] = (name || '').split('/');
@@ -2790,6 +2849,7 @@
       if (name === 'analytics' && !sub) loadAnalytics().catch((e) => toast('an-msg', e.message, true));
       if (name === 'cards') { ensureGroups().then(refreshGroupPickers); loadCardsTab().catch((e) => toast('cd-msg', e.message, true)); }
       if (name === 'models') loadModelsPage().catch((e) => toast('md-msg', e.message, true));
+      if (name === 'model-console') loadModelConsole().catch((e) => toast('mc-msg', e.message, true));
       if (name === 'logs') { lgLastId = 0; loadLogsPage(true).catch((e) => toast('lg-msg', e.message, true)); }
       if (name === 'keys') ensureGroups().then(refreshGroupPickers);
       window.scrollTo({ top: 0 });
@@ -3467,6 +3527,88 @@
 
     // 操作后即时刷新（不等待下一轮轮询）
     function refreshSoon() { setTimeout(() => loadAll().catch(() => {}), 100); }
+
+    // ---------- 模型总控 ----------
+    let mcWindow = '24h';
+    let mcData = null;
+    async function loadModelConsole() {
+      toast('mc-msg', '');
+      const d = await api('/admin/api/models/console?window=' + mcWindow);
+      mcData = d;
+      const rows = d.rows || [];
+      document.getElementById('mc-count').textContent = '(' + rows.length + ' 定价单元)';
+      const c = d.counts || {};
+      document.getElementById('mc-summary').textContent =
+        '窗口 ' + (d.window || mcWindow) + ' · 已定价 ' + (c.priced || 0) + ' / ' + (c.rows || 0) + ' · 幽灵 ' + (c.ghost || 0) + ' 个';
+      const tb = document.getElementById('mc-body');
+      tb.innerHTML = '';
+      if (!rows.length) { tb.innerHTML = '<tr><td colspan="12" class="muted">无数据</td></tr>'; return; }
+      rows.forEach((r) => {
+        const tr = document.createElement('tr');
+        const p = r.price || {};
+        const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', fallback: '<span class="pill bad">兜底</span>' }[p.source] || esc(p.source || '');
+        const ghost = r.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游无此模型 (影子价兜底: 能计价但不出现在内置/上游名单)">幽灵</span>' : '';
+        const priceableTip = p.priceable === false ? ' <span class="pill warn" style="font-size:10px" title="fast 折叠行需先录 -fast 专属条目才能直接定价, 否则前缀匹配会吃掉 ×2">先录fast条目</span>' : '';
+        // 成本占比 = 官方成本 / (日均实收/套餐天数) —— 定价台核心指标, >60% 红 >30% 黄
+        const cons = r.consumption || {};
+        const face = Number(cons.face_usd || 0);
+        const laneH = Number(cons.lane_hours || 0);
+        const usdLaneH = cons.usd_per_lane_hour;
+        const paceR = cons.pace_ratio;
+        const tps50 = cons.tps_p50, upTps = cons.upstream_tps_p50;
+        const rule = r.risk_rule;
+        const ruleTxt = rule
+          ? (rule.exempt ? '<span class="pill ok">免限</span>' :
+             'TTFT ' + (rule.ttft_floor_ms || 0) + 'ms · ' +
+             (rule.speed_ratio != null ? '×' + rule.speed_ratio : (rule.pace_normal_tps || '沿用') + 'tps') +
+             (rule.max_output_tokens ? ' · ≤' + rule.max_output_tokens : ''))
+          : '<span class="muted">—</span>';
+        const paceTxt = paceR == null ? '<span class="muted">—</span>' :
+          '<span class="' + (paceR > 40 ? 'bad' : paceR > 10 ? 'warn' : 'ok') + '">' + Number(paceR).toFixed(0) + '%</span>' +
+          (tps50 != null && upTps != null ? '<div class="muted" style="font-size:10px">' + Number(tps50).toFixed(0) + '/' + Number(upTps).toFixed(0) + '</div>' : '');
+        const laneTxt = laneH >= 1 ? laneH.toFixed(1) + 'h' : '<span class="muted" title="数据不足 1h, $/lane·h 不显示">' + laneH.toFixed(2) + 'h</span>';
+        const usdTxt = usdLaneH != null ? '$' + Number(usdLaneH).toFixed(1) + '/h' : '<span class="muted">数据不足</span>';
+        const statePill = r.hidden ? '<span class="pill bad">已隐藏</span>' : (r.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>');
+        const cheap = r.cheapest_variant;
+        const cheapTip = cheap ? '<div class="muted" style="font-size:10px" title="同族 $/lane·h 最低变体">建议 ' + esc(cheap.variant) + ' $' + Number(cheap.usd_per_lane_hour).toFixed(1) + '</div>' : '';
+        tr.innerHTML =
+          '<td class="mono">' + esc(r.key) + ghost + priceableTip + (r.variants > 1 ? ' <span class="muted" style="font-size:10px">' + r.variants + '变体</span>' : '') + cheapTip + '</td>' +
+          '<td class="mono" style="font-size:10px">' + (r.variant_names || []).slice(0, 3).map(esc).join('<br>') + (r.variants > 3 ? '<br><span class="muted">+' + (r.variants - 3) + '</span>' : '') + '</td>' +
+          '<td class="mono">$' + Number(p.input_per_m || 0).toFixed(2) + ' / $' + Number(p.output_per_m || 0).toFixed(2) + '</td>' +
+          '<td>' + srcPill + '</td>' +
+          '<td class="mono">' + (face > 0 ? '$' + face.toFixed(2) : '<span class="muted">—</span>') + '</td>' +
+          '<td class="mono">' + laneTxt + '</td>' +
+          '<td class="mono">' + usdTxt + '</td>' +
+          '<td class="mono">' + paceTxt + '</td>' +
+          '<td style="font-size:11px">' + ruleTxt + '</td>' +
+          '<td class="mono" style="font-size:10px">' + (r.groups || []).map(esc).join(', ') + '</td>' +
+          '<td>' + statePill + '</td>' +
+          '<td></td>';
+        const act = tr.lastElementChild;
+        if (p.priceable !== false) {
+          act.appendChild(el('button', { class: 'ghost', type: 'button' }, '改价')).addEventListener('click', () => {
+            location.hash = '#models';
+            setTimeout(() => fillModelForm({ model: r.key, input_per_m: p.input_per_m, output_per_m: p.output_per_m, cache_read_per_m: p.cache_read_per_m, cache_write_per_m: p.cache_write_per_m, note: '', enabled: r.enabled }), 300);
+          });
+        } else {
+          act.appendChild(el('button', { class: 'ghost', type: 'button', title: 'fast 折叠行需先在模型页录 -fast 专属条目' }, '录fast条目')).addEventListener('click', () => {
+            location.hash = '#models';
+          });
+        }
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, r.enabled ? '停用' : '启用')).addEventListener('click', async () => {
+          await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: r.key, enabled: !r.enabled }) });
+          await loadModelConsole();
+        });
+        tb.appendChild(tr);
+      });
+    }
+    document.querySelectorAll('[data-mc-window]').forEach((b) => b.addEventListener('click', () => {
+      document.querySelectorAll('[data-mc-window]').forEach((x) => x.classList.toggle('active', x === b));
+      mcWindow = b.dataset.mcWindow;
+      loadModelConsole().catch((e) => toast('mc-msg', e.message, true));
+    }));
+    document.getElementById('mc-refresh').addEventListener('click', () => loadModelConsole().catch((e) => toast('mc-msg', e.message, true)));
+
     if (!location.hash) location.hash = '#overview';
     showPage(location.hash.slice(1));
     loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });

@@ -1023,5 +1023,22 @@ mod tests {
         // 折叠键注册门: 基名行可录, 无 fast 专属条目的 gpt-5.4-fast 不可直接录 (防 ×4)
         assert!(crate::models::console_key_priceable("gpt-5.4"));
         assert!(!crate::models::console_key_priceable("gpt-5.4-fast"));
+        // 边缘情形: 只有带变体后缀的条目 (opus-5-fast) 时不放行基名行 —— 前缀匹配会漏思考档
+        // 正确姿势: 先录 gpt-5.4-fast 专属条目, 门即开
+        let r = crate::models::registry();
+        r.upsert_model(crate::models::ModelEntry {
+            model: "gpt-5.4-fast".into(),
+            input_per_m: 3.0,
+            output_per_m: 18.0,
+            cache_read_per_m: 0.3,
+            cache_write_per_m: 0.0,
+            enabled: true,
+            hidden: false,
+            upstream: false,
+            note: String::new(),
+        })
+        .unwrap();
+        assert!(crate::models::console_key_priceable("gpt-5.4-fast"));
+        let _ = r.delete_model("gpt-5.4-fast");
     }
 }

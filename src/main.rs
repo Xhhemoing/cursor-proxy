@@ -614,6 +614,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/api/models/bulk", post(admin::api_models_bulk))
         .route(
+            "/admin/api/models/console",
+            get(admin::api_model_console),
+        )
+        .route(
             "/admin/api/models/import-builtin",
             post(admin::api_models_import_builtin),
         )
