@@ -293,6 +293,7 @@
         <a href="#model-console" data-page="model-console">模型总控<span class="badge" id="nav-console-badge"></span></a>
         <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
         <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
+        <a href="#portal-users" data-page="portal-users">门户用户<span class="badge" id="nav-portal-badge"></span></a>
         <div class="grp">运营</div>
         <a href="#pool" data-page="pool">号池<span class="badge" id="nav-pool-badge"></span></a>
         <a href="#proxies" data-page="proxies">IP 代理池<span class="badge" id="nav-proxy-badge"></span></a>
@@ -684,6 +685,53 @@
                 <thead><tr><th>开始</th><th>结束</th><th class="num">时长</th><th class="num">并发</th><th class="num">槽·时</th><th class="num">请求</th><th class="num">面值 $</th><th class="num">$/槽·时</th><th class="num">$/h</th><th class="num">忙时占比</th><th class="num">首字</th><th class="num">tok/s</th><th>模型</th></tr></thead>
                 <tbody id="an-sess-body"></tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 门户用户 ================= -->
+      <section class="page page-fill" id="page-portal-users">
+        <div class="page-head">
+          <div><h2>门户用户</h2><p>/portal 登录账号 · 余额手动加 · 用户组控制套餐可见性</p></div>
+          <div class="actions"><button type="button" class="ghost" id="pu-refresh">刷新</button></div>
+        </div>
+        <div class="info" id="pu-msg" style="min-height:18px;margin-bottom:6px"></div>
+        <div style="display:flex;gap:14px;flex:1;min-height:0">
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+            <details class="add" id="pu-add">
+              <summary>新建用户</summary>
+              <div class="body"><div class="form-grid">
+                <label>用户名 <input id="pu-username" placeholder="2-32 字符"></label>
+                <label>密码 <input id="pu-password" placeholder="至少 6 位"></label>
+                <label>初始余额 ¥ <input id="pu-balance" type="number" step="0.01" min="0" value="0"></label>
+                <label>用户组 <select id="pu-group"><option value="">(无)</option></select></label>
+                <label>邀请码 (可选) <input id="pu-invited-by" placeholder="邀请人的 aff_code"></label>
+                <label>备注 <input id="pu-note"></label>
+              </div>
+              <div class="toolbar" style="margin-top:10px;justify-content:flex-end"><button type="button" id="pu-save">创建</button></div></div>
+            </details>
+            <div class="panel fill">
+              <div class="ph"><h3>用户 <span class="muted" id="pu-count"></span></h3></div>
+              <div class="table-scroll"><table>
+                <thead><tr><th>编号</th><th>用户名</th><th>余额</th><th>组</th><th>邀请码</th><th>状态</th><th></th></tr></thead>
+                <tbody id="pu-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+              </table></div>
+            </div>
+          </div>
+          <div style="width:280px;flex:0 0 auto">
+            <div class="panel">
+              <div class="ph"><h3>用户组</h3></div>
+              <div class="table-scroll"><table>
+                <thead><tr><th>id</th><th>名称</th><th>套餐白名单</th></tr></thead>
+                <tbody id="pg-body"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
+              </table></div>
+              <div style="padding:8px">
+                <input id="pg-id" placeholder="组 id" style="width:100%;margin-bottom:4px">
+                <input id="pg-name" placeholder="组名" style="width:100%;margin-bottom:4px">
+                <input id="pg-plans" placeholder="套餐 id 白名单 (逗号分隔, 空=全部)" style="width:100%;margin-bottom:6px">
+                <button type="button" id="pg-save" style="width:100%">保存组</button>
+              </div>
             </div>
           </div>
         </div>
@@ -2845,6 +2893,7 @@
 
     // ---------- 路由: hash → 页面 ----------
     const PAGES = ['overview', 'pool', 'proxies', 'keys', 'analytics', 'cards', 'models', 'model-console', 'settings', 'logs', 'health'];
+    PAGES.push('portal-users');
     function showPage(name) {
       // 支持 #analytics/presence 直达 tab
       const [base, sub] = (name || '').split('/');
@@ -2860,6 +2909,7 @@
       if (name === 'cards') { ensureGroups().then(refreshGroupPickers); loadCardsTab().catch((e) => toast('cd-msg', e.message, true)); }
       if (name === 'models') loadModelsPage().catch((e) => toast('md-msg', e.message, true));
       if (name === 'model-console') loadModelConsole().catch((e) => toast('mc-msg', e.message, true));
+      if (name === 'portal-users') loadPortalUsers().catch((e) => toast('pu-msg', e.message, true));
       if (name === 'logs') { lgLastId = 0; loadLogsPage(true).catch((e) => toast('lg-msg', e.message, true)); }
       if (name === 'keys') ensureGroups().then(refreshGroupPickers);
       window.scrollTo({ top: 0 });
@@ -3541,6 +3591,87 @@
     // ---------- 模型总控 ----------
     let mcWindow = '24h';
     let mcData = null;
+
+    // ---------- 门户用户管理 ----------
+    async function loadPortalUsers() {
+      toast('pu-msg', '');
+      const d = await api('/admin/api/portal/users');
+      const users = d.users || [];
+      const groups = d.groups || [];
+      document.getElementById('pu-count').textContent = '(' + users.length + ')';
+      document.getElementById('nav-portal-badge').textContent = users.length ? String(users.length) : '';
+      const sel = document.getElementById('pu-group');
+      sel.innerHTML = '<option value="">(无)</option>' + groups.map((g) => '<option value="' + esc(g.id) + '">' + esc(g.name || g.id) + '</option>').join('');
+      document.getElementById('pg-body').innerHTML = groups.length
+        ? groups.map((g) => '<tr><td class="mono">' + esc(g.id) + '</td><td>' + esc(g.name) + '</td><td class="muted" style="font-size:11px">' + (g.plan_whitelist.length ? esc(g.plan_whitelist.join(', ')) : '(全部)') + '</td></tr>').join('')
+        : '<tr><td colspan="3" class="muted">暂无</td></tr>';
+      const tb = document.getElementById('pu-body');
+      tb.innerHTML = '';
+      if (!users.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无用户</td></tr>'; return; }
+      users.forEach((u) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td class="mono">' + esc(u.id) + '</td><td>' + esc(u.username) + '</td>' +
+          '<td class="mono">¥' + Number(u.balance_rmb || 0).toFixed(2) + '</td>' +
+          '<td class="muted">' + esc(u.group_id || '—') + '</td>' +
+          '<td class="mono" style="font-size:11px">' + esc(u.aff_code || '') + '</td>' +
+          '<td>' + (u.enabled ? '<span class="pill ok">正常</span>' : '<span class="pill bad">禁用</span>') + '</td><td></td>';
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '加余额')).addEventListener('click', async () => {
+          const v = prompt('给用户 ' + u.username + ' 加余额 (负数=扣减):', '100');
+          if (v === null) return;
+          const n = parseFloat(v);
+          if (!isFinite(n) || n === 0) return toast('pu-msg', '金额非法', true);
+          try {
+            const r = await api('/admin/api/portal/users/' + u.id + '/balance', { method: 'POST', body: JSON.stringify({ delta_rmb: n, reason: 'admin_add' }) });
+            toast('pu-msg', u.username + ' 新余额 ¥' + Number(r.balance_rmb).toFixed(2));
+            loadPortalUsers();
+          } catch (e) { toast('pu-msg', e.message, true); }
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, u.enabled ? '禁用' : '启用')).addEventListener('click', async () => {
+          try { await api('/admin/api/portal/users/' + u.id, { method: 'POST', body: JSON.stringify({ enabled: !u.enabled }) }); loadPortalUsers(); }
+          catch (e) { toast('pu-msg', e.message, true); }
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '重置密码')).addEventListener('click', async () => {
+          const v = prompt('给 ' + u.username + ' 设新密码 (至少 6 位):');
+          if (!v || v.length < 6) return;
+          try { await api('/admin/api/portal/users/' + u.id, { method: 'POST', body: JSON.stringify({ password: v }) }); toast('pu-msg', '密码已重置'); }
+          catch (e) { toast('pu-msg', e.message, true); }
+        });
+        tb.appendChild(tr);
+      });
+    }
+    document.getElementById('pu-refresh').addEventListener('click', () => loadPortalUsers().catch((e) => toast('pu-msg', e.message, true)));
+    document.getElementById('pu-save').addEventListener('click', async () => {
+      const body = {
+        username: document.getElementById('pu-username').value.trim(),
+        password: document.getElementById('pu-password').value,
+        initial_balance: parseFloat(document.getElementById('pu-balance').value) || 0,
+        group_id: document.getElementById('pu-group').value || null,
+        invited_by: document.getElementById('pu-invited-by').value.trim() || null,
+        note: document.getElementById('pu-note').value.trim() || null,
+      };
+      if (!body.username || !body.password) return toast('pu-msg', '用户名和密码必填', true);
+      try {
+        const r = await api('/admin/api/portal/users', { method: 'POST', body: JSON.stringify(body) });
+        toast('pu-msg', '已创建 ' + r.user.username + ' (' + r.user.id + ')');
+        document.getElementById('pu-add').open = false;
+        ['pu-username', 'pu-password', 'pu-invited-by', 'pu-note'].forEach((id) => document.getElementById(id).value = '');
+        loadPortalUsers();
+      } catch (e) { toast('pu-msg', e.message, true); }
+    });
+    document.getElementById('pg-save').addEventListener('click', async () => {
+      const id = document.getElementById('pg-id').value.trim();
+      const name = document.getElementById('pg-name').value.trim();
+      const plans = document.getElementById('pg-plans').value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (!id) return toast('pu-msg', '组 id 必填', true);
+      try {
+        await api('/admin/api/portal/groups', { method: 'POST', body: JSON.stringify({ id, name, plan_whitelist: plans }) });
+        toast('pu-msg', '已保存组 ' + id);
+        ['pg-id', 'pg-name', 'pg-plans'].forEach((x) => document.getElementById(x).value = '');
+        loadPortalUsers();
+      } catch (e) { toast('pu-msg', e.message, true); }
+    });
     async function loadModelConsole() {
       toast('mc-msg', '');
       const d = await api('/admin/api/models/console?window=' + mcWindow);

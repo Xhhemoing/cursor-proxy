@@ -22,6 +22,7 @@ mod logbuf;
 mod metrics;
 mod models;
 mod pool;
+mod portal;
 mod protocol;
 mod proxypool;
 mod quota;
@@ -299,6 +300,8 @@ async fn main() -> anyhow::Result<()> {
         )),
         price_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
     });
+    // 门户用户库初始化 (与 cards.json 同目录)
+    portal::init(&std::path::Path::new(&config.billing.db_file).with_file_name("cards.json"));
     info!(
         event = "billing_init",
         db = %config.billing.db_file,
@@ -662,6 +665,23 @@ async fn main() -> anyhow::Result<()> {
             "/admin/api/analytics/refresh-price-map",
             post(admin::api_price_map_refresh),
         )
+        // ── 门户后台管理 (admin token 鉴权) ──
+        .route(
+            "/admin/api/portal/users",
+            get(admin::api_admin_portal_list_users).post(admin::api_admin_portal_create_user),
+        )
+        .route(
+            "/admin/api/portal/users/:id",
+            post(admin::api_admin_portal_update_user),
+        )
+        .route(
+            "/admin/api/portal/users/:id/balance",
+            post(admin::api_admin_portal_add_balance),
+        )
+        .route(
+            "/admin/api/portal/groups",
+            post(admin::api_admin_portal_upsert_group),
+        )
         .route(
             "/admin/api/models/import-builtin",
             post(admin::api_models_import_builtin),
@@ -752,6 +772,16 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
+        // 用户门户 (自带 token 鉴权, 无 admin 中间件)
+        .route("/portal", get(portal_page))
+        .route("/portal/api/login", post(admin::api_portal_login))
+        .route("/portal/api/logout", post(admin::api_portal_logout))
+        .route("/portal/api/me", get(admin::api_portal_me))
+        .route("/portal/api/balance", get(admin::api_portal_balance))
+        .route("/portal/api/plans", get(admin::api_portal_plans))
+        .route("/portal/api/purchase", post(admin::api_portal_purchase))
+        .route("/portal/api/cards", get(admin::api_portal_cards))
+        .route("/portal/api/aff", get(admin::api_portal_aff))
         .route("/v1/models", get(models_handler))
         // 套餐卡客户自助: 查自己的档位/评分/限速, 提交申诉 (Bearer = 卡 key)
         .route("/v1/card/status", get(card_self_status_handler))
@@ -936,6 +966,11 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "version": env!("CARGO_PKG_VERSION"),
         "pool": state.pool.summary(),
     }))
+}
+
+/// GET /portal — 用户门户页面
+async fn portal_page() -> impl IntoResponse {
+    axum::response::Html(include_str!("../static/portal.html"))
 }
 
 async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {

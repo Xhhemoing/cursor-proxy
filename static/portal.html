@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>用户门户</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --bg-2: #fff; --bg-3: #eee; --ink: #1a1a1a; --muted: #888;
+    --line: #e0e0e0; --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --info: #2563eb;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141416; --bg-2: #1e1e22; --bg-3: #2a2a30; --ink: #e8e8e8; --muted: #888; --line: #333; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  button { font: inherit; padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--bg); border-radius: 6px; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  button:hover { opacity: 0.85; }
+  input, select { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); color: var(--ink); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  .pill.bad { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+
+  /* 登录页 */
+  #login-view { display: flex; align-items: center; justify-content: center; height: 100vh; }
+  .login-box { width: 340px; padding: 32px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; }
+  .login-box h1 { margin: 0 0 6px; font-size: 20px; }
+  .login-box .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .login-box label { display: block; margin-bottom: 12px; font-size: 13px; }
+  .login-box input { width: 100%; margin-top: 4px; }
+  .login-box button { width: 100%; margin-top: 8px; padding: 9px; }
+  .login-box .err { color: var(--bad); font-size: 12px; margin-top: 10px; min-height: 16px; }
+  .login-box .tip { color: var(--muted); font-size: 12px; margin-top: 14px; text-align: center; }
+
+  /* 主界面 */
+  #app-view { display: none; height: 100vh; flex-direction: column; }
+  .topbar { display: flex; align-items: center; gap: 16px; padding: 0 20px; height: 52px; background: var(--bg-2); border-bottom: 1px solid var(--line); }
+  .topbar .brand { font-weight: 700; font-size: 15px; }
+  .topbar nav { display: flex; gap: 4px; flex: 1; }
+  .topbar nav a { padding: 6px 14px; border-radius: 6px; color: var(--muted); text-decoration: none; font-size: 13px; }
+  .topbar nav a.active { background: var(--bg-3); color: var(--ink); font-weight: 600; }
+  .topbar .who { font-size: 13px; }
+  .topbar .bal { font-family: var(--mono); font-weight: 600; color: var(--ok); }
+  main { flex: 1; overflow: auto; padding: 20px; }
+  .page { display: none; max-width: 900px; margin: 0 auto; }
+  .page.active { display: block; }
+  .card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 10px; font-size: 15px; }
+  .stat-row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 140px; padding: 14px; background: var(--bg); border-radius: 8px; }
+  .stat .l { font-size: 12px; color: var(--muted); }
+  .stat .v { font: 600 22px var(--mono); margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+  .plan-card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .plan-card h4 { margin: 0 0 4px; font-size: 15px; }
+  .plan-card .price { font: 700 24px var(--mono); color: var(--ink); margin: 8px 0; }
+  .plan-card .meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .plan-card button { width: 100%; }
+  .aff-code { font: 700 20px var(--mono); letter-spacing: 2px; padding: 10px 16px; background: var(--bg); border-radius: 8px; display: inline-block; }
+  .toast { position: fixed; top: 20px; right: 20px; padding: 10px 18px; background: var(--ink); color: var(--bg); border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 99; }
+  .toast.show { opacity: 1; }
+  .toast.err { background: var(--bad); }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ 登录页 ═══════════ -->
+<div id="login-view">
+  <div class="login-box">
+    <h1>用户门户</h1>
+    <div class="sub">使用账号或编号登录</div>
+    <form id="login-form">
+      <label>用户名 / 编号 <input id="login-user" autocomplete="username" required></label>
+      <label>密码 <input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <button type="submit" id="login-btn">登 录</button>
+      <div class="err" id="login-err"></div>
+    </form>
+    <div class="tip">没有账号？请联系管理员开通</div>
+  </div>
+</div>
+
+<!-- ═══════════ 主界面 ═══════════ -->
+<div id="app-view">
+  <div class="topbar">
+    <span class="brand">用户门户</span>
+    <nav id="nav">
+      <a href="#dashboard" data-page="dashboard" class="active">首页</a>
+      <a href="#plans" data-page="plans">购买套餐</a>
+      <a href="#cards" data-page="cards">我的套餐</a>
+      <a href="#balance" data-page="balance">余额</a>
+      <a href="#aff" data-page="aff">邀请</a>
+    </nav>
+    <span class="who"><span id="who-name">–</span> · 余额 <span class="bal" id="who-bal">¥0</span></span>
+    <button class="ghost" id="logout-btn" style="padding:4px 10px;font-size:12px">退出</button>
+  </div>
+  <main>
+    <!-- 首页 -->
+    <div class="page active" id="page-dashboard">
+      <div class="stat-row">
+        <div class="stat"><div class="l">账户余额</div><div class="v" id="d-balance">¥0</div></div>
+        <div class="stat"><div class="l">我的套餐</div><div class="v" id="d-cards">0</div></div>
+        <div class="stat"><div class="l">有效套餐</div><div class="v" id="d-active">0</div></div>
+        <div class="stat"><div class="l">邀请人数</div><div class="v" id="d-invited">0</div></div>
+      </div>
+      <div class="card">
+        <h3>有效套餐</h3>
+        <div id="d-cards-list" class="muted">加载中…</div>
+      </div>
+    </div>
+
+    <!-- 购买套餐 -->
+    <div class="page" id="page-plans">
+      <h2 style="margin:0 0 14px">购买套餐</h2>
+      <div class="plan-grid" id="plans-grid">加载中…</div>
+    </div>
+
+    <!-- 我的套餐 -->
+    <div class="page" id="page-cards">
+      <h2 style="margin:0 0 14px">我的套餐</h2>
+      <div class="card">
+        <table>
+          <thead><tr><th>套餐</th><th>Key</th><th>状态</th><th>剩余时间</th><th>已用额度</th><th>实付</th></tr></thead>
+          <tbody id="cards-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 余额 -->
+    <div class="page" id="page-balance">
+      <h2 style="margin:0 0 14px">余额管理</h2>
+      <div class="stat-row">
+        <div class="stat"><div class="l">当前余额</div><div class="v" id="b-current">¥0</div></div>
+      </div>
+      <div class="card">
+        <h3>最近流水</h3>
+        <table>
+          <thead><tr><th>时间</th><th>金额</th><th>余额</th><th>原因</th></tr></thead>
+          <tbody id="balance-log"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="card muted" style="font-size:13px">充值请联系管理员</div>
+    </div>
+
+    <!-- 邀请 -->
+    <div class="page" id="page-aff">
+      <h2 style="margin:0 0 14px">邀请好友</h2>
+      <div class="card">
+        <h3>我的邀请码</h3>
+        <div class="aff-code" id="aff-code">–</div>
+        <p class="muted" style="font-size:12px">好友注册时填入此码, 其首次购买后你可获得返佣</p>
+      </div>
+      <div class="card">
+        <h3>邀请记录 (<span id="aff-count">0</span>)</h3>
+        <table>
+          <thead><tr><th>用户</th><th>注册时间</th></tr></thead>
+          <tbody id="aff-list"><tr><td colspan="2" class="muted">暂无</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let token = sessionStorage.getItem('portal_token') || '';
+  let me = null;
+
+  function toast(msg, err) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (err ? ' err' : '');
+    setTimeout(() => t.classList.remove('show'), 2600);
+  }
+
+  async function api(path, opt) {
+    opt = opt || {};
+    opt.headers = Object.assign({ 'content-type': 'application/json' }, opt.headers || {});
+    if (token) opt.headers['authorization'] = 'Bearer ' + token;
+    const r = await fetch(path, opt);
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (r.status === 401) { doLogout(); throw new Error(d.error || '请重新登录'); }
+      throw new Error(d.error || r.status);
+    }
+    return d;
+  }
+
+  function fmtTime(s) { return s ? new Date(s * 1000).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'; }
+  function fmtDur(secs) {
+    if (!secs) return '—';
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600);
+    return d > 0 ? d + ' 天 ' + h + ' 时' : h + ' 时';
+  }
+
+  // ── 登录 ──
+  $('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('login-err').textContent = '';
+    $('login-btn').disabled = true;
+    try {
+      const d = await api('/portal/api/login', {
+        method: 'POST',
+        body: JSON.stringify({ username_or_id: $('login-user').value.trim(), password: $('login-pass').value }),
+      });
+      token = d.token;
+      sessionStorage.setItem('portal_token', token);
+      me = d.user;
+      showApp();
+    } catch (err) {
+      $('login-err').textContent = err.message;
+    } finally {
+      $('login-btn').disabled = false;
+    }
+  });
+
+  function doLogout() {
+    if (token) api('/portal/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
+    token = '';
+    sessionStorage.removeItem('portal_token');
+    me = null;
+    $('app-view').style.display = 'none';
+    $('login-view').style.display = 'flex';
+  }
+  $('logout-btn').addEventListener('click', doLogout);
+
+  // ── 路由 ──
+  const PAGES = ['dashboard', 'plans', 'cards', 'balance', 'aff'];
+  function showPage(name) {
+    if (!PAGES.includes(name)) name = 'dashboard';
+    PAGES.forEach((p) => $('page-' + p).classList.toggle('active', p === name));
+    document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
+    if (name === 'plans') loadPlans();
+    if (name === 'cards') loadCards();
+    if (name === 'balance') loadBalance();
+    if (name === 'aff') loadAff();
+  }
+  window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
+
+  async function showApp() {
+    $('login-view').style.display = 'none';
+    $('app-view').style.display = 'flex';
+    $('who-name').textContent = me.username + ' (' + me.id + ')';
+    $('who-bal').textContent = '¥' + me.balance_rmb.toFixed(2);
+    await loadDashboard();
+    showPage(location.hash.slice(1) || 'dashboard');
+  }
+
+  // ── 各页加载 ──
+  async function loadDashboard() {
+    try {
+      const [bal, cards, aff] = await Promise.all([
+        api('/portal/api/balance'), api('/portal/api/cards'), api('/portal/api/aff'),
+      ]);
+      $('d-balance').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
+      $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
+      const list = cards.cards || [];
+      $('d-cards').textContent = list.length;
+      const active = list.filter((c) => c.enabled && !c.expired);
+      $('d-active').textContent = active.length;
+      $('d-invited').textContent = aff.invited_count || 0;
+      $('d-cards-list').innerHTML = active.length
+        ? active.map((c) => '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>' + esc(c.plan_name || c.plan_id) + '</b> · <span class="mono" style="font-size:12px">' + esc(c.card_key.slice(0, 16)) + '…</span> · 剩 ' + fmtDur(c.remaining_secs) + '</div>').join('')
+        : '<span class="muted">暂无有效套餐, 去「购买套餐」开通</span>';
+    } catch (e) { /* 401 已处理 */ }
+  }
+
+  async function loadPlans() {
+    const g = $('plans-grid');
+    try {
+      const d = await api('/portal/api/plans');
+      const plans = d.plans || [];
+      if (!plans.length) { g.innerHTML = '<div class="muted">暂无可用套餐</div>'; return; }
+      g.innerHTML = '';
+      plans.forEach((p) => {
+        const div = document.createElement('div');
+        div.className = 'plan-card';
+        div.innerHTML =
+          '<h4>' + esc(p.name) + '</h4>' +
+          '<div class="price">¥' + Number(p.price).toFixed(0) + '</div>' +
+          '<div class="meta">' + esc(p.kind) + ' · ' + (p.duration_hours ? fmtDur(p.duration_hours * 3600) : '不限时') + ' · ' + p.max_concurrency + ' 并发' + (p.face_usd > 0 ? ' · $' + p.face_usd + ' 额度' : '') + '</div>' +
+          (p.note ? '<div class="meta">' + esc(p.note) + '</div>' : '');
+        const btn = document.createElement('button');
+        btn.textContent = '购买';
+        btn.addEventListener('click', () => purchase(p));
+        div.appendChild(btn);
+        g.appendChild(div);
+      });
+    } catch (e) { g.innerHTML = '<div class="muted">' + esc(e.message) + '</div>'; }
+  }
+
+  async function purchase(p) {
+    if (!confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2))) return;
+    try {
+      const d = await api('/portal/api/purchase', { method: 'POST', body: JSON.stringify({ plan_id: p.id }) });
+      toast('购买成功! Key: ' + d.card_key.slice(0, 20) + '…');
+      const bal = await api('/portal/api/balance');
+      $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
+    } catch (e) { toast(e.message, true); }
+  }
+
+  async function loadCards() {
+    const tb = $('cards-body');
+    try {
+      const d = await api('/portal/api/cards');
+      const list = d.cards || [];
+      if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">暂无套餐</td></tr>'; return; }
+      tb.innerHTML = list.map((c) =>
+        '<tr><td>' + esc(c.plan_name || c.plan_id) + '</td>' +
+        '<td class="mono" style="font-size:11px" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(0, 20)) + '…</td>' +
+        '<td>' + (c.expired ? '<span class="pill bad">已过期</span>' : c.enabled ? '<span class="pill ok">使用中</span>' : '<span class="pill warn">未启用</span>') + '</td>' +
+        '<td>' + fmtDur(c.remaining_secs) + '</td>' +
+        '<td class="mono">$' + Number(c.face_used_usd || 0).toFixed(2) + (c.face_usd > 0 ? ' / $' + c.face_usd : '') + '</td>' +
+        '<td class="mono">¥' + Number(c.paid_rmb || 0).toFixed(2) + '</td></tr>'
+      ).join('');
+    } catch (e) { tb.innerHTML = '<tr><td colspan="6" class="muted">' + esc(e.message) + '</td></tr>'; }
+  }
+
+  async function loadBalance() {
+    try {
+      const d = await api('/portal/api/balance');
+      $('b-current').textContent = '¥' + (d.balance_rmb || 0).toFixed(2);
+      const log = d.log || [];
+      $('balance-log').innerHTML = log.length
+        ? log.map((l) => '<tr><td class="mono" style="font-size:11px">' + fmtTime(l.ts_ms / 1000) + '</td><td class="mono" style="color:' + (l.delta_rmb >= 0 ? 'var(--ok)' : 'var(--bad)') + '">' + (l.delta_rmb >= 0 ? '+' : '') + Number(l.delta_rmb).toFixed(2) + '</td><td class="mono">¥' + Number(l.balance_after).toFixed(2) + '</td><td class="muted">' + esc(l.reason) + '</td></tr>').join('')
+        : '<tr><td colspan="4" class="muted">暂无流水</td></tr>';
+    } catch (e) { /* 401 已处理 */ }
+  }
+
+  async function loadAff() {
+    try {
+      const d = await api('/portal/api/aff');
+      $('aff-code').textContent = d.aff_code || '—';
+      $('aff-count').textContent = d.invited_count || 0;
+      const list = d.invited || [];
+      $('aff-list').innerHTML = list.length
+        ? list.map((x) => '<tr><td>' + esc(x.username) + '</td><td class="muted">' + fmtTime(x.created_at) + '</td></tr>').join('')
+        : '<tr><td colspan="2" class="muted">暂无邀请记录</td></tr>';
+    } catch (e) { /* 401 已处理 */ }
+  }
+
+  function esc(s) { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+
+  // ── 启动: 已有 token 直接进 ──
+  if (token) {
+    api('/portal/api/me').then((d) => { me = d.user; showApp(); }).catch(() => doLogout());
+  }
+})();
+</script>
+</body>
+</html>

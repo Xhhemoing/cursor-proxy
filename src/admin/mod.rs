@@ -10,6 +10,7 @@ pub mod health_api;
 pub mod keys;
 pub mod model_console;
 pub mod models;
+pub mod portal;
 pub mod proxies;
 pub mod settings;
 
@@ -29,5 +30,6 @@ pub use health_api::*;
 pub use keys::*;
 pub use model_console::*;
 pub use models::*;
+pub use portal::*;
 pub use proxies::*;
 pub use settings::*;
