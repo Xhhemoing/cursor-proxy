@@ -1952,6 +1952,10 @@ async fn inference_handler_inner(
             // 限速记录: 生效 pace 与累计 sleep
             let pace_tps_applied: u32 = card_permit_s.as_ref().map(|p| p.pace_tps()).unwrap_or(0);
             let mut pace_wait_ms: u64 = 0;
+            // 风控: 首字延迟下限 + 输出 token 硬上限
+            let ttft_floor_ms: u32 = card_permit_s.as_ref().map(|p| p.ttft_floor_ms).unwrap_or(0);
+            let max_output_tokens: u32 = card_permit_s.as_ref().map(|p| p.max_output_tokens).unwrap_or(0);
+            let mut ttft_delayed = false;
             // 空内容追踪: 上游返回 200 但无实际内容时, 流式也要返回错误而非静默 200
             let mut has_content = false;
             // 流中途上游错误 (error 帧 / 解码失败 / 连接被掐): 记下来, 收尾时向客户端发 error 帧
@@ -2030,6 +2034,30 @@ async fn inference_handler_inner(
                                 || sse.contains("\"reasoning\""))
                         {
                             ttft_ms = Some(start.elapsed().as_millis() as u64);
+                            // 风控: 首字延迟下限 — 压制的请求至少等这么久才发第一帧
+                            if ttft_floor_ms > 0 && !ttft_delayed {
+                                let elapsed = start.elapsed().as_millis() as u64;
+                                if elapsed < ttft_floor_ms as u64 {
+                                    let wait = Duration::from_millis(ttft_floor_ms as u64 - elapsed);
+                                    tokio::time::sleep(wait).await;
+                                }
+                                ttft_delayed = true;
+                            }
+                        }
+                        // 风控: 输出 token 硬上限 — 超过即截断 (finish_reason=length)
+                        if max_output_tokens > 0 && local_out_est > max_output_tokens as f64 {
+                            info!(
+                                event = "output_capped",
+                                req_id = %rid,
+                                max = max_output_tokens,
+                                est = local_out_est,
+                                "output token cap hit, truncating stream"
+                            );
+                            let _ = tx
+                                .send(Ok(Bytes::from(dialect_terminal(dialect, &model_clone))))
+                                .await;
+                            sent_terminal = true;
+                            break;
                         }
                         if sse.contains(terminal_marker) {
                             sent_terminal = true;

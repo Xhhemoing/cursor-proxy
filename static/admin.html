@@ -84,17 +84,17 @@
     .page { display: none; }
     .page.active { display: block; overflow: auto; flex: 1; min-height: 0; }
     .page.active.page-fill { display: flex; flex-direction: column; overflow: hidden; }
-    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex: 0 0 auto; }
-    .page-head h2 { margin: 0; font: 600 18px/1.2 var(--sans); letter-spacing: -.01em; }
+    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; flex: 0 0 auto; }
+    .page-head h2 { margin: 0; font: 600 16px/1.2 var(--sans); letter-spacing: -.01em; }
     .page-head p { display: none; }
     .page-head .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
     /* ---------- 统计卡 ---------- */
-    .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-    .stat { flex: 1 1 110px; max-width: none; min-width: 110px; border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px 6px; background: var(--card); }
-    .stat .l { color: var(--muted); font: 11px var(--mono); }
-    .stat .v { font: 500 18px/1.15 var(--mono); margin-top: 4px; letter-spacing: -.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .stat .v.sm { font-size: 13px; }
+    .stats { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+    .stat { flex: 1 1 100px; max-width: none; min-width: 100px; border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px 4px; background: var(--card); }
+    .stat .l { color: var(--muted); font: 10px var(--mono); }
+    .stat .v { font: 500 15px/1.15 var(--mono); margin-top: 2px; letter-spacing: -.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat .v.sm { font-size: 12px; }
     .stat .s { display: none; }
     .v.ok { color: var(--ok); } .v.warn { color: var(--warn); } .v.bad { color: var(--bad); }
     .stat-strip { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 4px; margin-bottom: 10px; background: var(--card); }
@@ -1067,11 +1067,11 @@
               </div>
             </div>
             <div class="panel" style="flex:0 0 auto">
-              <div class="ph"><h3>按模型限速规则</h3><p>前缀匹配 (自动兼容 cursor- 前缀), 最长前缀优先. 留空的 pace 沿用上层; 「免限」= 该模型完全不限速 (grok 原生 374 tok/s 且输出长, 限了只会超时)</p>
+              <div class="ph"><h3>按模型限速规则</h3><p>前缀匹配 (自动兼容 cursor- 前缀), 最长前缀优先. 留空的 pace 沿用上层; 「免限」= 该模型完全不限速 (grok 原生 374 tok/s 且输出长, 限了只会超时). 速度比例 0.5 = 半速, 与 pace 互斥. TTFT 下限 = 首字至少延迟 ms. 输出上限 = 单请求最多输出 tok, 超过截断.</p>
                 <button type="button" class="ghost" id="rk-rule-add">+ 规则</button></div>
-              <div class="table-scroll" style="max-height:220px">
+              <div class="table-scroll" style="max-height:260px">
                 <table class="nowrap">
-                  <thead><tr><th>模型前缀</th><th>免限</th><th class="num">正常 tok/s</th><th class="num">软化</th><th class="num">压制</th><th>备注</th><th></th></tr></thead>
+                  <thead><tr><th>模型前缀</th><th>免限</th><th class="num">正常 tok/s</th><th class="num">软化</th><th class="num">压制</th><th class="num" title="相对原输出速度的比例, 0.5=半速. 与 pace 互斥">速度比</th><th class="num" title="首字至少延迟 ms, 0=不延迟">TTFT ms</th><th class="num" title="单请求最多输出 tok, 0=不限">输出上限</th><th>备注</th><th></th></tr></thead>
                   <tbody id="rk-rules-body"></tbody>
                 </table>
               </div>
@@ -1778,16 +1778,19 @@
     }
     function rkRenderRules() {
       const tb = document.getElementById('rk-rules-body'); tb.innerHTML = '';
-      if (!rkRules.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">无 — 全部模型按全局/套餐 pace</td></tr>'; return; }
+      if (!rkRules.length) { tb.innerHTML = '<tr><td colspan="10" class="muted">无 — 全部模型按全局/套餐 pace</td></tr>'; return; }
       rkRules.forEach((r, i) => {
         const tr = document.createElement('tr');
         const inp = (k, type, attrs) => { const x = el('input', Object.assign({ type: type }, attrs || {})); if (type === 'checkbox') x.checked = !!r[k]; else x.value = r[k] == null ? '' : r[k]; x.addEventListener('input', () => { r[k] = type === 'checkbox' ? x.checked : type === 'number' ? (x.value === '' ? null : Number(x.value)) : x.value; }); return x; };
-        tr.appendChild(el('td')).appendChild(inp('prefix', 'text', { placeholder: 'claude-fable-5-1-thinking', style: 'width:220px' }));
+        tr.appendChild(el('td')).appendChild(inp('prefix', 'text', { placeholder: 'claude-fable-5-1-thinking', style: 'width:180px' }));
         tr.appendChild(el('td')).appendChild(inp('exempt', 'checkbox'));
-        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_normal_tps', 'number', { min: 0, style: 'width:70px', placeholder: '沿用' }));
-        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_soften_tps', 'number', { min: 0, style: 'width:70px', placeholder: '沿用' }));
-        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_degraded_tps', 'number', { min: 0, style: 'width:70px', placeholder: '沿用' }));
-        tr.appendChild(el('td')).appendChild(inp('note', 'text', { style: 'width:160px' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_normal_tps', 'number', { min: 0, style: 'width:60px', placeholder: '沿用' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_soften_tps', 'number', { min: 0, style: 'width:60px', placeholder: '沿用' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('pace_degraded_tps', 'number', { min: 0, style: 'width:60px', placeholder: '沿用' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('speed_ratio', 'number', { min: 0, max: 1, step: 0.05, style: 'width:60px', placeholder: '1.0' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('ttft_floor_ms', 'number', { min: 0, step: 100, style: 'width:70px', placeholder: '0' }));
+        tr.appendChild(el('td', { class: 'num' })).appendChild(inp('max_output_tokens', 'number', { min: 0, step: 1000, style: 'width:70px', placeholder: '0' }));
+        tr.appendChild(el('td')).appendChild(inp('note', 'text', { style: 'width:120px' }));
         tr.appendChild(el('td')).appendChild(el('button', { class: 'ghost danger', type: 'button' }, '删')).addEventListener('click', () => { rkRules.splice(i, 1); rkRenderRules(); });
         tb.appendChild(tr);
       });
@@ -1802,7 +1805,7 @@
         abuse_threshold_override: Number(v('rk-th')) || 0,
         soften_ratio_of_threshold: Number(v('rk-soft')),
         pace_normal_tps: optNum('rk-pn'), pace_soften_tps: optNum('rk-ps'), pace_degraded_tps: optNum('rk-pd'),
-        model_rules: rkRules.filter((r) => (r.prefix || '').trim()).map((r) => ({ prefix: r.prefix.trim(), exempt: !!r.exempt, pace_normal_tps: r.pace_normal_tps ?? null, pace_soften_tps: r.pace_soften_tps ?? null, pace_degraded_tps: r.pace_degraded_tps ?? null, note: r.note || '' })),
+        model_rules: rkRules.filter((r) => (r.prefix || '').trim()).map((r) => ({ prefix: r.prefix.trim(), exempt: !!r.exempt, pace_normal_tps: r.pace_normal_tps ?? null, pace_soften_tps: r.pace_soften_tps ?? null, pace_degraded_tps: r.pace_degraded_tps ?? null, speed_ratio: r.speed_ratio ?? null, ttft_floor_ms: r.ttft_floor_ms ?? 0, max_output_tokens: r.max_output_tokens ?? 0, note: r.note || '' })),
         relief_after_tokens: Number(v('rk-ra')) || 0,
         relief_tps: Number(v('rk-rt')) || 0,
         hard_cap_usd: 0,
@@ -1817,7 +1820,7 @@
       const d = await api('/admin/api/cards/risk-policy');
       rkDefaults = d.defaults; rkFill(d.policy); rkMsg('');
     }
-    document.getElementById('rk-rule-add').addEventListener('click', () => { rkRules.push({ prefix: '', exempt: false, pace_normal_tps: null, pace_soften_tps: null, pace_degraded_tps: null, note: '' }); rkRenderRules(); });
+    document.getElementById('rk-rule-add').addEventListener('click', () => { rkRules.push({ prefix: '', exempt: false, pace_normal_tps: null, pace_soften_tps: null, pace_degraded_tps: null, speed_ratio: null, ttft_floor_ms: 0, max_output_tokens: 0, note: '' }); rkRenderRules(); });
     document.getElementById('rk-defaults').addEventListener('click', () => { if (rkDefaults) { rkFill(rkDefaults); rkMsg('已填入缺省值 (未保存)'); } });
     document.getElementById('rk-save').addEventListener('click', async () => {
       try { const d = await api('/admin/api/cards/risk-policy', { method: 'POST', body: JSON.stringify(rkCollect()) }); rkFill(d.policy); rkMsg('已保存, 下一次请求起生效'); }

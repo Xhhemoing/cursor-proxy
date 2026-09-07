@@ -580,6 +580,16 @@ pub struct ModelPaceRule {
     pub pace_soften_tps: Option<u32>,
     #[serde(default)]
     pub pace_degraded_tps: Option<u32>,
+    /// 首字延迟下限 (ms): 压制的请求至少等这么久才发第一帧. 0 = 不额外延迟
+    #[serde(default)]
+    pub ttft_floor_ms: u32,
+    /// 输出速度比例 (相对原输出速度): 1.0 = 原速, 0.5 = 半速, 0 = 用 pace_tps 绝对值
+    /// 与 pace_*_tps 互斥: 设了 ratio 就忽略 pace_tps
+    #[serde(default)]
+    pub speed_ratio: Option<f64>,
+    /// 单请求输出 token 硬上限: 超过即截断 (finish_reason=length). 0 = 不限
+    #[serde(default)]
+    pub max_output_tokens: u32,
     #[serde(default)]
     pub note: String,
 }
@@ -687,6 +697,15 @@ impl RiskPolicy {
             if r.exempt {
                 return 0;
             }
+            // speed_ratio 优先: 相对原输出速度的比例限速
+            if let Some(ratio) = r.speed_ratio {
+                if ratio > 0.0 && ratio < 1.0 {
+                    // 用模型原生输出速度估算 (从价格表反推: 输出价越高通常越慢)
+                    // 简化: 用 60 tok/s 作基准 (fable 实测 28.5, sol 76, grok 170)
+                    let base_tps = 60.0;
+                    return (base_tps * ratio) as u32;
+                }
+            }
             let o = match throttle {
                 Throttle::Normal => r.pace_normal_tps,
                 Throttle::Soften => r.pace_soften_tps,
@@ -700,6 +719,14 @@ impl RiskPolicy {
             return 0;
         }
         pace
+    }
+    /// 该模型规则的首字延迟下限 (ms). 0 = 不额外延迟
+    pub fn ttft_floor_for(&self, model: &str) -> u32 {
+        self.rule_for(model).map_or(0, |r| r.ttft_floor_ms)
+    }
+    /// 该模型规则的输出 token 硬上限. 0 = 不限
+    pub fn max_output_for(&self, model: &str) -> u32 {
+        self.rule_for(model).map_or(0, |r| r.max_output_tokens)
     }
     /// 该套餐生效的压制阈值 (0 = 关闭评分)
     pub fn threshold_for(&self, plan: &CardPlan) -> u32 {
@@ -1592,6 +1619,8 @@ impl CardStore {
         let policy = self.risk_policy();
         let pace_tps = policy.pace_for(&plan, throttle, model);
         let relief = (policy.relief_after_tokens, policy.relief_tps);
+        let ttft_floor = policy.ttft_floor_for(model);
+        let max_output = policy.max_output_for(model);
         // B7: 档位变化时重置该卡共享桶的速率 (同卡多流共用一个桶)
         if let Ok(mut g) = rt.pacer.lock() {
             match (&mut *g, pace_tps) {
@@ -1611,6 +1640,8 @@ impl CardStore {
                 key: key.to_string(),
                 relief_after: relief.0 as f64,
                 relief_tps: relief.1,
+                ttft_floor_ms: ttft_floor,
+                max_output_tokens: max_output,
                 sent_tokens: 0.0,
                 hold_micro: hold,
                 settled: false,
@@ -1638,6 +1669,8 @@ impl CardStore {
         let policy = self.risk_policy();
         let pace_tps = policy.pace_for(&plan, throttle, model);
         let relief = (policy.relief_after_tokens, policy.relief_tps);
+        let ttft_floor = policy.ttft_floor_for(model);
+        let max_output = policy.max_output_for(model);
         Ok((
             card,
             plan,
@@ -1649,6 +1682,8 @@ impl CardStore {
                 key: key.to_string(),
                 relief_after: relief.0 as f64,
                 relief_tps: relief.1,
+                ttft_floor_ms: ttft_floor,
+                max_output_tokens: max_output,
                 sent_tokens: 0.0,
                 hold_micro: hold,
                 settled: false,
@@ -2120,6 +2155,10 @@ pub struct CardPermit {
     /// 长输出放开: 本请求已放出 ≥ relief_after 后, 限速改 relief_tps (0 = 放开). 0 = 不启用
     relief_after: f64,
     relief_tps: u32,
+    /// 首字延迟下限 (ms): 压制的请求至少等这么久才发第一帧. 0 = 不额外延迟
+    pub ttft_floor_ms: u32,
+    /// 单请求输出 token 硬上限: 超过即截断. 0 = 不限
+    pub max_output_tokens: u32,
     /// 本请求累计放出 token (估算)
     sent_tokens: f64,
     /// B1: 本请求在 rt.hold_micro 里预占的 micro-$, 结算/丢弃时归还
