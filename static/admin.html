@@ -69,6 +69,7 @@
     nav a.active { background: var(--bg-2); }
     nav a.active::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--ink); }
     nav a .badge { margin-left: auto; font: 12px var(--mono); color: var(--muted); }
+    nav a .badge.warn { color: #fff; background: var(--warn); border-radius: 8px; padding: 0 6px; font-weight: 600; }
     .side-foot { margin-top: auto; padding: 10px 16px 12px; border-top: 1px solid var(--line); }
     .side-foot .who { font-size: 13px; font-weight: 600; }
     .side-foot .mail { color: var(--muted); font-size: 11px; margin-top: 2px; word-break: break-all; }
@@ -327,6 +328,7 @@
           <div class="stat"><div class="l">今日消耗 (面值)</div><div class="v" id="ov-face">–</div><div class="s">成本 <b class="warn" id="ov-cost-rmb">–</b> · 在线 <b class="mono" id="ov-online-now">–</b> 人</div></div>
           <div class="stat"><div class="l">套餐卡利润</div><div class="v" id="ov-card-profit">–</div><div class="s">今日 · 毛利 <b class="mono" id="ov-card-margin">–</b></div></div>
           <div class="stat"><div class="l">今日请求</div><div class="v" id="ov-req">–</div><div class="s">错误率 <b id="ov-err-rate">–</b></div></div>
+          <div class="stat"><div class="l">待办</div><div class="v" id="ov-todo">–</div><div class="s">待审申诉 · 冷却账号</div></div>
           <div class="stat"><div class="l">延迟 p50 / p90</div><div class="v sm" id="ov-lat">–</div><div class="s">日志缓冲区</div></div>
           <div class="stat"><div class="l">在飞</div><div class="v" id="k-inflight">–</div><div class="s">全局 RPM <b class="mono" id="k-rpm">–</b></div></div>
           <div class="stat"><div class="l">默认模型</div><div class="v sm" id="k-model">–</div><div class="s">未指定 model 时</div></div>
@@ -1680,6 +1682,24 @@
       setLive(true);
       loadOverviewBilling().catch(() => {});
       loadOverviewExtra().catch(() => {});
+      pollAppealBadge().catch(() => {});
+    }
+    // 待审申诉红点 + 概览「待办」卡: 全局 4s 轮询里顺手刷; 进 appeals tab 时 loadAppeals 也会刷
+    async function pollAppealBadge() {
+      try {
+        const d = await api('/admin/api/cards/appeals');
+        const n = d.pending || 0;
+        const b = document.getElementById('nav-cards-badge');
+        if (b) { b.textContent = n ? String(n) : ''; b.classList.toggle('warn', n > 0); }
+        const cooling = Number((document.getElementById('k-cooling') || {}).textContent) || 0;
+        const t = document.getElementById('ov-todo');
+        if (t) {
+          const total = n + cooling;
+          t.textContent = String(total);
+          t.style.color = total > 0 ? 'var(--warn)' : '';
+          t.title = '待审申诉 ' + n + ' · 冷却账号 ' + cooling;
+        }
+      } catch (_) {}
     }
     function setLive(ok) {
       const n = document.getElementById('live');
@@ -1851,6 +1871,8 @@
       const d = await api('/admin/api/cards/appeals');
       const badge = document.getElementById('cd-appeal-badge');
       badge.textContent = d.pending || ''; badge.style.display = d.pending ? '' : 'none';
+      const navB = document.getElementById('nav-cards-badge');
+      if (navB) { navB.textContent = d.pending ? String(d.pending) : ''; navB.classList.toggle('warn', (d.pending || 0) > 0); }
       const tb = document.getElementById('ap-body'); tb.innerHTML = '';
       if (!(d.rows || []).length) { tb.innerHTML = '<tr><td colspan="11" class="muted">无申诉记录</td></tr>'; return; }
       d.rows.forEach((c) => {
