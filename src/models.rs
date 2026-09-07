@@ -362,6 +362,49 @@ impl ModelRegistry {
         }
     }
 
+    /// 模型在上游是否「存在」: 精确命中 ∪ 上游有以它为基名的变体 ∪ 逐级剥后缀收敛到存在名.
+    /// 与 is_visible 的三段判定同源, 供「幽灵判定」与 visible_models 注册表分支共用.
+    /// 护栏: upstream 为空 → true (名单未拉取时绝不批量误判为幽灵); 网关侧别名 → true.
+    pub fn upstream_present(model: &str, upstream: &[String]) -> bool {
+        if upstream.is_empty() {
+            return true;
+        }
+        if GATEWAY_ALIASES.contains(&model) {
+            return true; // 网关侧自动路由别名, 上游无同名, 永久豁免
+        }
+        // 精确命中
+        if upstream.iter().any(|u| u == model) {
+            return true;
+        }
+        // 上游存在「以 model 为基名」的变体 → 基名存在
+        let pref = format!("{model}-");
+        if upstream
+            .iter()
+            .any(|u| u.starts_with(&pref) && Self::family_base(u) == model)
+        {
+            return true;
+        }
+        // 剥变体后缀逐级收敛
+        let mut m = model;
+        loop {
+            let stripped = strip_variant_suffix(m);
+            if stripped == m {
+                return false;
+            }
+            m = stripped;
+            if upstream.iter().any(|u| u == m) {
+                return true;
+            }
+            let pref = format!("{m}-");
+            if upstream
+                .iter()
+                .any(|u| u.starts_with(&pref) && Self::family_base(u) == m)
+            {
+                return true;
+            }
+        }
+    }
+
     /// 客户端请求模型名 → 实际上游模型名 (智能思考强度路由).
     ///
     /// 客户端传家族基名 (如 claude-opus-5) 且上游名单里**没有**这个精确名时,
@@ -532,6 +575,9 @@ impl ModelRegistry {
             }
         };
         for e in &d.models {
+            // 注册表手动条目 = 运营明确发布意图, 不做上游门 (名单是缓存会滞后,
+            // 手动录一行开卖新模型是合法逃生舱; kimi-k3 / cursor-grok-4.6 等别名同理).
+            // 「幽灵」只在 admin 面板侧打标 (upstream_present), 零客户侧影响.
             if e.enabled && !e.hidden {
                 push(e.model.clone());
             }
@@ -552,6 +598,9 @@ impl ModelRegistry {
         out
     }
 }
+
+/// 网关侧别名 (上游无同名, 但客户端/路由依赖): 幽灵判定与红标时永久豁免.
+pub const GATEWAY_ALIASES: &[&str] = &["kimi-k3"];
 
 /// 拒绝原因 (供 main.rs 组装 403 文案)
 pub fn deny_reason(allowed_groups: &[String], model: &str) -> String {

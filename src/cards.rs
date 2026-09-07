@@ -45,8 +45,6 @@ pub fn day_start(now: u64, tz_offset_minutes: i32) -> u64 {
 /// - `gpt-5.5-*` = $5/$30/$0.5 (原走 gpt-5 的 2.5/15 低估一半)
 /// - fable-5 / opus-5 / kimi-k3 / grok-4.6 / gemini-3.8 全部命中 1.00
 static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
-    ("gpt-5.4-pro", (30.00, 180.00, 3.00, 0.00)),
-    ("gpt-5.6-cyber", (12.50, 75.00, 1.25, 15.62)),
     ("claude-fable-5-1", (10.00, 50.00, 0.25, 12.50)),
     ("claude-fable-5", (10.00, 50.00, 1.00, 12.50)),
     ("claude-opus-5", (5.00, 25.00, 0.50, 6.25)),
@@ -70,6 +68,19 @@ static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
     ("grok-4.6", (2.00, 6.00, 0.50, 0.00)),
     ("cursor-grok-4.6", (2.00, 6.00, 0.50, 0.00)),
 ];
+
+/// 影子价格表: 上游**不存在**的模型, 仅作计价兜底 (防误请求时按 12.5/75、30/180 高价收足),
+/// 但**不进** builtin_table → 不会被 candidate_models / 「导入内置」当幽灵复活.
+/// gpt-5.4-pro / gpt-5.6-cyber: 上游零变体, 30 天流量 0, 2026-09-07 确认.
+static SHADOW_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
+    ("gpt-5.4-pro", (30.00, 180.00, 3.00, 0.00)),
+    ("gpt-5.6-cyber", (12.50, 75.00, 1.25, 15.62)),
+];
+
+/// 全价格表迭代器: 精确/前缀匹配时同时扫 premium + shadow, 计价一字不差.
+fn all_price_rows() -> impl Iterator<Item = &'static (&'static str, (f64, f64, f64, f64))> {
+    PREMIUM_PRICES.iter().chain(SHADOW_PRICES.iter())
+}
 // 注: 纯别名行 (fable-5 / opus-5 / sonnet-5 / claude-opus-4 的 opus-5 等) 已从内置表删除 —
 // 它们上游不存在, 留在表里会被 candidate_models 列进「模型」页当幽灵. 计价不受影响:
 // model_price 走最长前缀匹配, "fable-5" 请求仍命中 "claude-fable-5" 的价格.
@@ -113,21 +124,19 @@ pub fn model_price_known(model: &str) -> bool {
         return true;
     }
     let base = model.strip_suffix("-fast").unwrap_or(model);
-    PREMIUM_PRICES
-        .iter()
-        .any(|(n, _)| *n == base || base.starts_with(n))
+    all_price_rows().any(|(n, _)| *n == base || base.starts_with(n))
 }
 
 /// 内置官方价格表查询 (精确 > 最长前缀 > 兜底), `-fast` 变体 ×2
 pub fn builtin_model_price(model: &str) -> (f64, f64, f64, f64) {
     let fast = model.ends_with("-fast");
     let base = model.strip_suffix("-fast").unwrap_or(model);
-    let mut p = if let Some((_, p)) = PREMIUM_PRICES.iter().find(|(n, _)| *n == base) {
+    let mut p = if let Some((_, p)) = all_price_rows().find(|(n, _)| *n == base) {
         *p
     } else {
         let mut best: Option<&(f64, f64, f64, f64)> = None;
         let mut best_len = 0;
-        for (name, p) in PREMIUM_PRICES {
+        for (name, p) in all_price_rows() {
             if base.starts_with(name) && name.len() > best_len {
                 best = Some(p);
                 best_len = name.len();
