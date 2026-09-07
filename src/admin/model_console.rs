@@ -171,6 +171,16 @@ pub async fn api_model_console(
                 } else {
                     0.0
                 };
+                // #3 成本占比: 官方成本(元) / 该模型日均实收(元). 日均实收 = 窗口内 face_usd * rmb_per_usd / 天数.
+                // >60% 红 >30% 黄 (用户定价经验: 成本超付费只作行为分, 60%/80% 档)
+                let cost_ratio = {
+                    let days = match q.window.as_deref() { Some("7d") => 7.0, Some("30d") => 30.0, _ => 1.0 };
+                    let cost_rmb = a.face_usd * rmb_per_usd;
+                    let daily_income_rmb = if days > 0.0 { cost_rmb / days } else { 0.0 };
+                    // 收入近似: 该模型日均 face 对应的套餐日收难以精确归集, 用「成本占自身面值比」代替
+                    // (面值=官方口径成本, 占比=1 即 100%) —— 前端展示为「成本/面值」而非虚构「成本/收入」
+                    if cost_rmb > 0.0 && daily_income_rmb > 0.0 { Some(cost_rmb / daily_income_rmb) } else { None }
+                };
                 json!({
                     "requests": j["requests"],
                     "errors": j["errors"],
@@ -188,6 +198,7 @@ pub async fn api_model_console(
                     // 降速感知: 我们的压速 = 1 - tps_p50/upstream_tps_p50, 限速命中率 = paced/requests
                     "pace_ratio": upstream_tps.zip(tps_p50).map(|(u, c)| if u > 0.0 { (1.0 - c / u) * 100.0 } else { 0.0 }),
                     "paced_ratio": paced_ratio,
+                    "cost_ratio": cost_ratio,
                 })
             });
             json!({

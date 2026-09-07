@@ -503,6 +503,32 @@ pub async fn api_groups_delete_by_query(
 
 /// GET /admin/api/models/upstream — 用号池第一个可用号拉 Cursor 官方可用模型列表
 pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response {
+    match refresh_upstream_names(&state).await {
+        Ok((names, marked)) => {
+            let reg = registry();
+            let rows: Vec<Value> = names
+                .iter()
+                .map(|m| {
+                    json!({
+                        "model": m,
+                        "in_registry": reg.get_exact(m).is_some(),
+                        "upstream": true,
+                        "price": cards::model_price(m),
+                    })
+                })
+                .collect();
+            Json(json!({"account": "auto", "models": rows, "count": rows.len(), "marked": marked}))
+                .into_response()
+        }
+        Err((code, msg)) => (code, Json(json!({"error": msg}))).into_response(),
+    }
+}
+
+/// 拉取上游名单并写入 CardStore + 注册表置位. 面板按钮与定时任务 (#9) 共用.
+/// 返回 (名单, 置位条数) 或 (状态码, 错误信息).
+pub async fn refresh_upstream_names(
+    state: &Arc<AppState>,
+) -> Result<(Vec<String>, usize), (StatusCode, String)> {
     let acc = state
         .pool
         .accounts()
@@ -510,11 +536,7 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
         .find(|a| a.enabled)
         .or_else(|| state.pool.accounts().into_iter().next());
     let Some(acc) = acc else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "no accounts"})),
-        )
-            .into_response();
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "no accounts".into()));
     };
     match state
         .cursor
@@ -528,26 +550,9 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
             let (marked, _) = reg.mark_upstream(&names).unwrap_or((0, vec![]));
             // 名单交给 CardStore: /v1/models 与套餐可调清单的「上游确认」来源
             state.card_store.set_upstream_names(names.clone());
-            let rows: Vec<Value> = names
-                .iter()
-                .map(|m| {
-                    let manual = reg.get_exact(m).is_some();
-                    json!({
-                        "model": m,
-                        "in_registry": manual,
-                        "upstream": true,
-                        "price": cards::model_price(m),
-                    })
-                })
-                .collect();
-            Json(json!({"account": acc.id, "models": rows, "count": rows.len(), "marked": marked}))
-                .into_response()
+            Ok((names, marked))
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => Err((StatusCode::BAD_GATEWAY, e.to_string())),
     }
 }
 

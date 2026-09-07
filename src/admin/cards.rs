@@ -254,6 +254,64 @@ pub async fn api_risk_policy_get(State(state): State<Arc<AppState>>) -> impl Int
     Json(json!({ "policy": p, "defaults": RiskPolicy::default() }))
 }
 
+/// #5 手动清价格缓存: 下次 analytics_price_map 调用立即重算 (新模型定价后不用等 5 分钟).
+pub async fn api_price_map_refresh(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.invalidate_price_cache();
+    let n = state.analytics_price_map().map(|m| m.len()).unwrap_or(0);
+    Json(json!({ "ok": true, "models": n }))
+}
+
+/// #6 按模型降档: 往 RiskPolicy.model_rules 加/更新一条该模型前缀的 pace 规则.
+/// 只动 model_rules, 其余字段原样回写 (整表替换). 用户要求: 限速高价 30-40 / 便宜 60-80 tok/s.
+#[derive(Deserialize)]
+pub struct ModelPaceBody {
+    pub prefix: String,
+    pub pace_normal_tps: Option<u32>,
+    pub pace_soften_tps: Option<u32>,
+    pub pace_degraded_tps: Option<u32>,
+    #[serde(default)]
+    pub exempt: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+pub async fn api_model_pace_rule_set(
+    State(state): State<Arc<AppState>>,
+    Json(b): Json<ModelPaceBody>,
+) -> Response {
+    let prefix = b.prefix.trim().to_string();
+    if prefix.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "prefix required"}))).into_response();
+    }
+    let mut p = state.card_store.risk_policy();
+    let note = b.note.unwrap_or_else(|| "面板按模型降档".into());
+    // 已有同前缀规则 → 原地更新; 否则新增
+    if let Some(r) = p.model_rules.iter_mut().find(|r| r.prefix == prefix) {
+        r.exempt = b.exempt;
+        r.pace_normal_tps = b.pace_normal_tps;
+        r.pace_soften_tps = b.pace_soften_tps;
+        r.pace_degraded_tps = b.pace_degraded_tps;
+        r.note = note;
+    } else {
+        p.model_rules.push(crate::cards::ModelPaceRule {
+            prefix: prefix.clone(),
+            exempt: b.exempt,
+            pace_normal_tps: b.pace_normal_tps,
+            pace_soften_tps: b.pace_soften_tps,
+            pace_degraded_tps: b.pace_degraded_tps,
+            ttft_floor_ms: 0,
+            speed_ratio: None,
+            max_output_tokens: 0,
+            note,
+        });
+    }
+    if let Err(e) = validate_policy(&p) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    state.card_store.set_risk_policy(p);
+    state.audit.key_op("model_pace_rule_set", &prefix, json!({}));
+    Json(json!({ "ok": true, "prefix": prefix })).into_response()
+}
+
 fn validate_policy(p: &RiskPolicy) -> Result<(), String> {
     if !(0.0..=1.0).contains(&p.soften_ratio_of_threshold) {
         return Err("soften_ratio_of_threshold must be in [0,1]".into());

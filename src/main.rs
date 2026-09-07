@@ -136,6 +136,13 @@ impl AppState {
         }
         Some(map)
     }
+
+    /// 手动清价格缓存 (面板「刷新价格缓存」按钮用; 下次 analytics_price_map 调用立即重算)
+    pub fn invalidate_price_cache(&self) {
+        if let Ok(mut guard) = self.price_cache.write() {
+            *guard = None;
+        }
+    }
 }
 
 /// 按出口代理缓存 CursorClient. 直连共用一个, 每个 proxy_id 一个.
@@ -417,6 +424,36 @@ async fn main() -> anyhow::Result<()> {
                         info!(event = "proxy_probe", count = n, "egress proxies probed");
                     }
                 }
+                // #9 上游名单自动刷新: 每小时拉一次 (失败静默), 防名单滞后导致红标误伤
+                {
+                    static LAST_UPSTREAM_REFRESH: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let last = LAST_UPSTREAM_REFRESH.load(std::sync::atomic::Ordering::Relaxed);
+                    if now - last > 3600 {
+                        LAST_UPSTREAM_REFRESH.store(now, std::sync::atomic::Ordering::Relaxed);
+                        let st = state.clone();
+                        tokio::spawn(async move {
+                            match admin::refresh_upstream_names(&st).await {
+                                Ok((names, marked)) => info!(
+                                    event = "upstream_auto_refresh",
+                                    count = names.len(),
+                                    marked,
+                                    "upstream model list refreshed"
+                                ),
+                                Err((code, msg)) => tracing::warn!(
+                                    event = "upstream_auto_refresh_fail",
+                                    status = code.as_u16(),
+                                    error = %msg,
+                                    "upstream refresh failed (silent)"
+                                ),
+                            }
+                        });
+                    }
+                }
                 let cooling = state.pool.cooling_accounts();
                 let quota_exhausted = state.pool.quota_exhausted_accounts();
 
@@ -616,6 +653,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/api/models/console",
             get(admin::api_model_console),
+        )
+        .route(
+            "/admin/api/models/pace-rule",
+            post(admin::api_model_pace_rule_set),
+        )
+        .route(
+            "/admin/api/analytics/refresh-price-map",
+            post(admin::api_price_map_refresh),
         )
         .route(
             "/admin/api/models/import-builtin",

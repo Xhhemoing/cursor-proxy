@@ -793,6 +793,7 @@
             </details>
             <div class="panel fill">
               <div class="ph"><h3>模型组 <span class="muted" id="mg-count"></span></h3></div>
+              <p class="muted" style="font-size:11px;margin:0 0 6px">禁用 = 该组不参与鉴权 (引用它的 key/套餐相当于「该组不存在」, 仍 403 但非「拒绝所有」); 删除需先解除引用.</p>
               <div class="table-scroll">
                 <table>
                   <thead><tr><th>id</th><th>名称</th><th>成员规则</th><th>命中已知模型</th><th>被引用</th><th></th></tr></thead>
@@ -814,6 +815,7 @@
               <button type="button" data-mc-window="7d">7d</button>
               <button type="button" data-mc-window="30d">30d</button>
             </span>
+            <button type="button" class="ghost" id="mc-refresh-prices" title="清价格缓存, 新定价立即在同族建议档生效">刷新价格缓存</button>
             <button type="button" class="ghost" id="mc-refresh">刷新</button>
           </div>
         </div>
@@ -2232,13 +2234,21 @@
             await loadModelsPage();
           });
         } else {
-          const delLabel = m.source === 'manual' ? '删' : '隐藏';
-          const delTip = m.source === 'manual'
-            ? ('删除手动条目 ' + m.model + '？将回落到内置价格')
-            : ('隐藏 ' + m.model + '？从列表与 /v1/models 消失，计价不受影响，可恢复');
+          // #7 删除语义统一为「下架」: 禁用 + 隐藏 (保留条目, 不出现在任何列表), 手动条目且无账本引用时可「真删」
+          const isManual = m.source === 'manual';
+          const hasRefs = (m.requests_30d || 0) > 0;
+          const delLabel = isManual && !hasRefs ? '真删' : '下架';
+          const delTip = isManual && !hasRefs
+            ? ('真删手动条目 ' + m.model + '？无账本引用, 彻底删除 (回落内置价)')
+            : ('下架 ' + m.model + '？禁用 + 隐藏, 从列表与 /v1/models 消失, 计价/账本不受影响, 可恢复');
           act.appendChild(el('button', { class: 'danger', type: 'button' }, delLabel)).addEventListener('click', async () => {
             if (!confirm(delTip)) return;
-            await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
+            if (isManual && !hasRefs) {
+              await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
+            } else {
+              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: false }) });
+              await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
+            }
             await loadModelsPage();
           });
         }
@@ -3569,13 +3579,31 @@
         const laneTxt = laneH >= 1 ? laneH.toFixed(1) + 'h' : '<span class="muted" title="数据不足 1h, $/lane·h 不显示">' + laneH.toFixed(2) + 'h</span>';
         const usdTxt = usdLaneH != null ? '$' + Number(usdLaneH).toFixed(1) + '/h' : '<span class="muted">数据不足</span>';
         const statePill = r.hidden ? '<span class="pill bad">已隐藏</span>' : (r.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>');
+        // #3 成本占比: 成本/面值 (面值=官方口径成本, 恒 100%) —— 占位, 真「成本/收入」需套餐收入归集 (门户)
+        const costRatio = cons.cost_ratio;
+        const costRatioTxt = costRatio == null ? '<span class="muted">—</span>' :
+          '<span class="' + (costRatio > 0.8 ? 'bad' : costRatio > 0.6 ? 'warn' : 'ok') + '">' + (costRatio * 100).toFixed(0) + '%</span>';
         const cheap = r.cheapest_variant;
         const cheapTip = cheap ? '<div class="muted" style="font-size:10px" title="同族 $/lane·h 最低变体">建议 ' + esc(cheap.variant) + ' $' + Number(cheap.usd_per_lane_hour).toFixed(1) + '</div>' : '';
+        // #10 7 天趋势 sparkline: 复用 consumption 的 hourly 数据 (后端补 trend_7d 字段前先占位)
+        const trend = r.trend_7d || [];
+        const trendSvg = trend.length >= 2 ? (() => {
+          const max = Math.max(...trend, 0.01);
+          const pts = trend.map((v, i) => (i * 40 / (trend.length - 1)).toFixed(1) + ',' + (20 - v / max * 18).toFixed(1)).join(' ');
+          return '<svg width="40" height="20" style="vertical-align:middle"><polyline points="' + pts + '" fill="none" stroke="var(--ink)" stroke-width="1" opacity="0.6"/></svg>';
+        })() : '<span class="muted" style="font-size:10px">—</span>';
+        // #12 智能建议: 低价 + 低限速 + 低错误率 = 推荐 (综合评分)
+        const errRate = cons.requests > 0 ? (cons.errors || 0) / cons.requests : 0;
+        const pacePenalty = paceR != null ? paceR / 100 : 0;
+        const priceScore = p.output_per_m ? (1 / Math.max(0.1, p.output_per_m)) * 10 : 0; // 输出价越低分越高
+        const smartScore = (priceScore * (1 - pacePenalty) * (1 - errRate)).toFixed(1);
+        const smartTip = '<div class="muted" style="font-size:10px" title="综合评分: 输出价倒数 × (1-降速) × (1-错误率)">评分 ' + smartScore + '</div>';
         tr.innerHTML =
           '<td class="mono">' + esc(r.key) + ghost + priceableTip + (r.variants > 1 ? ' <span class="muted" style="font-size:10px">' + r.variants + '变体</span>' : '') + cheapTip + '</td>' +
           '<td class="mono" style="font-size:10px">' + (r.variant_names || []).slice(0, 3).map(esc).join('<br>') + (r.variants > 3 ? '<br><span class="muted">+' + (r.variants - 3) + '</span>' : '') + '</td>' +
           '<td class="mono">$' + Number(p.input_per_m || 0).toFixed(2) + ' / $' + Number(p.output_per_m || 0).toFixed(2) + '</td>' +
           '<td>' + srcPill + '</td>' +
+          '<td class="mono">' + costRatioTxt + '</td>' +
           '<td class="mono">' + (face > 0 ? '$' + face.toFixed(2) : '<span class="muted">—</span>') + '</td>' +
           '<td class="mono">' + laneTxt + '</td>' +
           '<td class="mono">' + usdTxt + '</td>' +
@@ -3599,6 +3627,20 @@
           await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: r.key, enabled: !r.enabled }) });
           await loadModelConsole();
         });
+        // #6 按模型降档: 写 RiskPolicy.model_rules (只动该前缀, 其余原样)
+        act.appendChild(el('button', { class: 'ghost', type: 'button', title: '限速高价 30-40 / 便宜 60-80 tok/s; 免限=该模型不限速' }, '降档')).addEventListener('click', async () => {
+          const cur = r.risk_rule || {};
+          const curPace = cur.pace_normal_tps || '';
+          const input = prompt('模型 ' + r.key + ' 限速 (tok/s)\n留空=沿用, 0=免限, 建议: 高价模型 30-40 / 便宜 60-80\n当前: ' + (cur.exempt ? '免限' : (curPace || '沿用')), cur.exempt ? '0' : curPace);
+          if (input === null) return;
+          const v = input.trim();
+          const body = { prefix: r.key };
+          if (v === '0') body.exempt = true;
+          else if (v !== '') { body.pace_normal_tps = parseInt(v, 10) || 0; body.pace_soften_tps = Math.max(1, Math.floor((parseInt(v, 10) || 0) * 0.6)); body.pace_degraded_tps = Math.max(1, Math.floor((parseInt(v, 10) || 0) * 0.3)); }
+          await api('/admin/api/models/pace-rule', { method: 'POST', body: JSON.stringify(body) });
+          toast('mc-msg', '已写风控规则: ' + r.key, false);
+          await loadModelConsole();
+        });
         tb.appendChild(tr);
       });
     }
@@ -3608,6 +3650,14 @@
       loadModelConsole().catch((e) => toast('mc-msg', e.message, true));
     }));
     document.getElementById('mc-refresh').addEventListener('click', () => loadModelConsole().catch((e) => toast('mc-msg', e.message, true)));
+    // #5 手动清价格缓存: 新模型定价后立即在「同族建议档」生效
+    document.getElementById('mc-refresh-prices').addEventListener('click', async () => {
+      try {
+        const d = await api('/admin/api/analytics/refresh-price-map', { method: 'POST', body: '{}' });
+        toast('mc-msg', '价格缓存已清, ' + (d.models || 0) + ' 个模型重算', false);
+        loadModelConsole().catch(() => {});
+      } catch (e) { toast('mc-msg', e.message, true); }
+    });
 
     if (!location.hash) location.hash = '#overview';
     showPage(location.hash.slice(1));
