@@ -780,6 +780,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/portal/api/balance", get(admin::api_portal_balance))
         .route("/portal/api/plans", get(admin::api_portal_plans))
         .route("/portal/api/purchase", post(admin::api_portal_purchase))
+        .route("/portal/api/boost", post(admin::api_portal_boost))
         .route("/portal/api/cards", get(admin::api_portal_cards))
         .route("/portal/api/aff", get(admin::api_portal_aff))
         .route("/v1/models", get(models_handler))

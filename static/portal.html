@@ -122,14 +122,41 @@
       <div class="plan-grid" id="plans-grid">加载中…</div>
     </div>
 
+    <!-- 叠加选择弹窗 -->
+    <div id="stack-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
+      <div style="background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:480px;width:90%">
+        <h3 style="margin:0 0 12px">选择叠加方式</h3>
+        <div id="stack-info" class="muted" style="font-size:13px;margin-bottom:16px"></div>
+        <div id="stack-grid" style="display:grid;gap:8px;margin-bottom:16px"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="ghost" id="stack-cancel">取消</button>
+          <button id="stack-confirm">确认购买</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 我的套餐 -->
     <div class="page" id="page-cards">
       <h2 style="margin:0 0 14px">我的套餐</h2>
       <div class="card">
         <table>
-          <thead><tr><th>套餐</th><th>Key</th><th>状态</th><th>剩余时间</th><th>已用额度</th><th>实付</th></tr></thead>
+          <thead><tr><th>套餐</th><th>Key</th><th>状态</th><th>剩余时间</th><th>已用额度</th><th>实付</th><th></th></tr></thead>
           <tbody id="cards-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- 临时叠加弹窗 -->
+    <div id="boost-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
+      <div style="background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:420px;width:90%">
+        <h3 style="margin:0 0 12px">临时加并发</h3>
+        <div id="boost-info" class="muted" style="font-size:13px;margin-bottom:16px"></div>
+        <label style="display:block;margin-bottom:12px">加几个槽 (1-4) <input id="boost-slots" type="number" min="1" max="4" value="1" style="width:60px"></label>
+        <div id="boost-price" style="font:600 18px var(--mono);color:var(--ok);margin-bottom:16px"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="ghost" id="boost-cancel">取消</button>
+          <button id="boost-confirm">确认支付</button>
+        </div>
       </div>
     </div>
 
@@ -300,10 +327,71 @@
   }
 
   async function purchase(p) {
-    if (!confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2))) return;
+    // 检查是否已持有同套餐 (叠加场景)
     try {
-      const d = await api('/portal/api/purchase', { method: 'POST', body: JSON.stringify({ plan_id: p.id }) });
-      toast('购买成功! Key: ' + d.card_key.slice(0, 20) + '…');
+      const d = await api('/portal/api/cards');
+      const existing = (d.cards || []).find((c) => c.plan_id === p.id && c.enabled && !c.expired);
+      if (existing) {
+        // 弹叠加选择: 时间叠加 vs 槽位叠加
+        showStackModal(p, existing);
+        return;
+      }
+    } catch (e) { /* 忽略, 继续正常购买 */ }
+    // 正常购买
+    if (!confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2))) return;
+    doPurchase(p.id, null);
+  }
+
+  function showStackModal(plan, existing) {
+    const modal = $('stack-modal');
+    const info = $('stack-info');
+    const grid = $('stack-grid');
+    const hours = plan.duration_hours || 24;
+    const remaining = existing.remaining_secs || 0;
+    const remHours = Math.floor(remaining / 3600);
+    info.textContent = `你已持有「${plan.name}」(剩 ${remHours}h)。选择叠加方式:`;
+    grid.innerHTML = '';
+    // 时间叠加
+    const opt1 = document.createElement('div');
+    opt1.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:12px;cursor:pointer';
+    opt1.innerHTML = `<b>时间叠加</b><div class="muted" style="font-size:12px;margin-top:4px">延长现有卡 +${hours}h<br>新到期: ${remHours + hours}h</div>`;
+    opt1.onclick = () => selectStack('time_multiply');
+    // 槽位叠加
+    const opt2 = document.createElement('div');
+    opt2.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:12px;cursor:pointer';
+    opt2.innerHTML = `<b>槽位叠加</b><div class="muted" style="font-size:12px;margin-top:4px">新卡独立计时 ${hours}h<br>并发 +1 (同时可用 2 个槽)</div>`;
+    opt2.onclick = () => selectStack('slot_multiply');
+    grid.appendChild(opt1);
+    grid.appendChild(opt2);
+    let selected = null;
+    function selectStack(mode) {
+      selected = mode;
+      [opt1, opt2].forEach((el, i) => {
+        const isSel = (i === 0 && mode === 'time_multiply') || (i === 1 && mode === 'slot_multiply');
+        el.style.borderColor = isSel ? 'var(--info)' : 'var(--line)';
+        el.style.background = isSel ? 'color-mix(in srgb, var(--info) 8%, transparent)' : 'transparent';
+      });
+    }
+    selectStack('time_multiply'); // 默认时间叠加
+    $('stack-confirm').onclick = () => {
+      if (!selected) return;
+      modal.style.display = 'none';
+      doPurchase(plan.id, selected);
+    };
+    $('stack-cancel').onclick = () => { modal.style.display = 'none'; };
+    modal.style.display = 'flex';
+  }
+
+  async function doPurchase(planId, stackMode) {
+    try {
+      const body = { plan_id: planId };
+      if (stackMode) body.stack_mode = stackMode;
+      const d = await api('/portal/api/purchase', { method: 'POST', body: JSON.stringify(body) });
+      if (d.extended) {
+        toast('已延长现有卡至 ' + fmtTime(d.new_expires_at));
+      } else {
+        toast('购买成功! Key: ' + d.card_key.slice(0, 20) + '…');
+      }
       const bal = await api('/portal/api/balance');
       $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
     } catch (e) { toast(e.message, true); }
@@ -321,7 +409,8 @@
         '<td>' + (c.expired ? '<span class="pill bad">已过期</span>' : c.enabled ? '<span class="pill ok">使用中</span>' : '<span class="pill warn">未启用</span>') + '</td>' +
         '<td>' + fmtDur(c.remaining_secs) + '</td>' +
         '<td class="mono">$' + Number(c.face_used_usd || 0).toFixed(2) + (c.face_usd > 0 ? ' / $' + c.face_usd : '') + '</td>' +
-        '<td class="mono">¥' + Number(c.paid_rmb || 0).toFixed(2) + '</td></tr>'
+        '<td class="mono">¥' + Number(c.paid_rmb || 0).toFixed(2) + '</td>' +
+        '<td>' + (c.enabled && !c.expired ? '<button class="ghost" style="padding:2px 8px;font-size:11px" onclick="showBoost(\'' + esc(c.card_key) + '\',' + c.remaining_secs + ',' + c.paid_rmb + ',' + (c.plan_hours || 24) + ')">加并发</button>' : '') + '</td></tr>'
       ).join('');
     } catch (e) { tb.innerHTML = '<tr><td colspan="6" class="muted">' + esc(e.message) + '</td></tr>'; }
   }
@@ -350,6 +439,39 @@
   }
 
   function esc(s) { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+
+  // ── 临时加并发 ──
+  window.showBoost = function(cardKey, remainingSecs, paidRmb, planHours) {
+    const modal = $('boost-modal');
+    const info = $('boost-info');
+    const priceEl = $('boost-price');
+    const slotsEl = $('boost-slots');
+    const remHours = Math.floor(remainingSecs / 3600);
+    info.textContent = '卡 ' + cardKey.slice(0, 20) + '… (剩 ' + remHours + 'h)';
+    function calcPrice() {
+      const slots = parseInt(slotsEl.value) || 1;
+      // 按剩余时间折算: 价格 = 原价 × (剩余小时 / 套餐总小时) × 槽数
+      const ratio = remainingSecs / (planHours * 3600);
+      const price = paidRmb * ratio * slots;
+      priceEl.textContent = '¥' + price.toFixed(2) + ' (' + slots + ' 槽 × ' + Math.round(ratio * 100) + '% 剩余时间)';
+      return price;
+    }
+    slotsEl.oninput = calcPrice;
+    calcPrice();
+    $('boost-confirm').onclick = async () => {
+      const slots = parseInt(slotsEl.value) || 1;
+      const price = calcPrice();
+      if (!confirm('加 ' + slots + ' 个并发槽? 从余额扣 ¥' + price.toFixed(2))) return;
+      try {
+        const d = await api('/portal/api/boost', { method: 'POST', body: JSON.stringify({ card_key: cardKey, slots: slots }) });
+        toast('已加 ' + slots + ' 并发, 新余额 ¥' + d.balance_rmb.toFixed(2));
+        modal.style.display = 'none';
+        loadCards();
+      } catch (e) { toast(e.message, true); }
+    };
+    $('boost-cancel').onclick = () => { modal.style.display = 'none'; };
+    modal.style.display = 'flex';
+  };
 
   // ── 启动: 已有 token 直接进 ──
   if (token) {

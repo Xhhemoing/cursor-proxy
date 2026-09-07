@@ -85,10 +85,14 @@
     .page { display: none; }
     .page.active { display: block; overflow: auto; flex: 1; min-height: 0; }
     .page.active.page-fill { display: flex; flex-direction: column; overflow: hidden; }
-    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; flex: 0 0 auto; }
-    .page-head h2 { margin: 0; font: 600 16px/1.2 var(--sans); letter-spacing: -.01em; }
+    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; flex: 0 0 auto; min-height: 0; }
+    .page-head h2 { margin: 0; font: 600 14px/1.1 var(--sans); letter-spacing: -.01em; }
     .page-head p { display: none; }
     .page-head .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+    /* 紧凑模式: 设置页等非滚动页顶部压缩 */
+    .page.compact-head .page-head { margin-bottom: 2px; }
+    .page.compact-head .page-head h2 { font-size: 13px; }
 
     /* ---------- 统计卡 ---------- */
     .stats { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
@@ -740,7 +744,7 @@
       <!-- ================= 设置 ================= -->
       <section class="page" id="page-settings">
         <div class="page-head">
-          <div><h2>运行参数</h2><p>默认模型热更新；超时与并发写盘后需重启进程</p></div>
+          <div><h2>运行参数</h2></div>
         </div>
         <div class="grid-2">
           <div class="panel">

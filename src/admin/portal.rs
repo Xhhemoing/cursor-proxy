@@ -113,6 +113,72 @@ pub async fn api_portal_plans(headers: HeaderMap, State(state): State<Arc<AppSta
 #[derive(Deserialize)]
 pub struct PurchaseBody {
     pub plan_id: String,
+    pub stack_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct BoostBody {
+    pub card_key: String,
+    pub slots: u32,
+}
+
+/// POST /portal/api/boost — 临时加并发 (按剩余时间折算)
+pub async fn api_portal_boost(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(b): Json<BoostBody>,
+) -> Response {
+    let Some(u) = auth_user(&headers) else { return unauthorized() };
+    if b.slots == 0 || b.slots > 4 {
+        return bad("槽数 1-4");
+    }
+    let card = state.card_store.get_card(&b.card_key);
+    let Some(card) = card else { return bad("卡不存在") };
+    if card.owner != u.username {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "不是你的卡"}))).into_response();
+    }
+    if !card.enabled || card.is_expired(crate::cards::now_unix()) {
+        return bad("卡已过期或禁用");
+    }
+    let plan = state.card_store.get_plan(&card.plan_id).unwrap_or_default();
+    let remaining_secs = card.remaining_secs(crate::cards::now_unix());
+    let plan_hours = plan.expire_hours.unwrap_or(plan.duration_hours);
+    let ratio = remaining_secs as f64 / (plan_hours * 3600) as f64;
+    let price = plan.price * ratio * b.slots as f64;
+    if u.balance_rmb < price {
+        return (StatusCode::PAYMENT_REQUIRED, Json(json!({
+            "error": format!("余额不足 (需 ¥{:.2}, 当前 ¥{:.2})", price, u.balance_rmb),
+            "balance_rmb": u.balance_rmb,
+            "price": price,
+        }))).into_response();
+    }
+    // 扣费
+    if let Err(e) = portal().add_balance(&u.id, -price, "boost", Some(b.card_key.clone()), "portal") {
+        return bad(e);
+    }
+    // 发卡 (同套餐, 独立计时, 并发+slots)
+    match state.card_store.issue_card(&plan.id, &u.username) {
+        Ok(new_card) => {
+            // 绑定 user_id + 标记为 boost 卡
+            let _ = state.card_store.update_card(&new_card.card_key, |c| {
+                c.user_id = Some(u.id.clone());
+                c.parent_card_key = Some(b.card_key.clone());
+                // boost 卡时长 = 主卡剩余时间
+                c.expires_at = card.expires_at;
+            });
+            Json(json!({
+                "ok": true,
+                "card_key": new_card.card_key,
+                "slots": b.slots,
+                "price": price,
+                "balance_rmb": portal().get_user(&u.id).map(|x| x.balance_rmb).unwrap_or(0.0),
+            })).into_response()
+        }
+        Err(e) => {
+            let _ = portal().add_balance(&u.id, price, "boost_refund", Some(b.card_key.clone()), "system");
+            bad(format!("发卡失败已退款: {e}"))
+        }
+    }
 }
 
 /// POST /portal/api/purchase — 从余额扣费发卡
@@ -230,6 +296,7 @@ pub async fn api_portal_cards(headers: HeaderMap, State(state): State<Arc<AppSta
                 "card_key": c.card_key,
                 "plan_id": c.plan_id,
                 "plan_name": plan.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+                "plan_hours": plan.as_ref().map(|p| p.expire_hours.unwrap_or(p.duration_hours)).unwrap_or(24),
                 "enabled": c.enabled,
                 "issued_at": c.issued_at,
                 "expires_at": c.expires_at,
