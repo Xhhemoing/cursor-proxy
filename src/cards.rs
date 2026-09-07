@@ -38,12 +38,20 @@ pub fn day_start(now: u64, tz_offset_minutes: i32) -> u64 {
 /// - `*-fast` 变体 = 基础价 × 2 (opus-5-thinking-xhigh-fast 实测恰好 2.00×)
 /// - kimi-k3 官方 $3/$15/$0.3, 不是 Python pricing.json 的 $20/$100 (高估 6 倍)
 /// 匹配: 精确 > 最长前缀 > 兜底; `-fast` 后缀单独乘 2.
+///
+/// 2026-09-06 二次校准 (6 号 × 周期内 GetAggregatedUsageEvents, 按号最小二乘, 误差 ≤1.5%):
+/// - `claude-fable-5-1-*` cache_read 是 **$0.25/M** 不是 $1 (fable-5 非 5-1 仍 $1); 之前高估 fable-5-1 面值 30%
+/// - `gpt-5.6-sol-max` cache_read $0.75 / cache_write $2.5 (sol 基础 0.4/5 对不上 max, 差 20%)
+/// - `gpt-5.5-*` = $5/$30/$0.5 (原走 gpt-5 的 2.5/15 低估一半)
+/// - fable-5 / opus-5 / kimi-k3 / grok-4.6 / gemini-3.8 全部命中 1.00
 static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
     ("gpt-5.4-pro", (30.00, 180.00, 3.00, 0.00)),
     ("gpt-5.6-cyber", (12.50, 75.00, 1.25, 15.62)),
+    ("claude-fable-5-1", (10.00, 50.00, 0.25, 12.50)),
     ("claude-fable-5", (10.00, 50.00, 1.00, 12.50)),
     ("claude-opus-5", (5.00, 25.00, 0.50, 6.25)),
     ("claude-opus-4", (5.00, 25.00, 0.50, 6.25)),
+    ("gpt-5.6-sol-max", (4.00, 20.00, 0.75, 2.50)),
     ("gpt-5.6-sol", (4.00, 20.00, 0.40, 5.00)),
     ("gpt-5.6", (4.00, 20.00, 0.40, 5.00)),
     ("gpt-5.6-terra", (2.00, 12.00, 0.20, 2.50)),
@@ -52,6 +60,7 @@ static PREMIUM_PRICES: &[(&str, (f64, f64, f64, f64))] = &[
     ("claude-sonnet-5", (2.00, 10.00, 0.20, 2.50)),
     ("kimi-k3", (3.00, 15.00, 0.30, 0.00)),
     ("kimi-k2", (0.95, 4.00, 0.19, 0.00)),
+    ("gpt-5.5", (5.00, 30.00, 0.50, 0.00)),
     ("gpt-5.4", (2.50, 15.00, 0.25, 0.00)),
     ("gpt-5", (2.50, 15.00, 0.25, 0.00)),
     ("claude-4.5-haiku", (1.00, 5.00, 0.10, 1.25)),
@@ -1993,6 +2002,9 @@ impl TokenPacer {
             "\"reasoning_content\":\"",
             "\"reasoning\":\"",
             "\"partial_json\":\"",
+            // OpenAI 风格工具调用参数增量 (Cursor / Claude Code 写文件时输出几乎全在这里;
+            // 漏掉它 → agent 流量 70–90% 的输出绕过 pacer, 实测 fable 可见比 27%, grok 7%)
+            "\"arguments\":\"",
         ] {
             let mut rest = sse_frame;
             while let Some(i) = rest.find(key) {
@@ -2577,11 +2589,21 @@ mod tests {
         );
         // cursor- 前缀 grok
         assert_eq!(model_price("cursor-grok-4.6-high"), (2.0, 6.0, 0.5, 0.0));
-        // fable thinking 走 claude-fable-5 价
+        // fable-5-1 thinking: cache_read $0.25 (2026-09-06 官方对账), fable-5 仍 $1
         assert_eq!(
             model_price("claude-fable-5-1-thinking-high"),
-            (10.0, 50.0, 1.0, 12.5)
+            (10.0, 50.0, 0.25, 12.5)
         );
+        assert_eq!(model_price("claude-fable-5-max"), (10.0, 50.0, 1.0, 12.5));
+        assert_eq!(model_price("gpt-5.6-sol-max"), (4.0, 20.0, 0.75, 2.5));
+        assert_eq!(model_price("gpt-5.6-sol-xhigh"), (4.0, 20.0, 0.4, 5.0));
+        assert_eq!(model_price("gpt-5.5-extra-high"), (5.0, 30.0, 0.5, 0.0));
+        // 官方 acc-2 fable-5-1-thinking-high: in 558 out 319515 cr 56.54M cw 4.81M → $90.19
+        let c = estimate_quota_cost_full("claude-fable-5-1-thinking-high", 558, 319_515, 56_539_514, 4_806_291);
+        assert!((c - 90.19).abs() < 1.0, "got {}", c);
+        // 官方 acc sol-max: in 1167 out 593321 cr 64.38M cw 2.22M → $66.06
+        let c = estimate_quota_cost_full("gpt-5.6-sol-max", 1_167, 593_321, 64_377_579, 2_215_190);
+        assert!((c - 66.06).abs() < 1.0, "got {}", c);
         // 与官方账单核对: acc-3 kimi-k3-high in=13.71M out=1.46M cr=179.12M → $116.8
         let c = estimate_quota_cost_full("kimi-k3-high", 13_710_000, 1_460_000, 179_120_000, 0);
         assert!((c - 116.8).abs() < 1.5, "got {}", c);
@@ -2858,6 +2880,11 @@ mod tests {
         );
         assert!((ascii - 3.0).abs() < 0.01, "{ascii}");
         assert!((cjk - 13.0).abs() < 0.01, "{cjk}");
+        // 工具调用参数增量也计入 (agent 写文件的主要输出通道)
+        let args = TokenPacer::estimate_tokens(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.rs\","}}]}}]}"#,
+        );
+        assert!(args > 3.0, "{args}");
         assert_eq!(
             TokenPacer::estimate_tokens(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#),
             0.0

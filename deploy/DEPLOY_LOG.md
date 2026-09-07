@@ -102,3 +102,13 @@ sticky+quota fix: agent hops same account acc1, cache_read 17073 on hop2, quota_
 - 利润报表 (/admin/api/cards/profit, 面板「套餐卡→利润」+ 概览「套餐卡利润」) 逐条重算面值时没按 input_incl_cache 扣缓存
   → day50 成本显示 ¥302 (消耗分析同数据 ¥72), 毛利 -1%. 现与 analytics::normalize_input 同口径
 - md5 da45efffdce38f93f4147d4dbbeaf5ad; 167 tests
+
+## 2026-09-07 02:30 UTC — 本机 8800 价格表二次校准 + pacer 补 tool_calls.arguments
+- scripts/reconcile-official.py: 拉 6 号 GetAggregatedUsageEvents(startDate=周期起点) 逐模型对账 (官方 cents vs token×表价).
+  按号最小二乘反推: claude-fable-5-1-* cache_read $0.25 (原 $1, 高估 fable-5-1 面值 30%); gpt-5.6-sol-max cr 0.75/cw 2.5 (原低估 20%);
+  gpt-5.5 $5/$30/$0.5 (原走 gpt-5 低估一半). 其余 (fable-5, opus-5, kimi-k3, grok-4.6, gemini-3.8) ratio 1.00.
+  修后: 6 号合计 8800+8791 两账本 = 官方 84% (差额 = 客户端直连 grok-bot-*/未经代理的 fable-5-thinking/opus-fast).
+  md5 75b14d1360292d0e660827b9ad073be4 (prices2)
+- TokenPacer::estimate_tokens 补 `"arguments":"` (OpenAI 工具调用参数增量). 之前 agent 写文件的输出全绕过限速:
+  实测 fable-max 可见比 27%, grok-4.6 7% → pace 40 形同虚设. md5 4c5464174e4562ff8baff0567f050c5f (pace-args); 167 tests
+- 待观察: 换后 out_visible_est/output_tokens 应升到 ≥60% (fable) / ≥90% (grok); pace_wait_ms 显著增大
