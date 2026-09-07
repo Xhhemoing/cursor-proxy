@@ -26,6 +26,7 @@ pub struct ModelEntry {
     pub enabled: bool,
     /// 面板「删除」非手动条目时的软删除标记: 从模型列表隐藏 (内置/seen 行).
     /// 只影响展示, 不影响计价/路由 —— 隐藏后请求该模型仍按内置价计费.
+    /// 任何写路径 (bulk/upsert/import) 必须继承旧值, 否则隐藏态会被批量归零复活 (2026-09-07 埂雷).
     #[serde(default)]
     pub hidden: bool,
     /// 该模型经上游 AvailableModels 确认存在 (面板「获取可用模型」标记).
@@ -602,6 +603,24 @@ impl ModelRegistry {
 /// 网关侧别名 (上游无同名, 但客户端/路由依赖): 幽灵判定与红标时永久豁免.
 pub const GATEWAY_ALIASES: &[&str] = &["kimi-k3"];
 
+/// 模型总控的「定价行」行键: 思考档折叠到家族基名, `-fast` 价格 ×2 折叠后保留独立行
+/// (claude-opus-5-high-fast → claude-opus-5-fast).
+/// ⚠ 定价行 ≠ 客户菜单行: visible_models 把 gpt-5.4-low-fast 原名逐列, 而这里折成 gpt-5.4-fast
+/// (fast 各档同价 ×2, 定价台一行即可). 漂移不隐藏 —— 行内须附 variants/client_ids 暴露.
+/// 注意 strip_variant_suffix 把 -fast 排在后缀表第一位, 必须先自己剥 -fast 再对 base 调 family_base.
+pub fn console_key(model: &str) -> std::borrow::Cow<'_, str> {
+    match model.strip_suffix("-fast") {
+        Some(base) if ModelRegistry::family_base(base) != base => {
+            std::borrow::Cow::Owned(format!("{}-fast", ModelRegistry::family_base(base)))
+        }
+        Some(_) => {
+            // base 已是家族基名 (如 gemini-3-flash): 原样返回
+            std::borrow::Cow::Borrowed(model)
+        }
+        None => std::borrow::Cow::Borrowed(ModelRegistry::family_base(model)),
+    }
+}
+
 /// 拒绝原因 (供 main.rs 组装 403 文案)
 pub fn deny_reason(allowed_groups: &[String], model: &str) -> String {
     format!(
@@ -973,5 +992,20 @@ mod tests {
         assert!(!candidate_models(&[])
             .iter()
             .any(|(m, _)| m == "gpt-5.6-cyber" || m == "gpt-5.4-pro"));
+    }
+
+    #[test]
+    fn console_key_folds_thinking_keeps_fast() {
+        use crate::models::console_key;
+        assert_eq!(console_key("gpt-5.4-high").as_ref(), "gpt-5.4");
+        assert_eq!(console_key("gpt-5.4-high-fast").as_ref(), "gpt-5.4-fast");
+        assert_eq!(console_key("gpt-5.4-fast").as_ref(), "gpt-5.4-fast");
+        assert_eq!(
+            console_key("claude-opus-5-thinking-max-fast").as_ref(),
+            "claude-opus-5-fast"
+        );
+        assert_eq!(console_key("gemini-3-flash").as_ref(), "gemini-3-flash"); // -flash 非变体
+        assert_eq!(console_key("gpt-5.4-mini-high").as_ref(), "gpt-5.4-mini"); // mini 独立族
+        assert_eq!(console_key("kimi-k3").as_ref(), "kimi-k3");
     }
 }
