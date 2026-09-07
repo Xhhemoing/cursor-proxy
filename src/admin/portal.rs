@@ -128,12 +128,63 @@ pub async fn api_portal_purchase(
     if !plan.enabled {
         return bad("套餐已下架");
     }
+
+    // P1: 子套餐检查 (需已持有主套餐)
+    if !plan.sub_plan_ids.is_empty() {
+        // 这是子套餐, 检查是否已开通主套餐
+        let has_parent = state.card_store.list_cards().iter().any(|c| {
+            c.owner == u.username
+                && c.enabled
+                && !c.is_expired(crate::cards::now_unix())
+                && state
+                    .card_store
+                    .get_plan(&c.plan_id)
+                    .map(|p| p.sub_plan_ids.contains(&plan.id))
+                    .unwrap_or(false)
+        });
+        if !has_parent {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "子套餐需先开通主套餐"}))).into_response();
+        }
+    }
+
     // 组白名单检查
     if let Some(w) = portal().visible_plan_ids(&u) {
         if !w.is_empty() && !w.contains(&plan.id) {
             return (StatusCode::FORBIDDEN, Json(json!({"error": "该套餐未对你所在的用户组开放"}))).into_response();
         }
     }
+
+    // P1: 叠加检查 (同套餐已持有, 按 stack_mode 处理)
+    let existing = state.card_store.list_cards().into_iter().find(|c| {
+        c.owner == u.username
+            && c.plan_id == plan.id
+            && c.enabled
+            && !c.is_expired(crate::cards::now_unix())
+    });
+    if let Some(existing_card) = existing {
+        match plan.stack_mode {
+            crate::cards::StackMode::TimeMultiply => {
+                // 时间叠加: 延长现有卡
+                let hours = plan.expire_hours.unwrap_or(plan.duration_hours);
+                let new_expires = existing_card.expires_at + hours * 3600;
+                if let Err(e) = state.card_store.update_card(&existing_card.card_key, |c| {
+                    c.expires_at = new_expires;
+                }) {
+                    return bad(e);
+                }
+                // 扣费
+                if let Err(e) = portal().add_balance(&u.id, -plan.price, "purchase_extend", Some(plan.id.clone()), "portal") {
+                    return bad(e);
+                }
+                return Json(json!({"ok": true, "card_key": existing_card.card_key, "extended": true, "new_expires_at": new_expires})).into_response();
+            }
+            crate::cards::StackMode::SlotMultiply => {
+                // 槽位叠加: 发新卡 (并发+1)
+                // 继续走正常发卡流程
+            }
+        }
+    }
+
     if u.balance_rmb < plan.price {
         return (StatusCode::PAYMENT_REQUIRED, Json(json!({
             "error": format!("余额不足 (需 ¥{:.2}, 当前 ¥{:.2})", plan.price, u.balance_rmb),
@@ -148,7 +199,12 @@ pub async fn api_portal_purchase(
     // 发卡 (复用现有 issue_card)
     match state.card_store.issue_card(&plan.id, &u.username) {
         Ok(card) => {
-            // 绑定 user_id (Card 扩展字段, P1 落)
+            // P1: 绑定 user_id
+            if let Err(e) = state.card_store.update_card(&card.card_key, |c| {
+                c.user_id = Some(u.id.clone());
+            }) {
+                tracing::warn!(error = %e, "bind user_id failed (non-fatal)");
+            }
             Json(json!({"ok": true, "card_key": card.card_key, "plan": plan.name})).into_response()
         }
         Err(e) => {

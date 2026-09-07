@@ -336,6 +336,53 @@ pub struct CardPlan {
     /// 是否启用
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    // ── P1 扩展字段 (2026-09-07 门户重构) ──
+    /// 额度 ($). 0 = 无限 (但仍限时)
+    #[serde(default)]
+    pub quota_usd: f64,
+    /// 过期时间 (小时). 0 或 None = 不过期
+    #[serde(default)]
+    pub expire_hours: Option<u64>,
+    /// 计时起点: purchase_time (购买即计时) | first_call (首次调用计时)
+    #[serde(default)]
+    pub billing_mode: BillingMode,
+    /// 额外时间额度限制: 每 N 小时限 M $
+    #[serde(default)]
+    pub extra_limits: Vec<TimeQuotaLimit>,
+    /// 子套餐 id 列表 (开通主套餐后才可选加购)
+    #[serde(default)]
+    pub sub_plan_ids: Vec<String>,
+    /// 多买同套餐时的叠加方式
+    #[serde(default)]
+    pub stack_mode: StackMode,
+    /// 仅对这些用户组开放 (空 = 全部)
+    #[serde(default)]
+    pub allowed_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingMode {
+    #[default]
+    PurchaseTime,
+    FirstCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum StackMode {
+    /// 时间叠加: 2 张 7 天卡 = 14 天 1 槽
+    #[default]
+    TimeMultiply,
+    /// 槽位叠加: 2 张 7 天卡 = 7 天 2 槽
+    SlotMultiply,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimeQuotaLimit {
+    pub hours: u64,
+    pub quota_usd: f64,
 }
 
 fn default_degraded_concurrency() -> u32 {
@@ -383,6 +430,13 @@ impl Default for CardPlan {
             model_groups: vec![],
             note: String::new(),
             enabled: true,
+            quota_usd: 0.0,
+            expire_hours: None,
+            billing_mode: BillingMode::default(),
+            extra_limits: vec![],
+            sub_plan_ids: vec![],
+            stack_mode: StackMode::default(),
+            allowed_group_ids: vec![],
         }
     }
 }
@@ -453,6 +507,17 @@ pub struct Card {
     /// 申诉 (客户经 /v1/appeal 提交, 面板审批). 批准后 trust_until 之前行为评分不生效
     #[serde(default)]
     pub appeal: Appeal,
+
+    // ── P1 扩展字段 (门户) ──
+    /// 所属门户用户 id (None = 旧卡/未绑定)
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// 首次调用时间 (billing_mode=first_call 时记)
+    #[serde(default)]
+    pub first_call_at: Option<u64>,
+    /// 主套餐卡 key (子套餐卡指向主卡)
+    #[serde(default)]
+    pub parent_card_key: Option<String>,
 }
 
 /// 申诉记录. 一张卡同时只有一条; 再提交覆盖 (pending 期间不能重复提)
@@ -1386,6 +1451,9 @@ impl CardStore {
             paid_rmb: paid_rmb.unwrap_or(plan.price),
             face_used_micro: 0,
             appeal: Appeal::default(),
+            user_id: None,
+            first_call_at: None,
+            parent_card_key: None,
         };
         self.cards.insert(card.card_key.clone(), card.clone());
         self.save();
@@ -1402,6 +1470,16 @@ impl CardStore {
             self.save();
         }
         ok
+    }
+
+    /// 更新卡字段 (P1: 门户绑定 user_id / 延长 expires_at)
+    pub fn update_card(&self, key: &str, f: impl FnOnce(&mut Card)) -> Result<Card, String> {
+        let mut c = self.cards.get_mut(key).ok_or("card not found")?;
+        f(&mut c);
+        let out = c.clone();
+        drop(c);
+        self.save();
+        Ok(out)
     }
     pub fn delete_card(&self, key: &str) -> bool {
         let ok = self.cards.remove(key).is_some();
@@ -1754,6 +1832,36 @@ impl CardStore {
         if !plan.enabled {
             return Err((403, "plan disabled".into()));
         }
+
+        // P1: billing_mode=first_call 时, 首次调用记 first_call_at 并重算 expires_at
+        if plan.billing_mode == BillingMode::FirstCall && card.first_call_at.is_none() {
+            let mut c = self.cards.get_mut(key).ok_or((500, "card lost".to_string()))?;
+            c.first_call_at = Some(now);
+            let hours = plan.expire_hours.unwrap_or(plan.duration_hours);
+            c.expires_at = now + hours * 3600;
+            drop(c);
+            self.save();
+        }
+
+        // P1: extra_limits 检查 (每 N 小时限 M $)
+        if !plan.extra_limits.is_empty() {
+            let rt = self.runtime(key);
+            for limit in &plan.extra_limits {
+                // 简化: 用当前日消耗近似 (billing.db 窗口查询 P2 再做)
+                let used_micro = rt.day_quota_micro.load(Ordering::Relaxed);
+                let used_usd = used_micro as f64 / 1e6;
+                if used_usd >= limit.quota_usd {
+                    return Err((
+                        429,
+                        format!(
+                            "extra limit: ${:.2} per {}h exceeded (today used ${:.2})",
+                            limit.quota_usd, limit.hours, used_usd
+                        ),
+                    ));
+                }
+            }
+        }
+
         let rt = self.runtime(key);
         // 定额卡: 余额 (扣除在途预扣) 用尽 → 402. 这是 B1 的核心: 并发 N 个请求同时到达时,
         // 每个都能看到前面请求的预扣, 不会集体通过「余额 > 0」检查后透支.

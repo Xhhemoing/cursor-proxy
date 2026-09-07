@@ -145,6 +145,15 @@ pub struct PlanBody {
     pub model_groups: Option<Vec<String>>,
     pub note: Option<String>,
     pub enabled: Option<bool>,
+
+    // P1: 门户扩展字段
+    pub quota_usd: Option<f64>,
+    pub expire_hours: Option<u64>,
+    pub billing_mode: Option<crate::cards::BillingMode>,
+    pub extra_limits: Option<Vec<crate::cards::TimeQuotaLimit>>,
+    pub sub_plan_ids: Option<Vec<String>>,
+    pub stack_mode: Option<crate::cards::StackMode>,
+    pub allowed_group_ids: Option<Vec<String>>,
 }
 
 pub async fn api_card_plan_upsert(
@@ -185,8 +194,18 @@ pub async fn api_card_plan_upsert(
         model_prefixes,
         model_groups,
         note,
-        enabled
+        enabled,
+        quota_usd,
+        billing_mode,
+        extra_limits,
+        sub_plan_ids,
+        stack_mode,
+        allowed_group_ids
     );
+    // expire_hours 是 Option<u64>, 单独处理 (0 = None)
+    if let Some(h) = body.expire_hours {
+        plan.expire_hours = if h == 0 { None } else { Some(h) };
+    }
     if plan.kind == PlanKind::Quota && plan.face_usd <= 0.0 {
         return (
             StatusCode::BAD_REQUEST,

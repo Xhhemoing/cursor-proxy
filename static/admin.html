@@ -1029,6 +1029,20 @@
                     <label class="span-2">备注 <input id="cp-note"></label>
                   </div>
                 </details>
+
+                <!-- P1: 门户扩展字段 -->
+                <details id="cp-portal" style="margin-top:8px">
+                  <summary style="cursor:pointer;color:var(--info);font-size:12px">门户扩展（用户组/子套餐/叠加）</summary>
+                  <div class="form-grid" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+                    <label>额度 $ <input id="cp-quota" type="number" step="1" min="0" placeholder="0=无限"></label>
+                    <label>过期 h <input id="cp-expire" type="number" min="0" placeholder="0=不过期"></label>
+                    <label>计时起点 <select id="cp-billing-mode"><option value="purchase_time">购买即计时</option><option value="first_call">首次调用</option></select></label>
+                    <label>叠加方式 <select id="cp-stack-mode"><option value="time_multiply">时间叠加</option><option value="slot_multiply">槽位叠加</option></select></label>
+                    <label class="span-2">子套餐 id <input id="cp-sub-plans" placeholder="逗号分隔, 开通主套餐后可选"></label>
+                    <label class="span-2">仅对用户组开放 <input id="cp-allowed-groups" placeholder="逗号分隔, 空=全部"></label>
+                    <label class="span-2">额外限制 <input id="cp-extra-limits" placeholder="如 5h:100, 每5小时限$100"></label>
+                  </div>
+                </details>
                 <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
                   <button type="button" class="ghost" id="cp-reset">清空</button>
                   <button type="button" id="cp-save">保存套餐</button>
@@ -2072,6 +2086,21 @@
       body.model_groups = pickedGroups(document.getElementById('cp-groups'));
       body.note = g('cp-note');
       body.enabled = document.getElementById('cp-enabled').checked;
+      // P1: 门户扩展字段
+      if (num('cp-quota') != null) body.quota_usd = num('cp-quota');
+      if (num('cp-expire') != null) body.expire_hours = num('cp-expire') || null;
+      body.billing_mode = g('cp-billing-mode');
+      body.stack_mode = g('cp-stack-mode');
+      body.sub_plan_ids = g('cp-sub-plans') ? g('cp-sub-plans').split(',').map((s) => s.trim()).filter(Boolean) : [];
+      body.allowed_group_ids = g('cp-allowed-groups') ? g('cp-allowed-groups').split(',').map((s) => s.trim()).filter(Boolean) : [];
+      // extra_limits: "5h:100" → [{hours:5, quota_usd:100}]
+      const el = g('cp-extra-limits');
+      if (el) {
+        body.extra_limits = el.split(',').map((s) => {
+          const m = s.trim().match(/^(\d+)h:(\d+(?:\.\d+)?)$/);
+          return m ? { hours: Number(m[1]), quota_usd: Number(m[2]) } : null;
+        }).filter(Boolean);
+      }
       if (isNew && (body.name == null || body.price == null)) return cdMsg('新建套餐需要 名称 + 售价', true);
       if (body.kind === 'quota' && isNew && !body.face_usd) return cdMsg('定额卡需要面值 $', true);
       try {
