@@ -956,4 +956,22 @@ mod tests {
         assert_eq!(r2.groups().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn upstream_present_rules_and_guards() {
+        let up: Vec<String> = ["gpt-5.4-high", "gpt-5.4-low-fast", "claude-opus-5-low"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(ModelRegistry::upstream_present("gpt-5.4", &up)); // 有变体 → 基名存在
+        assert!(ModelRegistry::upstream_present("gpt-5.4-xhigh", &up)); // 剥后缀收敛
+        assert!(!ModelRegistry::upstream_present("gpt-5.4-pro", &up)); // -pro 非变体后缀 → 幽灵
+        assert!(!ModelRegistry::upstream_present("gpt-5.6-cyber", &up));
+        assert!(ModelRegistry::upstream_present("kimi-k3", &up)); // 网关别名豁免
+        assert!(ModelRegistry::upstream_present("anything", &[])); // 空表护栏
+                                                                   // 影子价幽灵不进候选全集 (不会被「模型」页/导入内置复活)
+        assert!(!candidate_models(&[])
+            .iter()
+            .any(|(m, _)| m == "gpt-5.6-cyber" || m == "gpt-5.4-pro"));
+    }
 }

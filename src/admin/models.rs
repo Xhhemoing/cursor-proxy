@@ -209,6 +209,12 @@ pub async fn api_models_bulk(
         .into_iter()
         .map(|mut e| {
             e.model = e.model.trim().to_string();
+            // 埂雷: ModelEntry 是裸 bool + serde default, 前端不回传 hidden/upstream 就归零
+            // → 隐藏行会被整表替换批量复活. 写入前继承旧值 (payload 显式给了 true 也保留).
+            if let Some(prev) = registry().get_exact(&e.model) {
+                e.hidden = e.hidden || prev.hidden;
+                e.upstream = e.upstream || prev.upstream;
+            }
             e
         })
         .collect();
@@ -242,6 +248,7 @@ pub async fn api_models_import_builtin(
         if !overwrite && reg.get_exact(&m).is_some() {
             continue;
         }
+        let cur = reg.get_exact(&m);
         let e = ModelEntry {
             model: m,
             input_per_m: i,
@@ -249,8 +256,8 @@ pub async fn api_models_import_builtin(
             cache_read_per_m: c,
             cache_write_per_m: w,
             enabled: true,
-            hidden: false,
-            upstream: false,
+            hidden: cur.as_ref().map(|p| p.hidden).unwrap_or(false),
+            upstream: cur.as_ref().map(|p| p.upstream).unwrap_or(false),
             note: "builtin".into(),
         };
         if reg.upsert_model(e).is_ok() {
