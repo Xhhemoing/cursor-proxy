@@ -228,6 +228,58 @@ fn content_to_text(content: &Value) -> String {
     }
 }
 
+/// 视觉: 消息 content 的结构化 parts (文本 + 图像).
+/// 命中任一图像块 → Some((文本, 图)), 全文本 → None (调用方继续走旧的 text 路径, 行为不变).
+/// OpenAI `image_url` 只接受 data: URI; http(s) 外链上游无抓取通道, 跳过并保文本.
+/// 无 data: 前缀的裸 base64 按 image/png 兜底. Responses `input_image` 同构.
+fn content_parts(content: &Value) -> Option<(String, Vec<Value>)> {
+    let arr = content.as_array()?;
+    let mut texts: Vec<String> = Vec::new();
+    let mut images: Vec<Value> = Vec::new();
+    for p in arr {
+        let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "text" | "input_text" | "output_text" => {
+                if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                    texts.push(t.to_string());
+                }
+            }
+            "image_url" | "input_image" => {
+                let url = p
+                    .get("image_url")
+                    .and_then(|iu| {
+                        iu.get("url")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| iu.as_str())
+                    })
+                    .or_else(|| p.get("url").and_then(|v| v.as_str()))
+                    .or_else(|| p.get("image").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let (mime, data) = match url.strip_prefix("data:") {
+                    Some(rest) => {
+                        let (meta, data) = rest.split_once(',').unwrap_or(("image/png;base64", rest));
+                        let mime = meta.split(';').next().unwrap_or("image/png");
+                        (mime.to_string(), data.to_string())
+                    }
+                    None => ("image/png".to_string(), url.to_string()),
+                };
+                if data.is_empty() {
+                    continue;
+                }
+                images.push(json!({
+                    "image": {"data": data, "mimeType": mime},
+                }));
+            }
+            _ => {}
+        }
+    }
+    if images.is_empty() {
+        None
+    } else {
+        Some((texts.join("\n"), images))
+    }
+}
+
 /// OpenAI Chat 消息 → Cursor `aiserver.v1.InferenceMessage[]`
 ///
 /// 线格式与 Python 参考实现 `responses_input_to_cursor` **逐字段对齐**:
@@ -290,7 +342,12 @@ pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
         }
         flush_results(&mut out, &mut pending_results);
 
-        let text = content_to_text(m.get("content").unwrap_or(&Value::Null));
+        let content_val = m.get("content").unwrap_or(&Value::Null);
+        let parts = content_parts(content_val);
+        let text = match &parts {
+            Some((t, _)) => t.clone(),
+            None => content_to_text(content_val),
+        };
         match role {
             "assistant" => {
                 let mut msg = json!({"role": ROLE_ASSISTANT});
@@ -339,7 +396,17 @@ pub fn openai_messages_to_cursor(messages: &[Value]) -> Vec<Value> {
                 out.push(msg);
             }
             "system" | "developer" => out.push(json!({"role": ROLE_SYSTEM, "text": text})),
-            _ => out.push(json!({"role": ROLE_USER, "text": text})),
+            _ => match &parts {
+                Some((t, imgs)) => {
+                    let mut ps: Vec<Value> = Vec::new();
+                    if !t.is_empty() {
+                        ps.push(json!({"text": {"text": t}}));
+                    }
+                    ps.extend(imgs.iter().cloned());
+                    out.push(json!({"role": ROLE_USER, "parts": {"parts": ps}}));
+                }
+                None => out.push(json!({"role": ROLE_USER, "text": text})),
+            },
         }
     }
     flush_results(&mut out, &mut pending_results);
@@ -797,7 +864,13 @@ fn responses_input_to_messages(input: &Value) -> Vec<Value> {
                     "message" => {
                         let role = it.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                         let content = it.get("content").unwrap_or(&Value::Null);
-                        messages.push(json!({"role": role, "content": content_to_text(content)}));
+                        // 视觉: 含图像块时保留结构化 content, 让下游 content_parts 转成图像 parts;
+                        // 纯文本仍压平成字符串 (原行为).
+                        if content_parts(content).is_some() {
+                            messages.push(json!({"role": role, "content": content}));
+                        } else {
+                            messages.push(json!({"role": role, "content": content_to_text(content)}));
+                        }
                     }
                     "function_call" => {
                         let id = it
@@ -879,6 +952,18 @@ pub fn responses_to_openai_chat(body: &Value) -> Result<Value, String> {
     // P2: 保留原始 body 的 include 字段 (reasoning.encrypted_content 等), 供翻译层判定
     if let Some(inc) = body.get("include") {
         out["include"] = inc.clone();
+    }
+    // cursor-byok 思考强度路由: reasoning.effort (Responses 规范) → reasoning_effort (顶层),
+    // 供 inference_handler 的 resolve_smart_model 按显式档位选变体. 原生 Responses 上游不感知该字段, 无副作用.
+    if let Some(effort) = body
+        .get("reasoning")
+        .and_then(|r| r.get("effort"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        out["reasoning_effort"] = json!(effort);
+    } else if let Some(effort) = body.get("reasoning_effort").and_then(|v| v.as_str()) {
+        out["reasoning_effort"] = json!(effort);
     }
     if let Some(mt) = body
         .get("max_output_tokens")
@@ -1325,6 +1410,50 @@ mod tests {
         assert_eq!(last["toolContent"]["parts"][0]["result"], "fn main(){}");
     }
 
+    /// 视觉: chat 请求的 image_url(data: URI) 转成上游 InferenceImagePart parts.
+    #[test]
+    fn vision_chat_image_url_to_cursor_parts() {
+        let msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what color?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANS"}}
+            ]
+        })];
+        let out = openai_messages_to_cursor(&msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "INFERENCE_MESSAGE_ROLE_USER");
+        let parts = &out[0]["parts"]["parts"];
+        assert_eq!(parts[0]["text"]["text"], "what color?");
+        assert_eq!(parts[1]["image"]["data"], "iVBORw0KGgoAAAANS");
+        assert_eq!(parts[1]["image"]["mimeType"], "image/png");
+        // 纯文本消息仍走旧 text 路径, 无 parts 字段 (行为不变)
+        let plain = openai_messages_to_cursor(&[json!({"role":"user","content":"hi"})]);
+        assert_eq!(plain[0]["text"], "hi");
+        assert!(plain[0].get("parts").is_none());
+    }
+
+    /// 视觉: responses 请求的 input_image 经 input→messages→cursor 全程保留图像.
+    #[test]
+    fn vision_responses_input_image_survives() {
+        let body = json!({
+            "model": "grok-4.6",
+            "input": [{
+                "type": "message", "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe"},
+                    {"type": "input_image", "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSk"}}
+                ]
+            }]
+        });
+        let chat = responses_to_openai_chat(&body).unwrap();
+        let out = openai_messages_to_cursor(chat["messages"].as_array().unwrap());
+        let parts = &out[0]["parts"]["parts"];
+        assert_eq!(parts[0]["text"]["text"], "describe");
+        assert_eq!(parts[1]["image"]["data"], "/9j/4AAQSk");
+        assert_eq!(parts[1]["image"]["mimeType"], "image/jpeg");
+    }
+
     /// 线格式回归: 与 Python 参考实现 `chat_messages_to_cursor` 的输出逐字段一致.
     /// 2026-09-03 之前用的自造 parts.functionCall/functionResult 形状被 Cursor 静默丢弃,
     /// 模型看不到任何工具历史 → Hermes 反复重跑同一工具直到迭代上限.
@@ -1530,6 +1659,41 @@ mod tests {
         assert_eq!(cfg["topP"], 0.8);
         assert_eq!(cfg["maxTokens"], 4096);
         assert_eq!(cfg["parallelToolCalls"], false);
+    }
+
+    /// cursor-byok 形态: Responses `reasoning.effort` 必须提升为顶层 reasoning_effort,
+    /// 否则 resolve_smart_model 拿不到显式思考档, byok 面板选的强度静默失效.
+    #[test]
+    fn responses_reasoning_effort_maps_to_top_level() {
+        let body = json!({
+            "model": "claude-opus-5",
+            "instructions": "sys",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "reasoning": {"effort": "high", "summary": "auto"},
+        });
+        let chat = responses_to_openai_chat(&body).unwrap();
+        assert_eq!(chat["reasoning_effort"], "high");
+        // 顶层 reasoning_effort 直通 (Codex/其他客户端)
+        let body2 = json!({
+            "model": "claude-opus-5",
+            "input": "hi",
+            "reasoning_effort": "low",
+        });
+        let chat2 = responses_to_openai_chat(&body2).unwrap();
+        assert_eq!(chat2["reasoning_effort"], "low");
+        // reasoning.effort 优先于顶层
+        let body3 = json!({
+            "model": "claude-opus-5",
+            "input": "hi",
+            "reasoning": {"effort": "max"},
+            "reasoning_effort": "low",
+        });
+        let chat3 = responses_to_openai_chat(&body3).unwrap();
+        assert_eq!(chat3["reasoning_effort"], "max");
+        // 无 reasoning → 字段不存在
+        let body4 = json!({"model": "m", "input": "hi"});
+        let chat4 = responses_to_openai_chat(&body4).unwrap();
+        assert!(chat4.get("reasoning_effort").is_none());
     }
 
     #[test]
