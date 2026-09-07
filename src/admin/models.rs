@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cards;
-use crate::models::{registry, ModelEntry, ModelGroup};
+use crate::models::{registry, ModelEntry, ModelGroup, GATEWAY_ALIASES};
 use crate::AppState;
 
 fn bad(msg: impl Into<String>) -> Response {
@@ -64,10 +64,15 @@ pub(crate) fn seen_models(state: &AppState) -> Vec<(String, u64)> {
     out
 }
 
-fn row(model: &str, source: &str, seen: u64) -> Value {
+fn row(model: &str, source: &str, seen: u64, upstream: &[String]) -> Value {
     let reg = registry();
     let manual = reg.get_exact(model);
     let (i, o, c, w) = cards::model_price(model);
+    // 上游不存在标记: 名单已加载 (非空护栏) ∧ 三段判定缺席 ∧ 非网关别名.
+    // 上游名单是缓存、会滞后 —— 仅作面板红标, 不影响可见性/计价/路由.
+    let upstream_missing = !upstream.is_empty()
+        && !crate::models::ModelRegistry::upstream_present(model, upstream)
+        && !GATEWAY_ALIASES.contains(&model);
     json!({
         "model": model,
         "source": source, // manual | builtin | seen
@@ -78,6 +83,7 @@ fn row(model: &str, source: &str, seen: u64) -> Value {
         "enabled": manual.as_ref().map(|e| e.enabled).unwrap_or(true),
         "hidden": manual.as_ref().map(|e| e.hidden).unwrap_or(false),
         "upstream": manual.as_ref().map(|e| e.upstream).unwrap_or(false),
+        "upstream_missing": upstream_missing,
         "note": manual.as_ref().map(|e| e.note.clone()).unwrap_or_default(),
         "groups": reg.groups_of(model),
         "requests_30d": seen,
@@ -102,6 +108,7 @@ pub async fn api_models_list(State(state): State<Arc<AppState>>) -> impl IntoRes
             names.push((m.clone(), "seen"));
         }
     }
+    let upstream = state.card_store.upstream_names();
     let rows: Vec<Value> = names
         .iter()
         .map(|(m, src)| {
@@ -110,7 +117,7 @@ pub async fn api_models_list(State(state): State<Arc<AppState>>) -> impl IntoRes
                 .find(|(x, _)| x == m)
                 .map(|(_, c)| *c)
                 .unwrap_or(0);
-            row(m, src, n)
+            row(m, src, n, &upstream)
         })
         .collect();
     Json(json!({
@@ -175,7 +182,8 @@ pub async fn api_models_upsert(
             .into_response();
     }
     state.audit.key_op("model_upsert", &model, json!({}));
-    Json(row(&model, "manual", 0)).into_response()
+    let upstream = state.card_store.upstream_names();
+    Json(row(&model, "manual", 0, &upstream)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -329,7 +337,7 @@ pub async fn api_models_resolve(Query(q): Query<ResolveQuery>) -> impl IntoRespo
     Json(json!({
         "model": m,
         "resolved_from": hit.as_ref().map(|e| e.model.clone()),
-        "price": row(m, if hit.is_some() { "manual" } else { "builtin" }, 0),
+        "price": row(m, if hit.is_some() { "manual" } else { "builtin" }, 0, &[]),
         "disabled": reg.is_disabled(m),
     }))
 }
