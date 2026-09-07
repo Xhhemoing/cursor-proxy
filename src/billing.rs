@@ -175,6 +175,10 @@ pub struct BillingRecord {
     pub out_visible_est: u64,
     pub client_ip: String,
     pub tags: Vec<String>,
+    /// 失败请求的上游错误原文 (含 translate::extract_cursor_error_message 的 code/retryable 尾巴).
+    /// 成功 = None. 有了这列, 面板「请求日志」/ proxy.log / 账本才能回答「这条 503 到底为什么」,
+    /// 不用再去翻 journald (实测 --user journal 是黑洞).
+    pub error_msg: Option<String>,
 }
 
 impl BillingRecord {
@@ -211,6 +215,7 @@ impl BillingRecord {
             "ok": self.status == 200,
             "stream": self.stream,
             "client_ip": self.client_ip,
+            "error": self.error_msg,
         })
     }
 
@@ -240,6 +245,17 @@ impl BillingRecord {
     /// 补首字延迟 (build 之后链式调用)
     pub fn with_ttft(mut self, ttft_ms: Option<u64>) -> Self {
         self.ttft_ms = ttft_ms;
+        self
+    }
+    /// 补失败原因 (截 500 字, 防止超长上游 body 撑爆账本)
+    pub fn with_error(mut self, msg: impl Into<String>) -> Self {
+        let m: String = msg.into();
+        let m = m.trim();
+        self.error_msg = if m.is_empty() {
+            None
+        } else {
+            Some(m.chars().take(500).collect())
+        };
         self
     }
     /// 补限速信息 + 可见输出估算
@@ -293,6 +309,7 @@ impl BillingRecord {
             out_visible_est: 0,
             client_ip: client_ip.to_string(),
             tags: ctx.tags.clone(),
+            error_msg: None,
         }
     }
 }
@@ -492,6 +509,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("pace_tps", "ALTER TABLE billing_records ADD COLUMN pace_tps INTEGER NOT NULL DEFAULT 0"),
         ("pace_wait_ms", "ALTER TABLE billing_records ADD COLUMN pace_wait_ms INTEGER NOT NULL DEFAULT 0"),
         ("out_visible_est", "ALTER TABLE billing_records ADD COLUMN out_visible_est INTEGER NOT NULL DEFAULT 0"),
+        // 失败原因原文 (2026-09-07): 成功行 NULL
+        ("error_msg", "ALTER TABLE billing_records ADD COLUMN error_msg TEXT"),
     ] {
         if !cols.iter().any(|c| c == name) {
             conn.execute_batch(ddl)?;
@@ -589,8 +608,8 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 model, account, input_tokens, output_tokens, input_price_micro, output_price_micro,
                 priced, cost_nano, commission_nano, stream, status, latency_ms, client_ip, tags,
                 cache_read_tokens, cache_write_tokens, cache_read_price_micro, cache_write_price_micro,
-                input_incl_cache, ttft_ms, pace_tps, pace_wait_ms, out_visible_est
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26,?27,?28,?29)",
+                input_incl_cache, ttft_ms, pace_tps, pace_wait_ms, out_visible_est, error_msg
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,0,?26,?27,?28,?29,?30)",
         )?;
         let mut ins_tag = tx.prepare_cached(
             "INSERT OR IGNORE INTO billing_tags (record_id, tag) VALUES (?1, ?2)",
@@ -627,6 +646,7 @@ fn write_batch(conn: &mut Connection, batch: &[BillingRecord]) -> rusqlite::Resu
                 r.pace_tps as i64,
                 r.pace_wait_ms as i64,
                 r.out_visible_est as i64,
+                r.error_msg,
             ])?;
             if n == 0 {
                 dups += 1;
@@ -913,6 +933,43 @@ mod tests {
             )
             .with_ttft(Some(1000)),
         );
+        // 失败行: error_msg 落盘 + 面板日志 entry 带 error 字段; 成功行 NULL
+        let failed = BillingRecord::build(
+            &ctx,
+            "err-row",
+            "gemini-3.8-flash",
+            "acc",
+            Usage::default(),
+            true,
+            503,
+            36699,
+            "",
+        )
+        .with_error("upstream rejected: Provider Eror: trouble connecting [code=ERROR_PROVIDER_ERROR, retryable=true]");
+        assert_eq!(
+            failed.to_log_entry()["error"].as_str().unwrap(),
+            "upstream rejected: Provider Eror: trouble connecting [code=ERROR_PROVIDER_ERROR, retryable=true]"
+        );
+        ledger.record(failed);
+        assert!(ledger.flush(Duration::from_secs(5)));
+        let conn = ledger.reader().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT error_msg FROM billing_records WHERE req_id='err-row'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "upstream rejected: Provider Eror: trouble connecting [code=ERROR_PROVIDER_ERROR, retryable=true]"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT error_msg IS NULL FROM billing_records WHERE req_id='new-row'"
+            ),
+            1
+        );
+        drop(conn);
         assert!(ledger.flush(Duration::from_secs(5)));
         let conn = ledger.reader().unwrap();
         assert_eq!(

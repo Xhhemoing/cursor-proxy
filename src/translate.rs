@@ -241,27 +241,69 @@ pub fn extract_cursor_error_message(obj: &Value) -> Option<String> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("error"));
 
-    if let (Some(t), Some(d)) = (title, detail) {
-        return Some(format!("{t}: {d}"));
-    }
-    if let Some(t) = title {
-        return Some(t.to_string());
-    }
-    if let Some(d) = detail {
-        return Some(d.to_string());
-    }
-    if let Some(m) = msg {
-        return Some(m.to_string());
-    }
-    if let Some(c) = nested_err.filter(|s| !s.is_empty()) {
-        return Some(c.to_string());
-    }
+    // 主文案: title: detail > title > detail > message > nested code > code > errorCode
+    let primary = match (title, detail) {
+        (Some(t), Some(d)) => Some(format!("{t}: {d}")),
+        (Some(t), None) => Some(t.to_string()),
+        (None, Some(d)) => Some(d.to_string()),
+        (None, None) => msg
+            .map(|s| s.to_string())
+            .or_else(|| nested_err.filter(|s| !s.is_empty()).map(|s| s.to_string()))
+            .or_else(|| code.map(|s| s.to_string()))
+            .or_else(|| {
+                obj.get("errorCode")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
+    }?;
+    // 附加诊断: 上游错误码 / 可重试标记 / additional_info. 这些原本被丢掉, 客户端只看到
+    // "Provider Eror: We're having trouble connecting..." 这种 Cursor 原话, 无法区分是
+    // Cursor 连不上 Google (ERROR_PROVIDER_ERROR) 还是限流 (ERROR_RATE_LIMITED) 还是别的.
+    let suffix = cursor_error_diag_suffix(&err, nested_err, &primary);
+    Some(format!("{primary}{suffix}"))
+}
+
+/// 组装 ` [code=ERROR_X, retryable=true, k=v]` 形式的诊断尾巴; 没有任何附加信息则返回空串.
+/// 规则: 尾巴里的 code 只取一次 (优先 details[].debug.error 里的 ERROR_* 枚举名, 其次顶层 code),
+/// 且已经作为主文案输出的 code 不再重复.
+fn cursor_error_diag_suffix(err: &Value, nested_err: Option<&str>, primary: &str) -> String {
+    let details0 = err
+        .get("details")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first());
+    let mut parts: Vec<String> = Vec::new();
+    let code = nested_err
+        .filter(|s| !s.is_empty())
+        .or_else(|| err.get("code").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty() && *s != primary);
     if let Some(c) = code {
-        return Some(c.to_string());
+        parts.push(format!("code={c}"));
     }
-    obj.get("errorCode")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    if let Some(r) = details0
+        .and_then(|d| d.pointer("/debug/details/isRetryable"))
+        .and_then(|v| v.as_bool())
+    {
+        parts.push(format!("retryable={r}"));
+    }
+    if let Some(info) = details0
+        .and_then(|d| d.pointer("/debug/details/additionalInfo"))
+        .and_then(|v| v.as_object())
+    {
+        let mut keys: Vec<&String> = info.keys().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(v) = info.get(k).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    parts.push(format!("{k}={}", v.chars().take(80).collect::<String>()));
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", parts.join(", "))
+    }
 }
 
 pub fn is_max_mode_restricted(err: &str) -> bool {
@@ -1657,8 +1699,56 @@ mod tests {
         });
         let msg = extract_cursor_error_message(&frame).unwrap();
         assert!(msg.contains("Max mode is only available to paid users"));
+        assert!(
+            msg.contains("[code=ERROR_RATE_LIMITED_CHANGEABLE]"),
+            "{msg}"
+        );
         assert!(is_max_mode_restricted(&msg));
         assert!(!is_upstream_capacity_error(&msg));
+    }
+
+    /// Cursor 连不上模型厂商 (ERROR_PROVIDER_ERROR): 主文案保留原话, 尾巴带 code/retryable/additionalInfo,
+    /// 让客户端和账本能区分「Cursor→Google 断了」和「限流」「额度」等.
+    #[test]
+    fn provider_error_message_carries_code_and_retryable() {
+        let frame = json!({
+            "error": {
+                "code": "unavailable",
+                "message": "Error",
+                "details": [{
+                    "type": "aiserver.v1.ErrorDetails",
+                    "debug": {
+                        "error": "ERROR_PROVIDER_ERROR",
+                        "details": {
+                            "title": "Provider Eror",
+                            "detail": "We're having trouble connecting to the model provider. This might be temporary- please try again in a moment.",
+                            "isRetryable": true,
+                            "additionalInfo": {"provider": "google", "model": "gemini-3.8-flash"}
+                        }
+                    }
+                }]
+            }
+        });
+        let msg = extract_cursor_error_message(&frame).unwrap();
+        assert!(
+            msg.starts_with("Provider Eror: We're having trouble connecting"),
+            "{msg}"
+        );
+        assert!(
+            msg.ends_with("[code=ERROR_PROVIDER_ERROR, retryable=true, model=gemini-3.8-flash, provider=google]"),
+            "{msg}"
+        );
+        assert!(is_upstream_capacity_error(&msg));
+        // 无附加信息: 不长尾巴
+        let plain =
+            json!({"error": {"details": [{"debug": {"details": {"title": "T", "detail": "D"}}}]}});
+        assert_eq!(extract_cursor_error_message(&plain).unwrap(), "T: D");
+        // 只有 code 作主文案时不重复
+        let only_code = json!({"error": {"code": "resource_exhausted", "message": "Error"}});
+        assert_eq!(
+            extract_cursor_error_message(&only_code).unwrap(),
+            "resource_exhausted"
+        );
     }
 
     #[test]

@@ -48,6 +48,7 @@ use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 use crate::config::{ApiKeyRecord, AppConfig};
 use crate::cursor::CursorClient;
@@ -203,12 +204,50 @@ async fn main() -> anyhow::Result<()> {
         .expect("failed to install rustls crypto provider");
 
     // 初始化日志: 非阻塞 writer, 请求线程不再同步写 stdout (pipe 到 journald/docker 时会成为瓶颈)
+    //
+    // 双出口: stdout (journald/docker 原有路径) + 数据目录下 gateway.log (按天轮转, 保留 CFP_GATEWAY_LOG_KEEP 天, 默认 7).
+    // 背景 (2026-09-07): capacity_backoff / upstream_error 这些带上游错误原文的 warn/error 只写 stdout,
+    // 而 --user systemd 的 journalctl 实测 0 行 (用户不在 systemd-journal 组) → 唯一带原因的日志读不到.
+    // proxy.log 是请求账本镜像, 不含 tracing 事件, 所以要单独一个文件. CFP_GATEWAY_LOG=0 可关.
     let (nb_stdout, _log_guard) = tracing_appender::non_blocking(std::io::stdout());
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter("info")
-        .with_writer(nb_stdout)
-        .init();
+    let gateway_log_enabled = std::env::var("CFP_GATEWAY_LOG")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+    let file_appender = if gateway_log_enabled {
+        let keep = std::env::var("CFP_GATEWAY_LOG_KEEP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(7);
+        tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("gateway")
+            .filename_suffix("log")
+            .max_log_files(keep)
+            .build(".")
+            .ok()
+    } else {
+        None
+    };
+    let _file_guard = match file_appender {
+        Some(appender) => {
+            let (nb_file, guard) = tracing_appender::non_blocking(appender);
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter("info")
+                .with_writer(nb_stdout.and(nb_file))
+                .init();
+            Some(guard)
+        }
+        None => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter("info")
+                .with_writer(nb_stdout)
+                .init();
+            None
+        }
+    };
 
     // 加载配置
     let config = AppConfig::load()?;
@@ -1195,6 +1234,37 @@ async fn responses_handler(
     inference_handler(state, headers, addr, chat, Dialect::Responses).await
 }
 
+/// 失败响应里的结构化诊断 (`error.details`). 客户端/排查者拿到的不只是 Cursor 一句原话,
+/// 还能知道网关做了什么 (重试几次、等了多久、打的哪个号、哪个模型), 并能用 req_id 对上账本与 proxy.log.
+/// `upstream_code` 从 translate::extract_cursor_error_message 的 `[code=ERROR_X, ...]` 尾巴里抠出来.
+fn upstream_error_details(
+    last_error: &str,
+    attempts: usize,
+    elapsed_ms: u64,
+    account_id: &str,
+    model: &str,
+    req_id: &str,
+    upstream: &str,
+) -> serde_json::Value {
+    let upstream_code = last_error
+        .rsplit_once("[code=")
+        .and_then(|(_, tail)| tail.split([',', ']']).next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let retryable =
+        last_error.contains("retryable=true") || translate::is_upstream_capacity_error(last_error);
+    serde_json::json!({
+        "upstream": upstream,
+        "upstream_code": upstream_code,
+        "retryable": retryable,
+        "attempts": attempts,
+        "elapsed_ms": elapsed_ms,
+        "account": account_id,
+        "model": model,
+        "req_id": req_id,
+    })
+}
+
 /// 流中途上游错误时发给客户端的方言 error 帧 (含收尾).
 ///
 /// - Chat: `data: {"error":{...}}` + `data: [DONE]` — openai SDK 流式解析到 `error` 键会抛 APIError
@@ -1880,22 +1950,33 @@ async fn inference_handler_inner(
                         );
                     }
                     if attempt == MAX_RETRIES - 1 {
-                        state.ledger.record(billing::BillingRecord::build(
-                            &bctx,
-                            &request_id,
-                            &model,
-                            &account_id,
-                            translate::Usage::default(),
-                            stream,
-                            503,
+                        state.ledger.record(
+                            billing::BillingRecord::build(
+                                &bctx,
+                                &request_id,
+                                &model,
+                                &account_id,
+                                translate::Usage::default(),
+                                stream,
+                                503,
+                                start.elapsed().as_millis() as u64,
+                                &client_ip,
+                            )
+                            .with_error(&last_error),
+                        );
+                        // 客户端拿到的不再只是 Cursor 一句原话: 带重试次数/总耗时/命中账号/模型/req_id,
+                        // 排查时能直接对上账本与 proxy.log.
+                        let mut body = openai_error(&last_error, "upstream_overloaded", 503);
+                        body["error"]["details"] = upstream_error_details(
+                            &last_error,
+                            MAX_RETRIES,
                             start.elapsed().as_millis() as u64,
-                            &client_ip,
-                        ));
-                        return Err((
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            Json(openai_error(&last_error, "upstream_overloaded", 503)),
-                        )
-                            .into_response());
+                            &account_id,
+                            &model,
+                            &request_id,
+                            upstream_name,
+                        );
+                        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response());
                     }
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     skip_account_switch = true;
@@ -1946,29 +2027,38 @@ async fn inference_handler_inner(
                     "upstream stream failed"
                 );
                 if attempt == MAX_RETRIES - 1 {
-                    state.ledger.record(billing::BillingRecord::build(
-                        &bctx,
-                        &request_id,
-                        &model,
-                        &account_id,
-                        translate::Usage::default(),
-                        stream,
-                        502,
-                        start.elapsed().as_millis() as u64,
-                        &client_ip,
-                    ));
-                    return Err((
-                        StatusCode::BAD_GATEWAY,
-                        Json(openai_error(
-                            &format!(
-                                "upstream error after {} retries: {}",
-                                MAX_RETRIES, last_error
-                            ),
-                            "upstream_error",
+                    state.ledger.record(
+                        billing::BillingRecord::build(
+                            &bctx,
+                            &request_id,
+                            &model,
+                            &account_id,
+                            translate::Usage::default(),
+                            stream,
                             502,
-                        )),
-                    )
-                        .into_response());
+                            start.elapsed().as_millis() as u64,
+                            &client_ip,
+                        )
+                        .with_error(&last_error),
+                    );
+                    let mut body = openai_error(
+                        &format!(
+                            "upstream error after {} retries: {}",
+                            MAX_RETRIES, last_error
+                        ),
+                        "upstream_error",
+                        502,
+                    );
+                    body["error"]["details"] = upstream_error_details(
+                        &last_error,
+                        MAX_RETRIES,
+                        start.elapsed().as_millis() as u64,
+                        &account_id,
+                        &model,
+                        &request_id,
+                        upstream_name,
+                    );
+                    return Err((StatusCode::BAD_GATEWAY, Json(body)).into_response());
                 }
             }
         }
@@ -2074,17 +2164,20 @@ async fn inference_handler_inner(
                                     settle_usage_for_card(&usage, local_in_est, local_out_est);
                                 card_store_s.settle_permit(p, i, o, cr, cw);
                             }
-                            ledger.record(billing::BillingRecord::build(
-                                &bctx_s,
-                                &rid,
-                                &model_clone,
-                                &aid,
-                                usage,
-                                true,
-                                504,
-                                start.elapsed().as_millis() as u64,
-                                &client_ip,
-                            ));
+                            ledger.record(
+                                billing::BillingRecord::build(
+                                    &bctx_s,
+                                    &rid,
+                                    &model_clone,
+                                    &aid,
+                                    usage,
+                                    true,
+                                    504,
+                                    start.elapsed().as_millis() as u64,
+                                    &client_ip,
+                                )
+                                .with_error("stream idle timeout: no upstream frame within window"),
+                            );
                             return;
                         }
                         // SSE 注释帧: 规范要求所有客户端忽略, 各方言通用且不打乱协议时序
@@ -2307,17 +2400,23 @@ async fn inference_handler_inner(
                     timeout_s = upstream_timeout.as_secs(),
                     "non-stream upstream timeout"
                 );
-                state.ledger.record(billing::BillingRecord::build(
-                    &bctx,
-                    &request_id,
-                    &model,
-                    &account_id,
-                    translate::Usage::default(),
-                    false,
-                    504,
-                    start.elapsed().as_millis() as u64,
-                    &client_ip,
-                ));
+                state.ledger.record(
+                    billing::BillingRecord::build(
+                        &bctx,
+                        &request_id,
+                        &model,
+                        &account_id,
+                        translate::Usage::default(),
+                        false,
+                        504,
+                        start.elapsed().as_millis() as u64,
+                        &client_ip,
+                    )
+                    .with_error(format!(
+                        "non-stream upstream timeout after {}s",
+                        upstream_timeout.as_secs()
+                    )),
+                );
                 return Err((
                     StatusCode::GATEWAY_TIMEOUT,
                     Json(openai_error("upstream timeout", "upstream_timeout", 504)),
@@ -2399,17 +2498,20 @@ async fn inference_handler_inner(
                     );
                     state.pool.release(&account_id, true, 5);
                     state.metrics.observe_err();
-                    state.ledger.record(billing::BillingRecord::build(
-                        &bctx,
-                        &request_id,
-                        &model,
-                        &account_id,
-                        usage,
-                        false,
-                        502,
-                        start.elapsed().as_millis() as u64,
-                        &client_ip,
-                    ));
+                    state.ledger.record(
+                        billing::BillingRecord::build(
+                            &bctx,
+                            &request_id,
+                            &model,
+                            &account_id,
+                            usage,
+                            false,
+                            502,
+                            start.elapsed().as_millis() as u64,
+                            &client_ip,
+                        )
+                        .with_error("upstream returned empty content"),
+                    );
                     return Err((
                         StatusCode::BAD_GATEWAY,
                         Json(openai_error(
@@ -2478,17 +2580,20 @@ async fn inference_handler_inner(
                     error = %e,
                     "translate failed"
                 );
-                state.ledger.record(billing::BillingRecord::build(
-                    &bctx,
-                    &request_id,
-                    &model,
-                    &account_id,
-                    translate::Usage::default(),
-                    false,
-                    500,
-                    start.elapsed().as_millis() as u64,
-                    &client_ip,
-                ));
+                state.ledger.record(
+                    billing::BillingRecord::build(
+                        &bctx,
+                        &request_id,
+                        &model,
+                        &account_id,
+                        translate::Usage::default(),
+                        false,
+                        500,
+                        start.elapsed().as_millis() as u64,
+                        &client_ip,
+                    )
+                    .with_error(format!("translate failed: {e}")),
+                );
                 Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(openai_error(&e.to_string(), "internal_error", 500)),
@@ -2550,6 +2655,41 @@ mod card_settle_tests {
 #[cfg(test)]
 mod stream_error_frame_tests {
     use super::*;
+
+    #[test]
+    fn upstream_error_details_extracts_code_and_retryable() {
+        let d = upstream_error_details(
+            "upstream rejected: Provider Eror: We're having trouble connecting to the model provider. [code=ERROR_PROVIDER_ERROR, retryable=true, provider=google]",
+            3,
+            36699,
+            "user_01",
+            "gemini-3.8-flash",
+            "req-x",
+            "cursor",
+        );
+        assert_eq!(d["upstream_code"], "ERROR_PROVIDER_ERROR");
+        assert_eq!(d["retryable"], true);
+        assert_eq!(d["attempts"], 3);
+        assert_eq!(d["elapsed_ms"], 36699);
+        assert_eq!(d["account"], "user_01");
+        assert_eq!(d["model"], "gemini-3.8-flash");
+        assert_eq!(d["req_id"], "req-x");
+        assert_eq!(d["upstream"], "cursor");
+        // 没有 code 尾巴的老式错误: upstream_code=null, capacity 判定仍给 retryable
+        let d = upstream_error_details(
+            "upstream HTTP 502 Bad Gateway",
+            3,
+            1,
+            "a",
+            "m",
+            "r",
+            "cursor",
+        );
+        assert!(d["upstream_code"].is_null());
+        assert_eq!(d["retryable"], true);
+        let d = upstream_error_details("upstream decode: bad json", 3, 1, "a", "m", "r", "cursor");
+        assert_eq!(d["retryable"], false);
+    }
 
     #[test]
     fn chat_error_frame_is_sdk_visible_and_terminated() {
