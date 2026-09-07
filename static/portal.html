@@ -104,6 +104,11 @@
   <main>
     <!-- 首页 -->
     <div class="page active" id="page-dashboard">
+      <!-- 到期提醒横幅 -->
+      <div id="expiry-banner" style="display:none;background:linear-gradient(90deg,var(--warn) 0%,var(--bad) 100%);color:#fff;padding:10px 16px;border-radius:8px;margin-bottom:14px;font-size:13px">
+        <span id="expiry-text"></span>
+        <button class="ghost" style="background:rgba(255,255,255,0.2);border-color:transparent;color:#fff;padding:4px 12px;margin-left:12px;font-size:12px" onclick="location.hash='#plans'">立即续费</button>
+      </div>
       <div class="stat-row">
         <div class="stat"><div class="l">账户余额</div><div class="v" id="d-balance">¥0</div></div>
         <div class="stat"><div class="l">我的套餐</div><div class="v" id="d-cards">0</div></div>
@@ -291,11 +296,35 @@
       ]);
       $('d-balance').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
       $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
+
+      // P0: 余额预警 (<¥20 变红)
+      const balEl = $('d-balance');
+      if ((bal.balance_rmb || 0) < 20) {
+        balEl.style.color = 'var(--bad)';
+        balEl.parentElement.style.borderColor = 'var(--bad)';
+      } else {
+        balEl.style.color = 'var(--ok)';
+        balEl.parentElement.style.borderColor = 'var(--line)';
+      }
+
       const list = cards.cards || [];
       $('d-cards').textContent = list.length;
       const active = list.filter((c) => c.enabled && !c.expired);
       $('d-active').textContent = active.length;
       $('d-invited').textContent = aff.invited_count || 0;
+
+      // P0: 卡到期提醒 (24h 内到期)
+      const now = Math.floor(Date.now() / 1000);
+      const expiring = active.filter((c) => c.expires_at > 0 && (c.expires_at - now) < 86400);
+      if (expiring.length > 0) {
+        const nearest = expiring.sort((a, b) => a.expires_at - b.expires_at)[0];
+        const hours = Math.floor((nearest.expires_at - now) / 3600);
+        $('expiry-text').textContent = `您的「${nearest.plan_name || nearest.plan_id}」将于 ${hours} 小时后到期`;
+        $('expiry-banner').style.display = 'block';
+      } else {
+        $('expiry-banner').style.display = 'none';
+      }
+
       $('d-cards-list').innerHTML = active.length
         ? active.map((c) => '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>' + esc(c.plan_name || c.plan_id) + '</b> · <span class="mono" style="font-size:12px">' + esc(c.card_key.slice(0, 16)) + '…</span> · 剩 ' + fmtDur(c.remaining_secs) + '</div>').join('')
         : '<span class="muted">暂无有效套餐, 去「购买套餐」开通</span>';
@@ -405,7 +434,7 @@
       if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">暂无套餐</td></tr>'; return; }
       tb.innerHTML = list.map((c) =>
         '<tr><td>' + esc(c.plan_name || c.plan_id) + '</td>' +
-        '<td class="mono" style="font-size:11px" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(0, 20)) + '…</td>' +
+        '<td class="mono" style="font-size:11px" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(0, 20)) + '… <button class="ghost" style="padding:1px 6px;font-size:10px;margin-left:4px" onclick="copyKey(\'' + esc(c.card_key) + '\')">复制</button></td>' +
         '<td>' + (c.expired ? '<span class="pill bad">已过期</span>' : c.enabled ? '<span class="pill ok">使用中</span>' : '<span class="pill warn">未启用</span>') + '</td>' +
         '<td>' + fmtDur(c.remaining_secs) + '</td>' +
         '<td class="mono">$' + Number(c.face_used_usd || 0).toFixed(2) + (c.face_usd > 0 ? ' / $' + c.face_usd : '') + '</td>' +
@@ -439,6 +468,22 @@
   }
 
   function esc(s) { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+
+  // P0: 一键复制卡 key
+  window.copyKey = function(key) {
+    navigator.clipboard.writeText(key).then(() => {
+      toast('Key 已复制到剪贴板');
+    }).catch(() => {
+      // 降级: 手动选择
+      const ta = document.createElement('textarea');
+      ta.value = key;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      toast('Key 已复制');
+    });
+  };
 
   // ── 临时加并发 ──
   window.showBoost = function(cardKey, remainingSecs, paidRmb, planHours) {
