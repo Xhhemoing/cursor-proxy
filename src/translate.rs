@@ -158,6 +158,39 @@ fn tool_call_part(obj: &Value) -> Option<&Value> {
         .or_else(|| obj.get("toolCall"))
 }
 
+/// 从 OpenAI 兼容 chunk 提取增量文本 (choices[].delta.content 流式 / message.content 一次性).
+/// 供「上游是 OpenAI 兼容协议」的场景 (如 mock_upstream / 第三方兼容端点) 直接复用.
+fn extract_openai_delta(obj: &Value) -> Option<String> {
+    let choices = obj.get("choices")?.as_array()?;
+    let first = choices.first()?;
+    if let Some(delta) = first.get("delta").and_then(|d| d.as_object()) {
+        if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+            if !c.is_empty() {
+                return Some(c.to_string());
+            }
+        }
+    }
+    if let Some(msg) = first.get("message").and_then(|m| m.as_object()) {
+        if let Some(c) = msg.get("content").and_then(|v| v.as_str()) {
+            if !c.is_empty() {
+                return Some(c.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// OpenAI chunk 结束帧判定 (finish_reason 非空)
+fn is_openai_finish(obj: &Value) -> bool {
+    obj.get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dialect {
     Chat,
@@ -1671,6 +1704,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenAI 兼容 chunk 提取 (delta.content / message.content) + finish 帧判定 — 来自 stash@{0} 2026-08-30
+    #[test]
+    fn openai_delta_extraction_and_finish() {
+        // delta.content (流式)
+        assert_eq!(
+            extract_openai_delta(&json!({"choices":[{"delta":{"content":"hi"}}]})),
+            Some("hi".into())
+        );
+        // message.content (非流式一次性)
+        assert_eq!(
+            extract_openai_delta(&json!({"choices":[{"message":{"content":"hello"}}]})),
+            Some("hello".into())
+        );
+        // 空内容不算
+        assert_eq!(extract_openai_delta(&json!({"choices":[{"delta":{"content":""}}]})), None);
+        // 无关帧
+        assert_eq!(extract_openai_delta(&json!({"extendedUsage":{}})), None);
+        // finish_reason
+        assert!(is_openai_finish(&json!({"choices":[{"finish_reason":"stop"}]})));
+        assert!(!is_openai_finish(&json!({"choices":[{"finish_reason":null}]})));
+        assert!(!is_openai_finish(&json!({"choices":[]})));
+    }
 
     #[test]
     fn extract_usage_prompt_total_excludes_cache_but_input_style_is_independent() {
