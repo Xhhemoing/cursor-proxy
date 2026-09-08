@@ -9,9 +9,10 @@ TS=$(date +%Y%m%d-%H%M%S)
 SRC=target/release/cursor-fast-proxy-rs
 [ -x "$SRC" ] || { echo "no $SRC"; exit 1; }
 cp "$B/cursor-fast-proxy-rs" "$B/cursor-fast-proxy-rs.bak-$TAG-$TS"
-cp "$D/cards.json" "$D/cards.json.bak-$TAG-$TS"
+[ -f "$D/cards.json" ] && cp "$D/cards.json" "$D/cards.json.bak-$TAG-$TS" || echo "no cards.json (cards live in cards.db), skip"
 cp "$D/config.json" "$D/config.json.bak-$TAG-$TS"
 sqlite3 "$D/billing.db" ".backup $D/billing.db.bak-$TAG-$TS"
+sqlite3 "$D/cards.db" ".backup $D/cards.db.bak-$TAG-$TS"
 echo "backups: *.bak-$TAG-$TS"
 systemctl --user stop cursor-fast-proxy-rs-8800
 cp "$SRC" "$B/cursor-fast-proxy-rs"

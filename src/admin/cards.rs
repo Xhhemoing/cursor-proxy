@@ -158,6 +158,8 @@ pub struct PlanBody {
     // 门户钱包重构: 费率模式
     pub price_per_lane_hour: Option<f64>,
     pub min_hours: Option<u64>,
+    // 套餐×模型限速覆盖
+    pub model_pace: Option<Vec<crate::cards::ModelPaceRule>>,
 }
 
 pub async fn api_card_plan_upsert(
@@ -206,7 +208,8 @@ pub async fn api_card_plan_upsert(
         stack_mode,
         allowed_group_ids,
         price_per_lane_hour,
-        min_hours
+        min_hours,
+        model_pace
     );
     // expire_hours 是 Option<u64>, 单独处理 (0 = None)
     if let Some(h) = body.expire_hours {

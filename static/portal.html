@@ -62,6 +62,7 @@
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   .plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
   .plan-card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .plan-card-sub { border-style: dashed; border-color: var(--warn, #b58900); background: color-mix(in srgb, var(--bg-2) 70%, var(--warn, #b58900) 4%); margin-left: 18px; }
   .plan-card h4 { margin: 0 0 4px; font-size: 15px; }
   .plan-card .price { font: 700 24px var(--mono); color: var(--ink); margin: 8px 0; }
   .plan-card .meta { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
@@ -422,6 +423,8 @@
   // ── 购买套餐 ──
   async function loadPlans() {
     try {
+      // 先拉我的卡 (判断扩展是否可购), 失败不阻塞
+      try { myCards = (await api('/portal/api/cards')).cards || []; } catch (_) { myCards = myCards || []; }
       const d = await api('/portal/api/plans');
       myPlans = d.plans || [];
       const quota = myPlans.filter((p) => p.kind === 'Quota');
@@ -445,27 +448,47 @@
         $('plans-quota').appendChild(div);
       });
       $('plans-unlimited').innerHTML = unl.length ? '' : '<div class="muted">暂无畅饮卡</div>';
-      unl.forEach((p) => {
+      // 主/扩展分组: sub_plan_ids 非空 = 扩展(加购), 需先持有指向它的主套餐
+      const subs = unl.filter((p) => (p.sub_plan_ids || []).length > 0);
+      const mains = unl.filter((p) => !(p.sub_plan_ids || []).length);
+      const activePlanIds = new Set((myCards || []).filter((c) => c.enabled && !c.expired).map((c) => c.plan_id));
+      const modelLine = (p) => {
+        const g = (p.model_groups || []).length ? '限 ' + p.model_groups.length + ' 组模型' : '全模型';
+        const pace = (p.model_pace || []).map((r) => esc(r.prefix) + '≤' + (r.pace_normal_tps || '∞')).join(' · ');
+        return '<div class="meta">' + g + (pace ? ' · ' + pace + ' tok/s' : '') + '</div>';
+      };
+      const cardOf = (p, isSub) => {
         const div = document.createElement('div');
-        div.className = 'plan-card';
+        div.className = 'plan-card' + (isSub ? ' plan-card-sub' : '');
         const rateMode = p.price_per_lane_hour > 0;
         div.innerHTML =
+          (isSub ? '<div class="pill warn" style="margin-bottom:6px">加购扩展</div>' : '') +
           '<h4>' + esc(p.name) + '</h4>' +
           (rateMode
             ? '<div class="price" style="font-size:18px">¥' + Number(p.price_per_lane_hour).toFixed(2) + '<span style="font-size:12px;color:var(--muted)">/槽·时</span></div>' +
               '<div class="meta">时长 × 并发自由搭配 · 最多 ' + p.max_concurrency + ' 槽 · 购买后不激活</div>'
             : '<div class="price">¥' + Number(p.price).toFixed(0) + '</div>' +
               '<div class="meta">' + fmtDur((p.duration_hours || 24) * 3600) + ' · ' + p.max_concurrency + ' 并发</div>') +
+          modelLine(p) +
           (p.note ? '<div class="meta">' + esc(p.note) + '</div>' : '');
         const btn = document.createElement('button');
+        const locked = isSub && !subs.some((s) => s.id === p.id && (s.sub_plan_ids || []).some((pid) => activePlanIds.has(pid)));
         btn.textContent = rateMode ? '选时长×并发' : '购买';
+        if (locked) { btn.disabled = true; btn.textContent = '需先开通主套餐'; btn.className = 'ghost'; }
         btn.addEventListener('click', () => {
           if (rateMode) showRateModal(p);
           else if (confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2))) doPurchase({ plan_id: p.id });
         });
         div.appendChild(btn);
-        $('plans-unlimited').appendChild(div);
+        return div;
+      };
+      mains.forEach((p) => {
+        $('plans-unlimited').appendChild(cardOf(p, false));
+        // 挂在该主套餐下的扩展紧随其后, 视觉上缩进一档
+        subs.filter((s) => (s.sub_plan_ids || []).includes(p.id)).forEach((s) => $('plans-unlimited').appendChild(cardOf(s, true)));
       });
+      // 孤儿扩展 (主套餐不在售) 兜底排在最后
+      subs.filter((s) => !(s.sub_plan_ids || []).some((pid) => mains.some((m) => m.id === pid))).forEach((s) => $('plans-unlimited').appendChild(cardOf(s, true)));
     } catch (e) { $('plans-unlimited').innerHTML = '<div class="muted">' + esc(e.message) + '</div>'; }
   }
 

@@ -337,6 +337,10 @@ pub struct CardPlan {
     /// 允许访问的模型组 id (models.json groups); 空 = 不限. 与 model_prefixes 同时生效 (都要过)
     #[serde(default)]
     pub model_groups: Vec<String>,
+    /// 套餐级模型限速覆盖 (前缀匹配, 最长优先). 优先级: 全局 RiskPolicy.model_rules > 此表 > 全局/套餐整卡 pace_*.
+    /// 例: 基础卡 [{prefix:"claude-opus", pace_normal_tps:50}], 扩展卡 [{prefix:"claude-opus", pace_normal_tps:100}]
+    #[serde(default)]
+    pub model_pace: Vec<ModelPaceRule>,
     #[serde(default)]
     pub note: String,
     /// 是否启用
@@ -459,6 +463,7 @@ impl Default for CardPlan {
             // 门户钱包重构字段 (并行智能体加的, Default impl 漏了)
             price_per_lane_hour: 0.0,
             min_hours: 1,
+            model_pace: vec![],
         }
     }
 }
@@ -797,15 +802,19 @@ fn d_trust_hours() -> u32 {
 }
 
 impl RiskPolicy {
-    /// 最长前缀匹配的模型规则
-    pub fn rule_for(&self, model: &str) -> Option<&ModelPaceRule> {
+    /// 最长前缀匹配 — 在给定规则表里找该模型的规则
+    fn rule_in<'a>(rules: &'a [ModelPaceRule], model: &str) -> Option<&'a ModelPaceRule> {
         let m = model.strip_prefix("cursor-").unwrap_or(model);
-        self.model_rules
+        rules
             .iter()
             .filter(|r| {
                 !r.prefix.is_empty() && (m.starts_with(&r.prefix) || model.starts_with(&r.prefix))
             })
             .max_by_key(|r| r.prefix.len())
+    }
+    /// 最长前缀匹配的全局模型规则
+    pub fn rule_for(&self, model: &str) -> Option<&ModelPaceRule> {
+        Self::rule_in(&self.model_rules, model)
     }
     /// 该 (套餐, 档位, 模型) 生效的 pace (tok/s, 0 = 不限)
     pub fn pace_for(&self, plan: &CardPlan, throttle: Throttle, model: &str) -> u32 {
@@ -838,6 +847,25 @@ impl RiskPolicy {
                     // 简化: 用 60 tok/s 作基准 (fable 实测 28.5, sol 76, grok 170)
                     let base_tps = 60.0;
                     return (base_tps * ratio) as u32;
+                }
+            }
+            let o = match throttle {
+                Throttle::Normal => r.pace_normal_tps,
+                Throttle::Soften => r.pace_soften_tps,
+                Throttle::Degraded => r.pace_degraded_tps,
+            };
+            if let Some(v) = o {
+                return v;
+            }
+        }
+        // 套餐级模型限速覆盖 (全局模型规则之下, 整卡 pace 之上)
+        if let Some(r) = Self::rule_in(&plan.model_pace, model) {
+            if r.exempt {
+                return 0;
+            }
+            if let Some(ratio) = r.speed_ratio {
+                if ratio > 0.0 && ratio < 1.0 {
+                    return (60.0 * ratio) as u32;
                 }
             }
             let o = match throttle {
@@ -3169,6 +3197,51 @@ mod tests {
         let _ = crate::models::registry().delete_group("test-kimi-only");
     }
 
+    /// 套餐级 model_pace: 全局模型规则 > 套餐模型规则 > 整卡 pace; 扩展/主卡场景靠「套餐各自带规则」表达
+    #[test]
+    fn plan_model_pace_override() {
+        let mut plan = CardPlan::default();
+        plan.pace_normal_tps = 40;
+        plan.model_pace = vec![ModelPaceRule {
+            prefix: "claude-opus".into(),
+            pace_normal_tps: Some(50),
+            ..Default::default()
+        }];
+        let mut p = RiskPolicy::default();
+        // 套餐模型规则命中 → 50; 未命中模型 → 整卡 40
+        assert_eq!(p.pace_for(&plan, Throttle::Normal, "claude-opus-5-high"), 50);
+        assert_eq!(p.pace_for(&plan, Throttle::Normal, "kimi-k3"), 40);
+        // 软化档未被套餐规则覆盖 → 落回整卡 soften (默认 0 = 不限)
+        assert_eq!(p.pace_for(&plan, Throttle::Soften, "claude-opus-5-high"), 0);
+        // 全局模型规则仍压套餐规则
+        p.model_rules = vec![ModelPaceRule {
+            prefix: "claude-opus-5-thinking".into(),
+            pace_normal_tps: Some(33),
+            ..Default::default()
+        }];
+        assert_eq!(
+            p.pace_for(&plan, Throttle::Normal, "claude-opus-5-thinking-high"),
+            33
+        );
+        // 全局 exempt 最高
+        p.model_rules = vec![ModelPaceRule {
+            prefix: "claude-opus".into(),
+            exempt: true,
+            ..Default::default()
+        }];
+        assert_eq!(p.pace_for(&plan, Throttle::Normal, "claude-opus-5-high"), 0);
+        // 扩展卡语义: 另一张 plan 带更高限速, 各自独立判定
+        let mut ext = CardPlan::default();
+        ext.pace_normal_tps = 40;
+        ext.model_pace = vec![ModelPaceRule {
+            prefix: "claude-opus".into(),
+            pace_normal_tps: Some(100),
+            ..Default::default()
+        }];
+        p.model_rules = vec![];
+        assert_eq!(p.pace_for(&ext, Throttle::Normal, "claude-opus-5-high"), 100);
+    }
+
     /// 闸门: 前缀 ∧ 组 任一不过即拒; 全空 = 全放
     #[test]
     fn plan_allows_model_combination() {
@@ -3488,7 +3561,6 @@ mod tests {
         assert_eq!(p.pace_for(&plan, Throttle::Degraded, "x"), 0);
         assert_eq!(p.threshold_for(&plan), 0);
         p.enabled = true;
-        // 硬帽
         // 硬帽已停用: 无论怎么配都不命中 (用价值比评分代替)
         p.hard_cap_usd = 250.0;
         p.hard_cap_allow_prefixes = vec!["kimi-k3".into(), "grok".into()];

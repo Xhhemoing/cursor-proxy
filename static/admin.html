@@ -8,6 +8,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
+    .form-sec{border:1px solid var(--line,#e5e5e5);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--bg-2,#fafafa)}
+    .form-sec-t{font-weight:600;font-size:13px;margin-bottom:8px;color:var(--fg,#222)}
+    .mp-row{display:flex;gap:6px;align-items:center;margin-bottom:4px}
+    .mp-row input{padding:4px 6px;border:1px solid var(--line,#ddd);border-radius:4px;font-size:12px}
     :root {
       --bg: #ffffff;
       --bg-2: #f7f7f7;
@@ -175,6 +179,22 @@
     .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
     .tabs button { background: transparent; color: var(--ink-2); border: 0; border-radius: 0; height: 28px; padding: 0 12px; font-size: 12px; }
     .tabs button.active { background: var(--ink); color: var(--bg); }
+    /* 模型中心: 顶栏压成一行, 禁止大标题+说明+按钮带占高 */
+    #page-model-center > .page-head { display: none; }
+    #mc-panel { gap: 4px; }
+    #mc-toolbar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; flex-wrap: wrap; min-height: 28px; }
+    #mc-toolbar .tabs { margin: 0; }
+    #mc-toolbar .actions { display: flex; gap: 4px; margin-left: auto; }
+    #mc-toolbar .actions button { height: 26px; padding: 0 8px; font-size: 11px; }
+    #mc-msg { min-height: 0; margin: 0; font-size: 11px; }
+    #mc-tab-families .panel.fill > .ph,
+    #mc-tab-groups .panel.fill > .ph { display: none; }
+    #md-group-add { padding: 0 8px; }
+    #md-group-add summary { padding: 4px 0; font-size: 12px; }
+    #md-group-add .body { padding: 6px 0 8px; }
+    #md-group-add .form-grid { grid-template-columns: 110px 140px 1fr; gap: 6px; }
+    #mg-members { min-height: 56px !important; height: 56px; padding: 6px 8px; font-size: 12px; }
+    .kind-pill { font-size: 10px; padding: 1px 6px; }
     .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     details.add { border: 1px solid var(--line); border-radius: 4px; padding: 0 12px; margin-bottom: 8px; background: var(--card); flex: 0 0 auto; }
     details.add summary { cursor: pointer; padding: 8px 0; font-weight: 500; font-size: 13px; list-style: none; display: flex; align-items: center; gap: 8px; }
@@ -786,31 +806,29 @@
       </section>
 
       <!-- ================= 模型 ================= -->
-      <section class="page page-fill" id="page-model-center">
-        <div class="page-head">
-          <div><h2>模型中心</h2><p>家族总览 · 客户菜单 · 定价表 · 模型组 · 路由测试 —— 名单只认上游 AvailableModels</p></div>
-          <div class="actions">
-            <button type="button" class="ghost" id="mc-fetch-upstream">获取可用模型</button>
-            <button type="button" class="ghost" id="mc-sync-litellm">从 litellm 同步价格</button>
-            <button type="button" class="ghost" id="mc-import-builtin">导入内置价格表</button>
-            <button type="button" class="ghost" id="mc-refresh">刷新</button>
-          </div>
-        </div>
+      <section class="page page-fill compact-head" id="page-model-center">
+        <div class="page-head"><div><h2>模型中心</h2></div></div>
         <div id="mc-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
-          <div class="tabs">
-            <button type="button" class="active" data-tab="families">家族总览</button>
-            <button type="button" data-tab="groups">模型组</button>
-            <button type="button" data-tab="route">路由测试</button>
+          <div id="mc-toolbar">
+            <div class="tabs">
+              <button type="button" class="active" data-tab="families">家族</button>
+              <button type="button" data-tab="groups">模型组</button>
+              <button type="button" data-tab="route">路由</button>
+            </div>
+            <span class="muted" id="mc-count" style="font-size:11px"></span>
+            <label style="font-size:11px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mc-show-all"> 含零流量</label>
+            <div class="actions">
+              <button type="button" class="ghost" id="mc-fetch-upstream">拉上游</button>
+              <button type="button" class="ghost" id="mc-sync-litellm">litellm</button>
+              <button type="button" class="ghost" id="mc-import-builtin">内置价</button>
+              <button type="button" class="ghost" id="mc-refresh">刷新</button>
+            </div>
           </div>
-          <div class="info" id="mc-msg" style="min-height:18px;margin-bottom:6px"></div>
+          <div class="info" id="mc-msg"></div>
 
           <!-- 家族总览 -->
           <div id="mc-tab-families" style="display:flex;flex:1;min-height:0;flex-direction:column">
             <div class="panel fill">
-              <div class="ph"><h3>模型家族 <span class="muted" id="mc-count"></span></h3>
-                <p class="muted" style="font-size:11px;margin:0">一行一个家族 · 展开看真实变体 · 默认档/菜单形态内联即改 · 30d 面值柱 (浅色=30d, 深色=7d 同基线) · $/槽·时</p>
-                <label style="font-size:11px;display:flex;align-items:center;gap:4px;margin-left:auto"><input type="checkbox" id="mc-show-all"> 全部(含 30d 零流量)</label>
-              </div>
               <div class="table-scroll">
                 <table class="nowrap">
                   <thead><tr>
@@ -838,28 +856,26 @@
           <!-- 客户菜单 -->
           <!-- 模型组 -->
           <div id="mc-tab-groups" style="display:none;flex:1;min-height:0;flex-direction:column">
-            <details class="add" id="md-group-add" open>
-              <summary>新建 / 编辑模型组（成员一行一个或逗号分隔；支持结尾 <code>*</code> 通配，如 <code>kimi-*</code>；单独 <code>*</code> = 全部）</summary>
+            <details class="add" id="md-group-add">
+              <summary>新建/编辑组 <span class="muted" id="mg-count"></span> · <code>kimi-*</code>=基础 <code>kimi-*-fast</code>=fast · * 不含 fast</summary>
               <div class="body">
                 <div class="form-grid">
                   <label>组 id <input id="mg-id" placeholder="cheap"></label>
-                  <label>名称 <input id="mg-name" placeholder="经济模型"></label>
-                  <label class="span-2">备注 <input id="mg-note"></label>
-                  <label class="span-2" style="grid-column:1/-1">成员 <textarea id="mg-members" rows="3" style="width:100%;font-family:var(--mono);font-size:12px" placeholder="kimi-*&#10;grok-4.6&#10;claude-opus-5"></textarea></label>
+                  <label>名称 <input id="mg-name" placeholder="经济基础"></label>
+                  <label>备注 <input id="mg-note"></label>
+                  <label style="grid-column:1/-1">成员 <textarea id="mg-members" rows="2" style="width:100%;font-family:var(--mono);font-size:12px" placeholder="kimi-*&#10;kimi-*-fast"></textarea></label>
                 </div>
-                <div class="toolbar" style="margin-top:10px;justify-content:space-between">
+                <div class="toolbar" style="margin-top:6px;justify-content:space-between">
                   <span class="muted" id="mg-preview"></span>
                   <span><button type="button" class="ghost" id="mg-reset">清空</button> <button type="button" id="mg-save">保存组</button></span>
                 </div>
               </div>
             </details>
             <div class="panel fill">
-              <div class="ph"><h3>模型组 <span class="muted" id="mg-count"></span></h3></div>
-              <p class="muted" style="font-size:11px;margin:0 0 6px">禁用 = 该组不参与鉴权 (引用它的 key/套餐相当于「该组不存在」, 仍 403 但非「拒绝所有」); 删除需先解除引用.</p>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>id</th><th>名称</th><th>成员规则</th><th>命中已知模型</th><th>被引用</th><th></th></tr></thead>
-                  <tbody id="mg-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+                  <thead><tr><th>id</th><th>轨</th><th>名称</th><th>成员</th><th>基础命中</th><th>fast命中</th><th>引用</th><th></th></tr></thead>
+                  <tbody id="mg-body"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -987,57 +1003,77 @@
           <!-- 套餐 -->
           <div id="cd-tab-plans" style="display:flex;flex:1;min-height:0;flex-direction:column">
             <details class="add" id="cd-plan-add">
-              <summary>新建 / 编辑套餐（同 id 即覆盖，留空字段沿用原值）</summary>
+              <summary>新建 / 编辑套餐（点列表「编辑」装入，同 id 保存即修改）</summary>
               <div class="body">
-                <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
-                  <label>id <input id="cp-id" placeholder="day-std-1"></label>
-                  <label>名称 <input id="cp-name" placeholder="畅饮·标准 1并发"></label>
-                  <label>售价 ¥ <input id="cp-price" type="number" step="0.1" min="0"></label>
-                  <label>类型 <select id="cp-kind"><option value="unlimited">畅饮（不限次）</option><option value="quota">定额（用完即止）</option></select></label>
-                  <label id="cp-face-wrap" style="display:none">定额面值 $ <input id="cp-face" type="number" step="1" min="0" placeholder="如 200"></label>
-                  <label>时长 h <input id="cp-dur" type="number" min="1" placeholder="24"></label>
-                  <label>并发 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
-                  <label class="span-2" style="grid-column:1/-1">可用模型组（空 = 不限）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
-                  <div class="span-2" style="grid-column:1/-1;font-size:12px;color:var(--muted)">
-                    模型可见性 = 模型组 ∧ 前缀（高级里）交集；全空 = 全部模型。
-                    <span id="cp-mcount" class="pill info" style="display:none"></span>
-                    <button type="button" class="ghost" id="cp-preview" style="margin-left:6px">预览可用模型</button>
-                    <span id="cp-warn" style="color:var(--bad,#c66)"></span>
+                <!-- ① 基本信息 -->
+                <div class="form-sec"><div class="form-sec-t">① 基本信息</div>
+                  <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+                    <label>id <input id="cp-id" placeholder="base-20"></label>
+                    <label>名称 <input id="cp-name" placeholder="基础畅饮"></label>
+                    <label>类型 <select id="cp-kind"><option value="unlimited">畅饮（不限次）</option><option value="quota">定额（充钱包）</option></select></label>
+                    <label id="cp-face-wrap" style="display:none">定额面值 $ <input id="cp-face" type="number" step="1" min="0" placeholder="如 200"></label>
+                    <label class="inline"><input type="checkbox" id="cp-enabled" checked> 启用</label>
                   </div>
-                  <label class="inline"><input type="checkbox" id="cp-enabled" checked> 启用</label>
                 </div>
-                <details id="cp-adv" style="margin-top:8px">
-                  <summary style="cursor:pointer;color:var(--muted);font-size:12px">高级限制（一般不用动）</summary>
-                  <div class="form-grid" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
-                    <label>RPM <input id="cp-rpm" type="number" min="0" placeholder="30"></label>
-                    <label>日次数帽 <input id="cp-rpd" type="number" min="0" placeholder="0=关"></label>
-                    <label>日额度帽 $ <input id="cp-dq" type="number" step="1" min="0" placeholder="0=关"></label>
-                    <label>软化比 <input id="cp-soft" type="number" step="0.05" min="0" max="1" placeholder="0.7"></label>
-                    <label>压制并发 <input id="cp-dconc" type="number" min="1" placeholder="1"></label>
-                    <label>匀速 normal <input id="cp-p0" type="number" min="0" placeholder="0=不限速"></label>
-                    <label>匀速 soften <input id="cp-p1" type="number" min="0" placeholder="0=不限速"></label>
-                    <label>匀速 degraded <input id="cp-p2" type="number" min="0" placeholder="0=不限速"></label>
-                    <label>行为评分阈值 <input id="cp-abuse" type="number" min="0" max="100" placeholder="55, 0=关"></label>
-                    <label>模型前缀 <input id="cp-prefix" placeholder="逗号分隔, 空=不限"></label>
-                    <label class="span-2">备注 <input id="cp-note"></label>
-                  </div>
-                </details>
-
-                <!-- P1: 门户扩展字段 -->
-                <details id="cp-portal" style="margin-top:8px">
-                  <summary style="cursor:pointer;color:var(--info);font-size:12px">门户扩展（费率/用户组/子套餐/叠加）</summary>
-                  <div class="form-grid" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-                    <label style="grid-column:1/-1;color:var(--info)">费率模式 ¥/槽·时 <input id="cp-rate" type="number" step="0.01" min="0" placeholder=">0 时按 时长×并发 计价, 售价字段忽略; 0=固定价"></label>
+                <!-- ② 计价 -->
+                <div class="form-sec"><div class="form-sec-t">② 计价 <span class="muted" style="font-weight:400">费率模式 &gt; 0 时按 时长×并发 计价，固定售价忽略</span></div>
+                  <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+                    <label>费率 ¥/槽·时 <input id="cp-rate" type="number" step="0.01" min="0" placeholder="0=固定价"></label>
+                    <label>固定售价 ¥ <input id="cp-price" type="number" step="0.1" min="0"></label>
+                    <label>时长 h <input id="cp-dur" type="number" min="1" placeholder="24"></label>
                     <label>最少购买 h <input id="cp-min-hours" type="number" min="1" placeholder="1"></label>
+                    <label>并发槽数 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
+                    <label>计时起点 <select id="cp-billing-mode"><option value="purchase_time">购买即计时</option><option value="first_call">首次调用</option></select></label>
+                  </div>
+                </div>
+                <!-- ③ 模型权限 -->
+                <div class="form-sec"><div class="form-sec-t">③ 模型权限 <span class="muted" style="font-weight:400">组 ∧ 前缀交集；全空 = 全部模型</span></div>
+                  <div class="form-grid" style="grid-template-columns:1fr">
+                    <label class="span-2">可用模型组（空 = 不限）<div id="cp-groups" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
+                    <label class="span-2">模型前缀 <input id="cp-prefix" placeholder="逗号分隔, 空=不限, 如 claude-opus"></label>
+                    <div class="span-2" style="font-size:12px;color:var(--muted)">
+                      <span id="cp-mcount" class="pill info" style="display:none"></span>
+                      <button type="button" class="ghost" id="cp-preview" style="margin-left:6px">预览可用模型</button>
+                      <span id="cp-warn" style="color:var(--bad,#c66)"></span>
+                    </div>
+                  </div>
+                </div>
+                <!-- ④ 模型限速 -->
+                <div class="form-sec"><div class="form-sec-t">④ 模型限速 <span class="muted" style="font-weight:400">tok/s，按模型前缀覆盖整卡匀速；空 = 不限</span></div>
+                  <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+                    <label>整卡匀速 normal <input id="cp-p0" type="number" min="0" placeholder="0=不限"></label>
+                    <label>软化 soften <input id="cp-p1" type="number" min="0" placeholder="0=不限"></label>
+                    <label>压制 degraded <input id="cp-p2" type="number" min="0" placeholder="0=不限"></label>
+                  </div>
+                  <div style="margin-top:8px">
+                    <div class="muted" style="font-size:12px;margin-bottom:4px">按模型覆盖（优先级：全局模型规则 &gt; 此处 &gt; 整卡）：</div>
+                    <div id="cp-model-pace"></div>
+                    <button type="button" class="ghost" id="cp-mp-add" style="margin-top:4px">+ 加一条模型限速</button>
+                  </div>
+                </div>
+                <!-- ⑤ 扩展/高级 -->
+                <div class="form-sec"><div class="form-sec-t">⑤ 扩展与高级 <span class="muted" style="font-weight:400">子套餐 = 需先持有本套餐才能加购</span></div>
+                  <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+                    <label class="span-2">可加购的扩展（子套餐）<div id="cp-sub-plans-pick" style="display:flex;flex-wrap:wrap;gap:4px 8px;padding:6px 0"></div></label>
+                    <label>叠加方式 <select id="cp-stack-mode"><option value="time_multiply">时间叠加</option><option value="slot_multiply">槽位叠加</option></select></label>
                     <label>额度 $ <input id="cp-quota" type="number" step="1" min="0" placeholder="0=无限"></label>
                     <label>过期 h <input id="cp-expire" type="number" min="0" placeholder="0=不过期"></label>
-                    <label>计时起点 <select id="cp-billing-mode"><option value="purchase_time">购买即计时</option><option value="first_call">首次调用</option></select></label>
-                    <label>叠加方式 <select id="cp-stack-mode"><option value="time_multiply">时间叠加</option><option value="slot_multiply">槽位叠加</option></select></label>
-                    <label class="span-2">子套餐 id <input id="cp-sub-plans" placeholder="逗号分隔, 开通主套餐后可选"></label>
                     <label class="span-2">仅对用户组开放 <input id="cp-allowed-groups" placeholder="逗号分隔, 空=全部"></label>
-                    <label class="span-2">额外限制 <input id="cp-extra-limits" placeholder="如 5h:100, 每5小时限$100"></label>
+                    <label class="span-2">备注 <input id="cp-note"></label>
                   </div>
-                </details>
+                  <details id="cp-adv" style="margin-top:8px">
+                    <summary style="cursor:pointer;color:var(--muted);font-size:12px">行为风控（一般不用动）</summary>
+                    <div class="form-grid" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+                      <label>RPM <input id="cp-rpm" type="number" min="0" placeholder="30"></label>
+                      <label>日次数帽 <input id="cp-rpd" type="number" min="0" placeholder="0=关"></label>
+                      <label>日额度帽 $ <input id="cp-dq" type="number" step="1" min="0" placeholder="0=关"></label>
+                      <label>软化比 <input id="cp-soft" type="number" step="0.05" min="0" max="1" placeholder="0.7"></label>
+                      <label>压制并发 <input id="cp-dconc" type="number" min="1" placeholder="1"></label>
+                      <label>行为评分阈值 <input id="cp-abuse" type="number" min="0" max="100" placeholder="55, 0=关"></label>
+                      <label class="span-2">额外限制 <input id="cp-extra-limits" placeholder="如 5h:100, 每5小时限$100"></label>
+                    </div>
+                  </details>
+                </div>
                 <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
                   <button type="button" class="ghost" id="cp-reset">清空</button>
                   <button type="button" id="cp-save">保存套餐</button>
@@ -2070,21 +2106,75 @@
       set('cp-rate', p.price_per_lane_hour || ''); set('cp-min-hours', p.min_hours || '');
       set('cp-quota', p.quota_usd || ''); set('cp-expire', p.expire_hours || '');
       set('cp-billing-mode', p.billing_mode || 'purchase_time'); set('cp-stack-mode', p.stack_mode || 'time_multiply');
-      set('cp-sub-plans', (p.sub_plan_ids || []).join(',')); set('cp-allowed-groups', (p.allowed_group_ids || []).join(','));
+      set('cp-allowed-groups', (p.allowed_group_ids || []).join(','));
       set('cp-extra-limits', (p.extra_limits || []).map((l) => l.hours + 'h:' + l.quota_usd).join(','));
       set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
       renderGroupPicker(document.getElementById('cp-groups'), p.model_groups || []);
+      renderSubPlanPicker(p.sub_plan_ids || [], p.id);
+      renderModelPace(p.model_pace || []);
       document.getElementById('cp-enabled').checked = !!p.enabled;
       document.getElementById('cp-kind').dispatchEvent(new Event('change'));
-      document.getElementById('cp-adv').open = true;
       document.getElementById('cp-id').scrollIntoView({ block: 'center' });
     }
+    // 子套餐多选 (排除自身)
+    function renderSubPlanPicker(selected, selfId) {
+      const box = document.getElementById('cp-sub-plans-pick');
+      box.replaceChildren();
+      const others = cdPlans.filter((x) => x.id !== selfId);
+      if (!others.length) { box.appendChild(el('span', { class: 'muted' }, '（无其他套餐可选）')); return; }
+      others.forEach((x) => {
+        const lab = el('label', { class: 'inline', style: 'margin-right:10px;white-space:nowrap' });
+        const cb = el('input', { type: 'checkbox', value: x.id });
+        cb.checked = (selected || []).includes(x.id);
+        lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + x.name + ' (' + x.id + ')'));
+        box.appendChild(lab);
+      });
+    }
+    function pickedSubPlans() { return Array.from(document.querySelectorAll('#cp-sub-plans-pick input[type=checkbox]:checked')).map((c) => c.value); }
+    // 套餐×模型限速 行编辑器: [{prefix, pace_normal_tps, pace_soften_tps, pace_degraded_tps, exempt}]
+    function renderModelPace(rules) {
+      const box = document.getElementById('cp-model-pace');
+      box.replaceChildren();
+      (rules || []).forEach((r) => box.appendChild(mpRow(r)));
+    }
+    function mpRow(r) {
+      r = r || {};
+      const row = el('div', { class: 'mp-row' });
+      const mk = (ph, v, w, ty) => { const i = el('input', { placeholder: ph, type: ty || 'text' }); i.value = v == null ? '' : v; if (w) i.style.width = w; return i; };
+      const pre = mk('模型前缀 如 claude-opus', r.prefix, '170px');
+      const pn = mk('normal', r.pace_normal_tps, '70px', 'number');
+      const ps = mk('soften', r.pace_soften_tps, '70px', 'number');
+      const pd = mk('degraded', r.pace_degraded_tps, '70px', 'number');
+      const ex = el('label', { class: 'inline', style: 'font-size:12px;white-space:nowrap' });
+      const exc = el('input', { type: 'checkbox' }); exc.checked = !!r.exempt;
+      ex.appendChild(exc); ex.appendChild(document.createTextNode(' 免限'));
+      const del = el('button', { class: 'danger', type: 'button' }, '删');
+      del.addEventListener('click', () => row.remove());
+      [pre, pn, ps, pd, ex, del].forEach((n) => row.appendChild(n));
+      return row;
+    }
+    function collectModelPace() {
+      const out = [];
+      document.querySelectorAll('#cp-model-pace .mp-row').forEach((row) => {
+        const ins = row.querySelectorAll('input');
+        const prefix = ins[0].value.trim();
+        if (!prefix) return;
+        const num = (i) => { const v = ins[i].value.trim(); return v === '' ? undefined : Number(v); };
+        out.push({ prefix, pace_normal_tps: num(1), pace_soften_tps: num(2), pace_degraded_tps: num(3), exempt: ins[4].checked });
+      });
+      return out;
+    }
+    document.getElementById('cp-mp-add').addEventListener('click', () => document.getElementById('cp-model-pace').appendChild(mpRow()));
     document.getElementById('cp-kind').addEventListener('change', (e) => {
       document.getElementById('cp-face-wrap').style.display = e.target.value === 'quota' ? '' : 'none';
     });
     document.getElementById('cp-reset').addEventListener('click', () => {
-      document.querySelectorAll('#cd-plan-add input, #cd-plan-add select').forEach((n) => { if (n.type === 'checkbox') n.checked = true; else n.value = ''; });
+      document.querySelectorAll('#cd-plan-add input, #cd-plan-add select').forEach((n) => { if (n.type === 'checkbox') n.checked = false; else n.value = ''; });
       document.getElementById('cp-kind').value = 'unlimited';
+      document.getElementById('cp-enabled').checked = true;
+      document.getElementById('cp-model-pace').replaceChildren();
+      document.getElementById('cp-sub-plans-pick').replaceChildren();
+      document.getElementById('cp-groups').replaceChildren();
     });
     document.getElementById('cp-save').addEventListener('click', async () => {
       const g = (id) => document.getElementById(id).value.trim();
@@ -2109,8 +2199,9 @@
       if (num('cp-expire') != null) body.expire_hours = num('cp-expire') || null;
       body.billing_mode = g('cp-billing-mode');
       body.stack_mode = g('cp-stack-mode');
-      body.sub_plan_ids = g('cp-sub-plans') ? g('cp-sub-plans').split(',').map((s) => s.trim()).filter(Boolean) : [];
+      body.sub_plan_ids = pickedSubPlans();
       body.allowed_group_ids = g('cp-allowed-groups') ? g('cp-allowed-groups').split(',').map((s) => s.trim()).filter(Boolean) : [];
+      body.model_pace = collectModelPace();
       // extra_limits: "5h:100" → [{hours:5, quota_usd:100}]
       const el = g('cp-extra-limits');
       if (el) {
@@ -2119,7 +2210,9 @@
           return m ? { hours: Number(m[1]), quota_usd: Number(m[2]) } : null;
         }).filter(Boolean);
       }
-      if (isNew && (body.name == null || body.price == null)) return cdMsg('新建套餐需要 名称 + 售价', true);
+      const rateMode = (body.price_per_lane_hour || 0) > 0;
+      if (isNew && body.name == null) return cdMsg('新建套餐需要名称', true);
+      if (isNew && !rateMode && body.price == null) return cdMsg('固定价套餐需要售价（或填费率）', true);
       if (body.kind === 'quota' && isNew && !body.face_usd) return cdMsg('定额卡需要面值 $', true);
       try {
         const d = await api('/admin/api/cards/plans', { method: 'POST', body: JSON.stringify(body) });
@@ -2374,8 +2467,9 @@
               + (rule.speed_ratio != null ? '×' + rule.speed_ratio : (rule.pace_normal_tps || '—') + 'tps')
               + (rule.max_output_tokens ? '·≤' + rule.max_output_tokens : '') + '</span>')
           : '';
-        const groupTxt = (r.groups || []).length ? '<span class="muted" style="font-size:10px">' + (r.groups || []).map(esc).join(',') + '</span>' : '';
-        const ruleGroup = [ruleTxt, groupTxt].filter(Boolean).join(' ') || '<span class="muted">—</span>';
+        const groupTxt = (r.groups || []).length ? '<span class="muted" style="font-size:10px">基 ' + (r.groups || []).map(esc).join(',') + '</span>' : '';
+        const groupFastTxt = (r.groups_fast || []).length ? '<span class="muted" style="font-size:10px">fast ' + (r.groups_fast || []).map(esc).join(',') + '</span>' : '';
+        const ruleGroup = [ruleTxt, groupTxt, groupFastTxt].filter(Boolean).join(' ') || '<span class="muted">—</span>';
         const statePill = r.hidden ? '<span class="pill bad" style="font-size:10px">隐藏</span>' : (r.enabled ? '' : '<span class="pill bad" style="font-size:10px">停用</span>');
         tr.innerHTML =
           '<td data-menu-cell></td>' +
@@ -2443,18 +2537,20 @@
           chipWrap.appendChild(chip);
         });
         tierCell.appendChild(chipWrap);
-        // 价可编辑 (基名 + -fast 两行, 失焦保存)
+        // 价可编辑: 基名 / fast 两行独立计价, 禁止用基价×2 当 fast
         const priceCell = tr.querySelector('[data-price-cell]');
-        const priceRow = (label, key) => {
+        const pf = r.price_fast || null;
+        const priceRow = (label, src, modelName) => {
           const wrap = el('div', { style: 'display:flex;gap:2px;align-items:center;font-size:10px;margin:1px 0' });
           wrap.appendChild(el('span', { class: 'muted', style: 'min-width:24px' }, label));
-          const inI = el('input', { type: 'number', step: '0.01', min: '0', value: Number((key === 'fast' ? (p.input || 0) * 2 : p.input) || 0).toFixed(2), style: 'width:48px;font-size:10px;padding:1px 2px' });
-          const inO = el('input', { type: 'number', step: '0.01', min: '0', value: Number((key === 'fast' ? (p.output || 0) * 2 : p.output) || 0).toFixed(2), style: 'width:48px;font-size:10px;padding:1px 2px' });
+          const inI = el('input', { type: 'number', step: '0.01', min: '0', value: Number((src && src.input) || 0).toFixed(2), style: 'width:48px;font-size:10px;padding:1px 2px' });
+          const inO = el('input', { type: 'number', step: '0.01', min: '0', value: Number((src && src.output) || 0).toFixed(2), style: 'width:48px;font-size:10px;padding:1px 2px' });
           wrap.appendChild(inI); wrap.appendChild(document.createTextNode('/')); wrap.appendChild(inO);
+          const srcTag = (src && src.source) ? src.source : '';
+          if (srcTag && srcTag !== 'builtin') wrap.appendChild(el('span', { class: 'muted', style: 'font-size:9px' }, srcTag === 'manual' ? '手' : srcTag));
           const save = async () => {
             const i = Number(inI.value), o = Number(inO.value);
             if (!isFinite(i) || !isFinite(o) || i < 0 || o < 0) return;
-            const modelName = key === 'fast' ? r.family + '-fast' : r.family;
             try {
               await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: modelName, input_per_m: i, output_per_m: o }) });
               mcMsg(modelName + ' 价 → $' + i.toFixed(2) + '/$' + o.toFixed(2));
@@ -2463,9 +2559,9 @@
           inI.addEventListener('blur', save); inO.addEventListener('blur', save);
           return wrap;
         };
-        priceCell.appendChild(priceRow('基名', 'base'));
-        if ((r.variants || []).some((v) => v.endsWith('-fast'))) {
-          priceCell.appendChild(priceRow('fast', 'fast'));
+        priceCell.appendChild(priceRow('基', p, r.family));
+        if (r.has_fast || pf) {
+          priceCell.appendChild(priceRow('fast', pf, r.family + '-fast'));
         }
         // 进菜单 checkbox
         const menuCell = tr.querySelector('[data-menu-cell]');
@@ -2643,19 +2739,33 @@
       document.getElementById('mg-count').textContent = '(' + mdGroups.length + ')';
       const tb = document.getElementById('mg-body');
       tb.innerHTML = '';
-      if (!mdGroups.length) tb.innerHTML = '<tr><td colspan="7" class="muted">还没有模型组。建一个后，可在 API Key / 套餐里限定「只能用这些组」</td></tr>';
+      if (!mdGroups.length) tb.innerHTML = '<tr><td colspan="8" class="muted">还没有模型组。基础 / fast 必须分两组，不能写一条 kimi-* 同时放行 fast</td></tr>';
+      const kindPill = (k) => {
+        if (k === 'fast') return '<span class="pill warn kind-pill">fast</span>';
+        if (k === 'mixed') return '<span class="pill bad kind-pill">混</span>';
+        if (k === 'base') return '<span class="pill info kind-pill">基础</span>';
+        return '<span class="pill gray kind-pill">空</span>';
+      };
+      const hitCell = (arr) => {
+        const a = arr || [];
+        if (!a.length) return '<span class="muted">0</span>';
+        return '<span title="' + esc(a.join('\n')) + '">' + a.length + ': ' + esc(a.slice(0, 3).join(', ')) + (a.length > 3 ? ' …' : '') + '</span>';
+      };
       mdGroups.forEach((g) => {
         const u = groupUsage(g.id);
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td class="mono">' + esc(g.id) + '</td><td>' + esc(g.name) + '</td>' +
+        const kind = g.kind || ((g.resolved_fast || []).length && (g.resolved_base || []).length ? 'mixed' : ((g.resolved_fast || []).length ? 'fast' : 'base'));
+        tr.innerHTML = '<td class="mono">' + esc(g.id) + '</td><td>' + kindPill(kind) + '</td><td>' + esc(g.name) + '</td>' +
           '<td class="mono" style="font-size:11px">' + (g.members || []).map(esc).join('<br>') + '</td>' +
-          '<td class="mono" style="font-size:11px" title="' + esc((g.resolved_known || []).join('\n')) + '">' + (g.resolved_known || []).length + ' 个: ' + esc((g.resolved_known || []).slice(0, 4).join(', ')) + ((g.resolved_known || []).length > 4 ? ' …' : '') + '</td>' +
+          '<td class="mono" style="font-size:11px">' + hitCell(g.resolved_base || (g.resolved_known || []).filter((m) => !String(m).endsWith('-fast'))) + '</td>' +
+          '<td class="mono" style="font-size:11px">' + hitCell(g.resolved_fast || (g.resolved_known || []).filter((m) => String(m).endsWith('-fast'))) + '</td>' +
           '<td style="font-size:11px">' + (u.keys.length ? 'key: ' + esc(u.keys.join(', ')) : '') + (u.plans.length ? (u.keys.length ? '<br>' : '') + '套餐: ' + esc(u.plans.join(', ')) : '') + (!u.keys.length && !u.plans.length ? '<span class="muted">—</span>' : '') + '</td>' +
-          '<td>' + (g.enabled !== false ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td><td></td>';
+          '<td></td>';
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => {
           document.getElementById('mg-id').value = g.id; document.getElementById('mg-name').value = g.name; document.getElementById('mg-note').value = g.note || '';
           document.getElementById('mg-members').value = (g.members || []).join('\n'); previewGroup();
+          document.getElementById('md-group-add').open = true;
           document.getElementById('mg-id').scrollIntoView({ block: 'center' });
         });
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, g.enabled !== false ? '禁用' : '启用')).addEventListener('click', async () => {
@@ -2671,11 +2781,22 @@
       });
     }
     function parseMembers() { return document.getElementById('mg-members').value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean); }
+    function memberMatch(p, m) {
+      const modelFast = m.endsWith('-fast');
+      if (p === '*') return !modelFast;
+      if (p === '*-fast') return modelFast;
+      if (p.endsWith('*-fast')) return modelFast && m.startsWith(p.slice(0, -6)) && m.endsWith('-fast');
+      if (p.endsWith('*')) return !modelFast && m.startsWith(p.slice(0, -1));
+      return p === m;
+    }
     function previewGroup() {
       const pats = parseMembers();
-      const match = (p, m) => p === '*' || (p.endsWith('*') ? m.startsWith(p.slice(0, -1)) : p === m);
-      const hit = mdModels.filter((m) => pats.some((p) => match(p, m.model))).map((m) => m.model);
-      document.getElementById('mg-preview').textContent = pats.length ? '命中 ' + hit.length + ' 个已知模型' + (hit.length ? ': ' + hit.slice(0, 6).join(', ') + (hit.length > 6 ? ' …' : '') : '') : '';
+      const hit = mdModels.filter((m) => pats.some((p) => memberMatch(p, m.model))).map((m) => m.model);
+      const baseN = hit.filter((m) => !m.endsWith('-fast')).length;
+      const fastN = hit.filter((m) => m.endsWith('-fast')).length;
+      let warn = '';
+      if (baseN && fastN) warn = ' ⚠ 混轨: 基础 ' + baseN + ' + fast ' + fastN + ' — 请拆成两组';
+      document.getElementById('mg-preview').textContent = pats.length ? '基础 ' + baseN + ' · fast ' + fastN + (hit.length ? ': ' + hit.slice(0, 6).join(', ') + (hit.length > 6 ? ' …' : '') : '') + warn : '';
     }
     document.getElementById('mg-members').addEventListener('input', previewGroup);
     document.getElementById('mg-reset').addEventListener('click', () => { ['mg-id', 'mg-name', 'mg-note', 'mg-members'].forEach((id) => { document.getElementById(id).value = ''; }); previewGroup(); });
@@ -2694,7 +2815,10 @@
         const lab = el('label', { class: 'inline', style: 'margin-right:10px;white-space:nowrap' });
         const cb = el('input', { type: 'checkbox', value: g.id });
         cb.checked = (selected || []).includes(g.id);
-        lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + g.name + ' (' + g.id + ')'));
+        lab.appendChild(cb);
+        const kind = g.kind || '';
+        const tag = kind === 'fast' ? ' fast' : (kind === 'mixed' ? ' 混' : (kind === 'base' ? ' 基' : ''));
+        lab.appendChild(document.createTextNode(' ' + g.name + ' (' + g.id + tag + ')'));
         box.appendChild(lab);
       });
     }
