@@ -332,6 +332,30 @@ pub async fn api_models_unhide(
     }
 }
 
+/// 人工确认模型存在 (unknown_model 404 的逃生门): 上游名单滞后/拉不到时,
+/// 新模型会被入口 404 误杀, 此接口写 ModelEntry.known=true 豁免.
+pub async fn api_models_mark_known(
+    State(state): State<Arc<AppState>>,
+    Path(model): Path<String>,
+) -> Response {
+    match registry().mark_known(&model) {
+        Ok(true) => {
+            state.audit.key_op("model_mark_known", &model, json!({}));
+            Json(json!({"ok": true, "model": model})).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "model not in registry; add a price row first"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ResolveQuery {
     pub model: String,

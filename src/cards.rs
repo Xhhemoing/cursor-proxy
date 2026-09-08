@@ -127,6 +127,12 @@ pub fn model_price_known(model: &str) -> bool {
     all_price_rows().any(|(n, _)| *n == base || base.starts_with(n))
 }
 
+/// 内置价格表是否认识该模型 (精确/前缀, 与 model_price 同规则, 不含注册表)
+pub fn builtin_model_known(model: &str) -> bool {
+    let base = model.strip_suffix("-fast").unwrap_or(model);
+    all_price_rows().any(|(n, _)| *n == base || base.starts_with(n))
+}
+
 /// 内置官方价格表查询 (精确 > 最长前缀 > 兜底), `-fast` 变体 ×2
 pub fn builtin_model_price(model: &str) -> (f64, f64, f64, f64) {
     let fast = model.ends_with("-fast");

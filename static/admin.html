@@ -124,6 +124,22 @@
     .filter .foot { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
     .filter .foot .info { color: var(--muted); font: 12px var(--mono); margin-right: auto; }
 
+    /* 请求日志页: 上方固定区压缩 — 筛选默认收起为一行摘要, 展开才是完整表单; 统计条变单行 */
+    #page-logs .filter .fields { grid-template-columns: repeat(5, minmax(100px, 1fr)); }
+    #page-logs .filter.collapsed .fields label:nth-child(n+3),
+    #page-logs .filter.collapsed .foot { display: none; }
+    #page-logs .filter.collapsed { padding: 4px 10px; }
+    #page-logs .filter.collapsed .fields { display: flex; gap: 8px; align-items: center; }
+    #page-logs .filter.collapsed .fields label { flex-direction: row; align-items: center; gap: 6px; }
+    #page-logs .filter.collapsed .fields input { height: 26px; }
+    #lg-filter-toggle { margin-left: auto; }
+    #page-logs .stat-strip { margin-bottom: 6px; }
+    #page-logs .stat-strip > div { padding: 4px 12px; display: flex; align-items: baseline; gap: 8px; }
+    #page-logs .stat-strip .v { font-size: 14px; margin-top: 0; }
+    #page-logs .stat-strip .s { display: inline; color: var(--muted); font-size: 11px; }
+    #page-logs .page-head { margin-bottom: 2px; }
+    #page-logs .grid-2 { grid-template-columns: 1fr 240px !important; }
+
     /* ---------- 控件 ---------- */
     label { display: flex; flex-direction: column; gap: 6px; color: var(--ink-2); font-size: 13px; }
     label.inline { flex-direction: row; align-items: center; gap: 8px; height: 32px; }
@@ -909,7 +925,7 @@
             <button type="button" class="danger" id="lg-clear">清空缓冲</button>
           </div>
         </div>
-        <form class="filter" id="lg-filter">
+        <form class="filter collapsed" id="lg-filter">
           <div class="fields">
             <label>搜索 <input id="lg-q" placeholder="req_id / 模型 / 账号 / key / IP"></label>
             <label>身份 <select id="lg-kind"><option value="">全部</option><option value="key">API Key</option><option value="card">套餐卡</option><option value="anon">匿名</option></select></label>
@@ -921,6 +937,7 @@
             <label>流式 <select id="lg-stream"><option value="">全部</option><option value="true">SSE</option><option value="false">非流式</option></select></label>
             <label>延迟 ≥ ms <input id="lg-minlat" type="number" min="0" placeholder="如 30000"></label>
             <label>条数 <select id="lg-n"><option>100</option><option>200</option><option selected>300</option><option>500</option></select></label>
+            <button type="button" class="ghost" id="lg-filter-toggle">展开筛选 ▾</button>
           </div>
           <div class="foot"><span class="info" id="lg-msg"></span><button type="button" class="ghost" id="lg-reset">重置</button><button type="submit">筛选</button></div>
         </form>
@@ -936,7 +953,7 @@
             <div class="ph"><h3>日志 <span class="muted" id="lg-count"></span></h3></div>
             <div class="table-scroll">
               <table id="lg-table">
-                <thead><tr><th>时间</th><th>状态</th><th>身份</th><th>模型</th><th>账号</th><th>tokens</th><th>面值 $</th><th>延迟</th><th>IP</th><th></th></tr></thead>
+                <thead><tr><th>时间</th><th>状态</th><th>身份</th><th>模型</th><th>账号</th><th>tokens (in/out/缓存)</th><th>面值 $</th><th>延迟</th><th>IP</th><th></th></tr></thead>
                 <tbody id="lg-body"><tr><td colspan="10" class="muted">加载中…</td></tr></tbody>
               </table>
             </div>
@@ -1250,8 +1267,20 @@
     }
     function statusCell(acc) {
       if (acc.cooldown) return ['冷却 ' + (acc.cooldown_remaining_s || 0) + 's', 'bad'];
+      if (!acc.enabled && acc.ineligible_reason) return ['资格禁用', 'bad'];
+      if (!acc.enabled && acc.auto_disabled_remaining_secs != null) return ['隔离 ' + acc.auto_disabled_remaining_secs + 's', 'warn'];
       if (!acc.enabled) return ['已禁用', 'warn'];
       return ['正常', 'ok'];
+    }
+    // 账号「为什么」一行: 资格禁用原因 (免费号/Bot Plan/token 过期, 不自动恢复) > 自动隔离 > 最近一次上游错误
+    function accountWhy(acc) {
+      if (acc.ineligible_reason) return ['资格禁用 · 需人工处理: ' + acc.ineligible_reason, 'err'];
+      if (acc.auto_disabled_remaining_secs != null) return ['自动隔离中 (' + acc.auto_disabled_remaining_secs + 's 后自动恢复)' + (acc.last_error ? ' · ' + acc.last_error.message : ''), 'err'];
+      if (acc.last_error && acc.last_error.message && (acc.cooldown || (acc.stats && acc.stats.consecutive_errors > 0))) {
+        const age = Math.round((Date.now() / 1000 - acc.last_error.at) / 60);
+        return ['最近错误 (' + (age < 1 ? '刚刚' : age + '分钟前') + '): ' + acc.last_error.message, 'meta'];
+      }
+      return null;
     }
     function fmtQuota(q) {
       if (!q) return '未探测';
@@ -1319,6 +1348,8 @@
         c.appendChild(el('div', { class: 'meta' }, fmtQuota(acc.quota)));
       }
       if (acc.stats && acc.stats.consecutive_errors > 0) c.appendChild(el('div', { class: 'err' }, '连续错误 ' + acc.stats.consecutive_errors + ' 次' + (acc.stats.auto_disabled_count ? ' · 自动禁用 ' + acc.stats.auto_disabled_count + ' 次' : '')));
+      const why = accountWhy(acc);
+      if (why) { const w = el('div', { class: why[1], title: why[0] }, why[0]); w.style.cssText = 'font-size:11px;white-space:normal;word-break:break-all;max-height:3.6em;overflow:hidden'; c.appendChild(w); }
       const rows = el('div', { class: 'rows' });
       [['优先级', String(acc.priority != null ? acc.priority : 50)], ['请求', fmtN(acc.requests)], ['错误', String(acc.errors)], ['在飞', acc.inflight + ' / ' + acc.max_concurrency], ['健康', acc.health_score == null ? '—' : acc.health_score + ' / 100']]
         .forEach(([k, v]) => { const d = el('div'); d.appendChild(el('span', null, k)); d.appendChild(el('span', null, v)); rows.appendChild(d); });
@@ -2487,6 +2518,14 @@
       (st.by_model || []).forEach((m) => dl.appendChild(el('option', { value: m.name })));
     }
     function fmtLat(ms) { ms = Number(ms || 0); return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms'; }
+    function fmtK(n) { n = Number(n || 0); return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
+    // 速度展示钳制: ttft≈latency 时 (首帧即末帧, kimi 无 reasoning 流常见) gen_ms≈0 → tps 爆到百万级,
+    // 那不是真实速度. 超过 500 tok/s 的读数一律不显示 (真实模型上限 ~150).
+    function fmtTps(l) {
+      const t = Number(l.output_tps);
+      if (!isFinite(t) || t <= 0 || t > 500 || Number(l.output_tokens || 0) < 50) return '';
+      return ' <span class="muted" style="font-size:10px">' + t.toFixed(0) + 't/s</span>';
+    }
     function renderLogTable() {
       const tb = document.getElementById('lg-body');
       document.getElementById('lg-count').textContent = lgRows.length ? '(' + lgRows.length + ')' : '';
@@ -2502,9 +2541,9 @@
         const lat = Number(l.latency_ms || 0);
         tr.innerHTML = '<td class="mono muted">' + t + '</td><td><span class="pill ' + (ok ? 'ok' : 'bad') + '">' + esc(String(l.status || '')) + '</span>' + (l.stream ? ' <span class="muted" style="font-size:10px">SSE</span>' : '') + '</td>' +
           '<td>' + who + '</td><td class="mono">' + esc(l.model || '') + '</td><td class="mono">' + esc(l.account || '') + '</td>' +
-          '<td class="mono" title="in ' + (l.input_tokens || 0) + ' · out ' + (l.output_tokens || 0) + ' · cr ' + (l.cache_read_tokens || 0) + ' · cw ' + (l.cache_write_tokens || 0) + '">' + fmtN(l.total_tokens) + '</td>' +
+          '<td class="mono" title="in ' + (l.input_tokens || 0) + ' · out ' + (l.output_tokens || 0) + ' · cache_read ' + (l.cache_read_tokens || 0) + ' · cache_write ' + (l.cache_write_tokens || 0) + '">' + fmtK(l.input_tokens) + '/' + fmtK(l.output_tokens) + ' <span class="muted" style="font-size:10px">cr' + fmtK(l.cache_read_tokens) + (Number(l.cache_write_tokens) ? ' cw' + fmtK(l.cache_write_tokens) : '') + '</span></td>' +
           '<td class="mono">' + (l.priced === false ? '<span class="warn" title="不在价格表, 按兜底价估算">~' + esc(String(l.cost || '')) + '</span>' : esc(String(l.cost || ''))) + '</td>' +
-          '<td class="mono ' + (lat >= 60000 ? 'bad' : lat >= 20000 ? 'warn' : '') + '" title="' + (l.ttft_ms != null ? '首字 ' + (l.ttft_ms / 1000).toFixed(1) + 's · ' : '') + (l.output_tps != null ? Number(l.output_tps).toFixed(0) + ' tok/s' : '') + '">' + fmtLat(lat) + (l.ttft_ms != null ? ' <span class="muted" style="font-size:10px">首字' + (l.ttft_ms / 1000).toFixed(1) + 's</span>' : '') + (l.output_tps != null && l.output_tokens >= 50 ? ' <span class="muted" style="font-size:10px">' + Number(l.output_tps).toFixed(0) + 't/s</span>' : '') + '</td><td class="mono muted">' + esc(l.client_ip || '') + '</td><td></td>';
+          '<td class="mono ' + (lat >= 60000 ? 'bad' : lat >= 20000 ? 'warn' : '') + '" title="' + (l.ttft_ms != null ? '首字 ' + (l.ttft_ms / 1000).toFixed(1) + 's · ' : '') + (l.output_tps != null ? Number(l.output_tps).toFixed(0) + ' tok/s' : '') + '">' + fmtLat(lat) + (l.ttft_ms != null ? ' <span class="muted" style="font-size:10px">首字' + (l.ttft_ms / 1000).toFixed(1) + 's</span>' : '') + fmtTps(l) + '</td><td class="mono muted">' + esc(l.client_ip || '') + '</td><td></td>';
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button', title: '详情' }, '…')).addEventListener('click', () => {
           document.getElementById('lg-detail-body').textContent = JSON.stringify(l, null, 2);
@@ -2554,6 +2593,11 @@
     document.getElementById('lg-live').addEventListener('click', () => lgSetLive(true));
     document.getElementById('lg-pause').addEventListener('click', () => lgSetLive(false));
     document.getElementById('lg-filter').addEventListener('submit', (e) => { e.preventDefault(); lgLastId = 0; loadLogsPage(true).catch((x) => lgMsg(x.message, true)); });
+    document.getElementById('lg-filter-toggle').addEventListener('click', () => {
+      const f = document.getElementById('lg-filter');
+      const collapsed = f.classList.toggle('collapsed');
+      document.getElementById('lg-filter-toggle').textContent = collapsed ? '展开筛选 ▾' : '收起筛选 ▴';
+    });
     document.getElementById('lg-reset').addEventListener('click', () => {
       ['lg-q', 'lg-key', 'lg-model', 'lg-account', 'lg-status', 'lg-minlat'].forEach((id) => { document.getElementById(id).value = ''; });
       ['lg-kind', 'lg-ok', 'lg-stream'].forEach((id) => { document.getElementById(id).value = ''; });

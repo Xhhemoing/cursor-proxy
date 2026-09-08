@@ -33,6 +33,11 @@ pub struct ModelEntry {
     /// 仅作展示/提醒, 不参与闸门 —— 上游列表拉不到不代表模型不可用.
     #[serde(default)]
     pub upstream: bool,
+    /// 人工确认存在的模型 (面板「标记存在」): 即使上游名单拉不到也豁免 unknown_model 404.
+    /// 2026-09-07 起 unknown 模型在网关入口直接 404 (不再记假账/烧上游重试), 上游名单
+    /// 滞后时会误伤新上线模型, 此字段是逃生门.
+    #[serde(default)]
+    pub known: bool,
     #[serde(default)]
     pub note: String,
 }
@@ -164,6 +169,30 @@ impl ModelRegistry {
     }
 
     // ── 模型 (定价/层级) ──
+
+    /// 人工标记存在 (unknown_model 404 的豁免)
+    pub fn mark_known(&self, model: &str) -> anyhow::Result<bool> {
+        let mut d = (*self.data.load_full()).clone();
+        let Some(e) = d.models.iter_mut().find(|e| e.model == model) else {
+            return Ok(false);
+        };
+        e.known = true;
+        self.save(d)?;
+        Ok(true)
+    }
+
+    /// 请求入口的「模型存在」判定 (unknown_model 404 闸门):
+    /// 注册表命中(含 known 标记) ∪ 内置价格表命中 ∪ 网关别名 ∪ 上游名单存在.
+    /// 上游名单为空 = 未拉取过 → 不启用 404 (行为同旧版), 避免冷启动全量误杀.
+    pub fn model_known(&self, model: &str, upstream: &[String]) -> bool {
+        if self.lookup(model).is_some() {
+            return true;
+        }
+        if crate::cards::builtin_model_known(model) {
+            return true;
+        }
+        Self::upstream_present(model, upstream)
+    }
 
     /// 精确名 > 最长前缀命中 (注册表内条目名也当前缀用, 与内置表规则一致)
     pub fn lookup(&self, model: &str) -> Option<ModelEntry> {
@@ -1005,6 +1034,28 @@ mod tests {
         assert!(!candidate_models(&[])
             .iter()
             .any(|(m, _)| m == "gpt-5.6-cyber" || m == "gpt-5.4-pro"));
+    }
+
+    #[test]
+    fn model_known_gate_rules() {
+        let r = ModelRegistry::empty();
+        let up: Vec<String> = ["gpt-5.4-high", "claude-opus-5-low"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // 内置价格表命中 (注册表为空)
+        assert!(r.model_known("kimi-k3-max", &up));
+        // 上游精确/变体命中
+        assert!(r.model_known("gpt-5.4-high", &up));
+        assert!(r.model_known("gpt-5.4", &up)); // 基名有变体
+        assert!(r.model_known("claude-opus-5-low-fast", &up)); // 剥 -fast 收敛
+                                                               // 网关别名
+        assert!(r.model_known("kimi-k3", &up));
+        // 乱打的名字
+        assert!(!r.model_known("gpt-99-turbo", &up));
+        assert!(!r.model_known("", &up));
+        // 上游名单为空 → 不启用 404
+        assert!(r.model_known("gpt-99-turbo", &[]));
     }
 
     #[test]

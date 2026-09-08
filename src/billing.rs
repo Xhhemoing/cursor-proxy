@@ -219,13 +219,29 @@ impl BillingRecord {
         })
     }
 
-    /// 输出速度 tok/s: 输出 token ÷ (总延迟 − 首字延迟). 无输出或时长为 0 → None
+    /// 输出速度 tok/s: 输出 token ÷ (总延迟 − 首字延迟). 无输出或时长为 0 → None.
+    /// 钳制 (2026-09-07 账本实测 kimi-k3-max 76% 的行 tps>500, 最高 3,465,000):
+    /// kimi 无 reasoning 流, 首帧检测条件要求 content/reasoning, 而 Cursor 对 kimi 常把整段输出
+    /// 攒在少数几帧 (ttft/latency 均值 0.905, 4,358 行 gen<100ms) → gen_ms≈0 → 假速度.
+    /// 此时真实速度只能用 output/latency 当下限 (含首帧等待, 低估但量级正确).
+    /// 规则: gen_ms≥100ms 且 tps≤500 → 正常口径; 否则回退 output/latency (仍 >500 才 None).
     pub fn output_tps(&self) -> Option<f64> {
+        if self.output_tokens == 0 {
+            return None;
+        }
         let gen_ms = self.latency_ms.saturating_sub(self.ttft_ms.unwrap_or(0));
-        if self.output_tokens == 0 || gen_ms == 0 {
+        if gen_ms >= 100 {
+            let tps = self.output_tokens as f64 / (gen_ms as f64 / 1000.0);
+            if tps <= 500.0 {
+                return Some(tps);
+            }
+        }
+        // 回退: 全时长口径 (下限)
+        let tps = self.output_tokens as f64 / (self.latency_ms.max(1) as f64 / 1000.0);
+        if tps > 500.0 {
             None
         } else {
-            Some(self.output_tokens as f64 / (gen_ms as f64 / 1000.0))
+            Some(tps)
         }
     }
 
@@ -235,10 +251,20 @@ impl BillingRecord {
             .latency_ms
             .saturating_sub(self.ttft_ms.unwrap_or(0))
             .saturating_sub(self.pace_wait_ms);
-        if self.output_tokens == 0 || gen_ms == 0 {
+        if self.output_tokens == 0 {
+            return None;
+        }
+        if gen_ms >= 100 {
+            let tps = self.output_tokens as f64 / (gen_ms as f64 / 1000.0);
+            if tps <= 500.0 {
+                return Some(tps);
+            }
+        }
+        let tps = self.output_tokens as f64 / (self.latency_ms.max(1) as f64 / 1000.0);
+        if tps > 500.0 {
             None
         } else {
-            Some(self.output_tokens as f64 / (gen_ms as f64 / 1000.0))
+            Some(tps)
         }
     }
 
@@ -854,7 +880,15 @@ mod tests {
         assert!((r.output_tps().unwrap() - 40.0).abs() < 1e-9); // 无 ttft: 200/5s
         let r = r.with_ttft(Some(1000));
         assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9); // 200/(5-1)s
-                                                                // 限速 sleep 了 2s: 客户端看到 50 tok/s, 上游其实 100 tok/s
+                                                                // 首帧即末帧 (ttft==latency): 回退全时长口径 200tok/5s=40 tps, 不再是百万级假读数
+        let r = BillingRecord::build(&ctx, "z", "kimi-k3", "a", u, true, 200, 5000, "")
+            .with_ttft(Some(5000));
+        assert!((r.output_tps().unwrap() - 40.0).abs() < 1e-9);
+        // 极端: 200 tok / 100ms 全程 = 2000 tps 仍超上限 → None
+        let r = BillingRecord::build(&ctx, "z2", "kimi-k3", "a", u, true, 200, 100, "")
+            .with_ttft(Some(99));
+        assert_eq!(r.output_tps(), None);
+        // 限速 sleep 了 2s: 客户端看到 50 tok/s, 上游其实 100 tok/s
         let r = r.with_pace(50, 2000, 150);
         assert!((r.output_tps().unwrap() - 50.0).abs() < 1e-9);
         assert!((r.upstream_tps().unwrap() - 100.0).abs() < 1e-9);

@@ -764,6 +764,10 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_models_unhide),
         )
         .route(
+            "/admin/api/models/:model/mark-known",
+            post(admin::api_models_mark_known),
+        )
+        .route(
             "/admin/api/cards/cost-model",
             get(admin::api_cost_model_get).post(admin::api_cost_model_set),
         )
@@ -1405,7 +1409,10 @@ async fn inference_handler(
             })
             .unwrap_or_default();
         res = Err(Response::from_parts(parts, axum::body::Body::from(bytes)));
-        if (400..500).contains(&code) {
+        // unknown_model (404) 不计入请求日志: 乱打模型名的请求在闸门处已 warn 到 gateway.log,
+        // 进 ring buffer 只会稀释真实流量统计 (且 0 token 假行会拉低均价/成功率).
+        let skip_log = code == 404 && reason.contains("does not exist");
+        if (400..500).contains(&code) && !skip_log {
             // 识别身份: 卡 / key 名 / 匿名 (不记录完整 key)
             let (kind, key_name, key_prefix) = if raw_token.starts_with("card-") {
                 (
@@ -1678,6 +1685,31 @@ async fn inference_handler_inner(
     }
 
     // ── 模型访问控制 ──
+    // 0) 未知模型 404: 乱打的模型名不进号池/不记假账/不烧上游重试 (此前会按兜底价走完全程,
+    //    账本里出现一堆根本没发生过的计费行). 上游名单为空 = 未拉取过 → 不启用 (同旧版).
+    //    逃生门: 面板「标记存在」写 ModelEntry.known=true.
+    {
+        let upstream_names = state.card_store.upstream_names();
+        if !models::registry().model_known(&model, &upstream_names) {
+            state.metrics.observe_err();
+            warn!(
+                event = "unknown_model",
+                req_id = %request_id,
+                model = %model,
+                client_ip = %client_ip,
+                "unknown model rejected at gate; not billed, not logged to ledger"
+            );
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(openai_error(
+                    &format!("model '{model}' does not exist"),
+                    "unknown_model",
+                    404,
+                )),
+            )
+                .into_response());
+        }
+    }
     // 1) 全局停用的模型 (models.json enabled=false) 对所有人 403
     if models::registry().is_disabled(&model) {
         return Err((
@@ -1871,10 +1903,13 @@ async fn inference_handler_inner(
                 match state.cursor_factory.resolve_for(&state.proxies, &account) {
                     Ok((c, pid)) => (Some(c), pid),
                     Err(e) => {
-                        state.pool.release(&account_id, true, 15);
+                        // 出口代理分配失败是代理池的问题, 不是账号的问题: 不计连续错误、不冷却账号
+                        // (槽位由 permit 替换时自动归还). 之前 release(true, 15) 会让代理池抖动时
+                        // 把整批账号打进冷却.
                         state.metrics.observe_err();
                         error!(event = "proxy_assign", req_id = %request_id, account = %account_id, error = %e, "proxy assign failed");
-                        last_error = e;
+                        last_error = format!("proxy assign failed: {e}");
+                        skip_account_switch = false;
                         continue;
                     }
                 }
@@ -1932,6 +1967,121 @@ async fn inference_handler_inner(
                     skip_account_switch = true;
                     continue;
                 }
+                // 记录该号最近一次错误原文 (面板「为什么」列); 三类分流之前统一记, 不管后面怎么处理.
+                state.pool.note_error(&account_id, &last_error);
+
+                // 账号资格问题 (免费号/Bot Plan "Named models unavailable: Free plans can only use Auto" /
+                // token 过期 / 账号关闭): 这个号对所有具名模型都会失败且不会自愈. 立即资格禁用 + 写回
+                // accounts.json (重启不复活) + 审计, 然后换号重试 — 不消耗「连续错误→5 次 auto_disable」那条慢路.
+                // 2026-09-07 实测: acc-6/acc-8 各 80/78 请求 100% 失败, 反复 auto_disable→隔离到期→恢复→再败,
+                // 每轮白吃 5 个真实请求的 502.
+                if translate::is_account_ineligible_error(&last_error) {
+                    // 计入错误统计 (面板错误率/健康分要看得到), 冷却本身无意义 — 下一行直接禁用
+                    state.pool.release(&account_id, true, 0);
+                    let flipped = state.pool.mark_ineligible(&account_id, &last_error);
+                    state.metrics.observe_err();
+                    if flipped {
+                        match config::persist_account_enabled(&account_id, false) {
+                            Ok(_) => {
+                                state.audit.account_op(
+                                    "auto_disable_ineligible",
+                                    &account_id,
+                                    json!({"reason": last_error.chars().take(200).collect::<String>(), "req_id": request_id}),
+                                );
+                            }
+                            Err(e) => warn!(
+                                event = "ineligible_persist_failed",
+                                account = %account_id,
+                                error = %e,
+                                "account marked ineligible in memory but accounts.json write failed"
+                            ),
+                        }
+                    }
+                    warn!(
+                        event = "account_ineligible",
+                        req_id = %request_id,
+                        account = %account_id,
+                        attempt = attempt + 1,
+                        persisted = flipped,
+                        error = %last_error,
+                        "account cannot use named models; disabled permanently (manual re-enable only), switching account"
+                    );
+                    skip_account_switch = false;
+                    if attempt == MAX_RETRIES - 1 {
+                        state.ledger.record(
+                            billing::BillingRecord::build(
+                                &bctx,
+                                &request_id,
+                                &model,
+                                &account_id,
+                                translate::Usage::default(),
+                                stream,
+                                502,
+                                start.elapsed().as_millis() as u64,
+                                &client_ip,
+                            )
+                            .with_error(&last_error),
+                        );
+                        let mut body = openai_error(
+                            &format!("upstream error after {} retries: {}", MAX_RETRIES, last_error),
+                            "upstream_error",
+                            502,
+                        );
+                        body["error"]["details"] = upstream_error_details(
+                            &last_error,
+                            MAX_RETRIES,
+                            start.elapsed().as_millis() as u64,
+                            &account_id,
+                            &model,
+                            &request_id,
+                            upstream_name,
+                        );
+                        return Err((StatusCode::BAD_GATEWAY, Json(body)).into_response());
+                    }
+                    continue;
+                }
+
+                // 请求内容被模型拒 ("Model returned error … Try disabling MCP servers" / conversation too long /
+                // bad request): 换号重发同样内容大概率同样结果, 账号也没错. 不计连续错误、不冷却、不重试,
+                // 直接 400 把原因交给客户端 (agent 会据此改工具集/裁上下文, 而不是无脑重试 3 轮再拿 502).
+                if translate::is_request_content_error(&last_error) {
+                    state.metrics.observe_err();
+                    // 不调 pool.release: 既不算账号错误 (号没问题) 也不算成功 (别清别人的连续错误计数)
+                    warn!(
+                        event = "request_rejected_by_model",
+                        req_id = %request_id,
+                        account = %account_id,
+                        model = %model,
+                        error = %last_error,
+                        "model rejected request content; not retrying, not penalizing account"
+                    );
+                    state.ledger.record(
+                        billing::BillingRecord::build(
+                            &bctx,
+                            &request_id,
+                            &model,
+                            &account_id,
+                            translate::Usage::default(),
+                            stream,
+                            400,
+                            start.elapsed().as_millis() as u64,
+                            &client_ip,
+                        )
+                        .with_error(&last_error),
+                    );
+                    let mut body = openai_error(&last_error, "upstream_rejected_request", 400);
+                    body["error"]["details"] = upstream_error_details(
+                        &last_error,
+                        attempt + 1,
+                        start.elapsed().as_millis() as u64,
+                        &account_id,
+                        &model,
+                        &request_id,
+                        upstream_name,
+                    );
+                    return Err((StatusCode::BAD_REQUEST, Json(body)).into_response());
+                }
+
                 // High Load / provider 过载: 同号退避，不记账号错误、不冷却。
                 // 立刻换号 3 次会在 2s 内把 7 个号都打成 erroring，客户端只看到
                 // 无信息的 HTTP 502 "upstream error after 3 retries"。

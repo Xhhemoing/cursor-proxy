@@ -330,6 +330,46 @@ pub fn is_upstream_capacity_error(err: &str) -> bool {
         || e.contains("we're having trouble connecting")
         || e.contains("upstream http 502")
         || e.contains("502 bad gateway")
+        // 2026-09-07 账本核实: nginx 504 / hyper SendRequest (连接池里的死连接被复用) 都是瞬态,
+        // 之前落到「换号 + 30s 冷却 + 计连续错误」分支, 一次网络抖动就把好号打进冷却.
+        || e.contains("upstream http 504")
+        || e.contains("504 gateway time-out")
+        || e.contains("504 gateway timeout")
+        || e.contains("client error (sendrequest)")
+        || e.contains("connection reset")
+        || e.contains("connection closed before message completed")
+}
+
+/// 账号本身「不能用这个模型」— 免费号/Bot Plan 号被 Cursor 拒: `Named models unavailable: Free plans can
+/// only use Auto`. 这不是抖动也不是过载, 是账号资格问题: 同一个号对所有具名模型都会失败, 而且不会自愈.
+/// 2026-09-07 实测: acc-6 / acc-8 (quota 探测 plan="Bot Plan") 各收 80/78 次请求, 错误率 100%,
+/// 反复 auto_disable→隔离到期→恢复→再 5 连败, 每轮都让 5 个真实请求吃 502.
+pub fn is_account_ineligible_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("free plans can only use auto")
+        || e.contains("named models unavailable")
+        || e.contains("error_free_user_usage_limit")
+        || e.contains("error_pro_user_only")
+        || e.contains("error_account_closed")
+        || e.contains("error_auth_token_expired")
+        || e.contains("error_not_logged_in")
+        || e.contains("error_bad_api_key")
+        || e.contains("error_suspicious_usage_blocked")
+}
+
+/// 模型侧对这条请求内容说不 (`Model returned error: … Try disabling MCP servers, or switch models`,
+/// ERROR_BAD_REQUEST, conversation too long…). 换号重发同一份内容大概率还是同样结果, 而且账号没错 —
+/// 不该计连续错误、不该冷却; 直接把原因交给客户端.
+pub fn is_request_content_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("model returned error")
+        || e.contains("try disabling mcp servers")
+        || e.contains("error_bad_request")
+        || e.contains("error_conversation_too_long")
+        || e.contains("error_claude_image_too_large")
+        || e.contains("error_bad_model_name")
+        || e.contains("error_model_no_longer_supported")
+        || e.contains("error_deprecated")
 }
 
 /// 计算重试时的降低后 maxTokens: 当前值减半, 但不低于 floor.
@@ -1763,6 +1803,38 @@ mod tests {
         assert!(!is_upstream_capacity_error(
             "Max mode is only available to paid users"
         ));
+    }
+
+    /// 2026-09-07 账本核实的三类误分类: nginx 504 / hyper SendRequest 是瞬态 (走同号退避);
+    /// 免费号 "Free plans can only use Auto" 是账号资格 (立即禁用, 不重试);
+    /// "Model returned error … MCP" 是请求内容 (不罚号, 直接回客户端).
+    #[test]
+    fn error_classes_transient_vs_ineligible_vs_content() {
+        let nginx504 = "upstream HTTP 504: <html>\r\n<head><title>504 Gateway Time-out</title></head>";
+        let sendreq = "upstream network: client error (SendRequest)";
+        assert!(is_upstream_capacity_error(nginx504));
+        assert!(is_upstream_capacity_error(sendreq));
+        assert!(!is_account_ineligible_error(nginx504));
+        assert!(!is_request_content_error(sendreq));
+
+        let free = "upstream rejected: Named models unavailable: Free plans can only use Auto. Switch to Auto or upgrade plans to continue.";
+        assert!(is_account_ineligible_error(free));
+        assert!(!is_upstream_capacity_error(free));
+        assert!(!is_request_content_error(free));
+        assert!(is_account_ineligible_error("x [code=ERROR_ACCOUNT_CLOSED]"));
+        assert!(is_account_ineligible_error("x [code=ERROR_AUTH_TOKEN_EXPIRED, retryable=false]"));
+
+        let mcp = "upstream rejected: Model returned error: The model returned an error. Try disabling MCP servers, or switch models.";
+        assert!(is_request_content_error(mcp));
+        assert!(!is_upstream_capacity_error(mcp));
+        assert!(!is_account_ineligible_error(mcp));
+        assert!(is_request_content_error("too long [code=ERROR_CONVERSATION_TOO_LONG]"));
+
+        // 过载类不得被另两类抢走
+        let prov = "upstream rejected: Provider Error: We're having trouble connecting to the model provider. [code=ERROR_PROVIDER_ERROR, retryable=true]";
+        assert!(is_upstream_capacity_error(prov));
+        assert!(!is_account_ineligible_error(prov));
+        assert!(!is_request_content_error(prov));
     }
 
     #[tokio::test]

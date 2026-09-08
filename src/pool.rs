@@ -119,6 +119,13 @@ pub struct AccountPool {
     /// 之前 auto_disable 是永久的 (只有人工 toggle 能救), 一次上游模型级故障 (grok-4.6 09-07 05:30–07:00
     /// 全池 502) 会把整个池逐个禁光, 故障恢复后仍无人可用. 隔离期随 auto_disabled_count 指数增长, 上限 30 分.
     auto_disabled_until: Arc<DashMap<String, Instant>>,
+    /// 每号最近一次上游错误原文 (截 200 字) + 时间, 供面板解释「为什么这个号被禁/冷却」.
+    /// 之前 auto_disable 只留一个计数, 运维看到 acc-6「自动禁用 15 次」却不知道是免费号被拒还是网络抖动.
+    last_error: Arc<DashMap<String, (String, f64)>>,
+    /// 资格禁用 (免费号/Bot Plan 被 "Named models unavailable" 拒 / token 过期 / 账号关闭):
+    /// 与 auto_disable 隔离期不同 —— 不会自动恢复, 且写回 accounts.json enabled=false;
+    /// 只有人工启用能救. 这里记原因, 供面板与 stats 展示.
+    ineligible: Arc<DashMap<String, String>>,
 }
 
 #[derive(Debug, Default)]
@@ -207,6 +214,8 @@ impl AccountPool {
             query_cache: Arc::new(parking_lot::RwLock::new(None)),
             state_path: Arc::new(parking_lot::RwLock::new(None)),
             auto_disabled_until: Arc::new(DashMap::new()),
+            last_error: Arc::new(DashMap::new()),
+            ineligible: Arc::new(DashMap::new()),
         }
     }
 
@@ -411,52 +420,48 @@ impl AccountPool {
         let start = self.rr_index.fetch_add(1, Ordering::Relaxed);
         let len = available.len();
 
-        // P4: 预计算会话哈希（只算一次）
-        let session_hash_idx: Option<usize> = session_id.map(|sid| {
-            let mut hasher = DefaultHasher::new();
-            sid.hash(&mut hasher);
-            (hasher.finish() as usize) % len
-        });
-
-        // P4: 环形迭代消除取模
-        for (i, avail) in available.iter().cycle().skip(start).take(len).enumerate() {
-            // 实时可用性 (非重建时刻的 mask 快照): 冷却/auto_disable/quota 变化立即生效
+        // 负载感知路由: 扫描全部可用槽, 挑剩余并发额度最多的 (最闲号优先).
+        // 替代旧的「会话哈希优先」— 哈希不管负载, 会把慢号越压越慢; 会话一致性已由
+        // 上方的 sticky 绑定保证 (同 session 总回同号), 这里只需在自由请求间做负载均衡.
+        let mut best: Option<&AvailableSlot> = None;
+        let mut best_avail = 0usize;
+        for avail in available.iter() {
             if !self.slot_live_available(avail) {
                 continue;
             }
-
-            let slot = &avail.slot;
-
-            // P1: 会话哈希优先 O(1) 匹配
-            if let (Some(sid), Some(hash_idx)) = (session_id, session_hash_idx) {
-                // cycle().skip(start) 后，实际索引 = (start + i) % len
-                // 但因为我们只关心是否命中 hash_idx，直接比较
-                let actual_idx = (start + i) % len;
-                if actual_idx == hash_idx {
-                    if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                        self.bind_session(sid, &slot.account.id);
-                        self.stats
-                            .entry(slot.account.id.clone())
-                            .or_default()
-                            .record_request();
-                        return AcquireTry::Got((slot.account.clone(), permit));
+            let a = avail.slot.sem.available_permits();
+            if a > best_avail {
+                best_avail = a;
+                best = Some(avail);
+            }
+        }
+        // 同分时按 rr_index 起点的轮询次序找第一个同分的, 避免长期偏袒列表头部
+        if let Some(best_slot) = best {
+            // 从最闲号集合里按轮询起点挑一个 (消除同分时的固定偏序)
+            for i in 0..len {
+                let idx = (start + i) % len;
+                let avail = &available[idx];
+                if !self.slot_live_available(avail) {
+                    continue;
+                }
+                if avail.slot.sem.available_permits() != best_avail {
+                    continue;
+                }
+                if let Ok(permit) = avail.slot.sem.clone().try_acquire_owned() {
+                    if !avoid_sticky {
+                        if let Some(sid) = session_id {
+                            self.bind_session(sid, &avail.slot.account.id);
+                        }
                     }
+                    self.stats
+                        .entry(avail.slot.account.id.clone())
+                        .or_default()
+                        .record_request();
+                    return AcquireTry::Got((avail.slot.account.clone(), permit));
                 }
             }
-
-            // 普通轮询
-            if let Ok(permit) = slot.sem.clone().try_acquire_owned() {
-                if !avoid_sticky {
-                    if let Some(sid) = session_id {
-                        self.bind_session(sid, &slot.account.id);
-                    }
-                }
-                self.stats
-                    .entry(slot.account.id.clone())
-                    .or_default()
-                    .record_request();
-                return AcquireTry::Got((slot.account.clone(), permit));
-            }
+            // 理论到不了这: best_avail>0 却总获取失败 = 并发竞争, 返回 Busy 让上层退避重试
+            let _ = best_slot;
         }
 
         // 可用列表非空但全部获取失败 → Busy
@@ -578,6 +583,10 @@ impl AccountPool {
     pub fn auto_disable(&self, account_id: &str) -> bool {
         if let Some(mut disabled) = self.disabled.get_mut(account_id) {
             *disabled = true;
+            // 必须先放掉 DashMap 写守卫: 下面 rebuild_available_slots() 会对同一张 `disabled` 表做 get(),
+            // 同 shard 的读写锁重入 = 死锁 (c5b0204 引入, cargo test 三个 auto_disable 用例挂死复现).
+            // 生产里这会卡死一个 tokio worker 线程, 而且恰好发生在「账号连续出错」这种最需要它工作的时候.
+            drop(disabled);
             let mut times = 1;
             if let Some(stats) = self.stats.get(account_id) {
                 times = stats.auto_disabled_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -605,6 +614,10 @@ impl AccountPool {
             *v = !enabled;
             drop(v);
             self.auto_disabled_until.remove(account_id);
+            if enabled {
+                // 人工重新启用 = 运维已处理 (换号/升级套餐), 清掉资格禁用标记让它重新参与轮询
+                self.ineligible.remove(account_id);
+            }
             self.bump_version();
             old
         })
@@ -616,9 +629,54 @@ impl AccountPool {
             let new = !*v;
             drop(v);
             self.auto_disabled_until.remove(account_id);
+            if new {
+                self.ineligible.remove(account_id);
+            }
             self.bump_version();
             new
         })
+    }
+
+    /// 记录该号最近一次上游错误原文 (面板「为什么被禁/冷却」用). 截 200 字.
+    pub fn note_error(&self, account_id: &str, err: &str) {
+        let msg: String = err.chars().take(200).collect();
+        self.last_error
+            .insert(account_id.to_string(), (msg, unix_now()));
+    }
+
+    pub fn last_error(&self, account_id: &str) -> Option<(String, f64)> {
+        self.last_error.get(account_id).map(|e| e.value().clone())
+    }
+
+    /// 资格禁用: 账号本身不能用具名模型 (免费号/Bot Plan/token 过期/账号关闭).
+    /// 与 auto_disable 的区别: 立即 (不等 5 连败)、不自动恢复、解绑粘性会话. 调用方负责写回 accounts.json.
+    /// 返回 true = 本次真的从启用变成禁用 (调用方据此决定是否落盘/审计); 已禁用的号返回 false.
+    pub fn mark_ineligible(&self, account_id: &str, reason: &str) -> bool {
+        let Some(mut disabled) = self.disabled.get_mut(account_id) else {
+            return false;
+        };
+        let was_enabled = !*disabled;
+        *disabled = true;
+        drop(disabled);
+        self.auto_disabled_until.remove(account_id);
+        self.ineligible.insert(
+            account_id.to_string(),
+            reason.chars().take(200).collect(),
+        );
+        self.note_error(account_id, reason);
+        if let Some(stats) = self.stats.get(account_id) {
+            stats.consecutive_errors.store(0, Ordering::Relaxed);
+        }
+        self.sessions
+            .retain(|_, (aid, _)| aid.as_str() != account_id);
+        self.bump_version();
+        self.rebuild_available_slots();
+        was_enabled
+    }
+
+    /// 该号是否处于资格禁用 (返回原因)
+    pub fn ineligible_reason(&self, account_id: &str) -> Option<String> {
+        self.ineligible.get(account_id).map(|r| r.value().clone())
     }
 
     /// 后台定时: 隔离到期的 auto_disable 账号重新启用. 返回恢复的 id 列表.
@@ -728,6 +786,8 @@ impl AccountPool {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let stats = self.stats.get(&id);
+            let ineligible_reason = self.ineligible_reason(&id);
+            let last_error = self.last_error(&id);
             accounts.push(PersistedAccountState {
                 id,
                 cooldown_remaining_secs: remaining,
@@ -745,6 +805,8 @@ impl AccountPool {
                     .map(|s| s.auto_disabled_count.load(Ordering::Relaxed))
                     .unwrap_or(0),
                 saved_at: now,
+                ineligible_reason,
+                last_error,
             });
         }
         let blob = PersistedPoolState {
@@ -789,6 +851,16 @@ impl AccountPool {
                 stats
                     .auto_disabled_count
                     .store(rec.auto_disabled_count, Ordering::Relaxed);
+            }
+            // 资格禁用原因只在该号仍是禁用态时恢复 (运维已在 accounts.json 手动启用 → 原因作废)
+            if let Some(reason) = rec.ineligible_reason {
+                let still_disabled = self.disabled.get(&rec.id).map(|v| *v).unwrap_or(false);
+                if still_disabled {
+                    self.ineligible.insert(rec.id.clone(), reason);
+                }
+            }
+            if let Some(le) = rec.last_error {
+                self.last_error.insert(rec.id.clone(), le);
             }
             restored += 1;
         }
@@ -1175,6 +1247,10 @@ impl AccountPool {
             "proxy_id": slot.account.proxy_id,
             "tags": slot.account.tags,
             "priority": slot.account.priority,
+            // 面板解释「为什么」: 资格禁用原因 (免费号/token 过期, 不自动恢复) / 自动隔离剩余秒 / 最近一次上游错误
+            "ineligible_reason": self.ineligible_reason(id),
+            "auto_disabled_remaining_secs": self.auto_disabled_remaining_secs(id),
+            "last_error": self.last_error(id).map(|(m, ts)| serde_json::json!({"message": m, "at": ts})),
         })
     }
 
@@ -1438,6 +1514,13 @@ struct PersistedAccountState {
     consecutive_errors: u64,
     auto_disabled_count: u64,
     saved_at: f64,
+    /// 资格禁用原因 (免费号/token 过期…). 重启后 accounts.json 里 enabled=false 只说「禁了」,
+    /// 这里补「为什么」; 旧文件无此键 → None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ineligible_reason: Option<String>,
+    /// 最近一次上游错误 (message, unix ts)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<(String, f64)>,
 }
 
 fn unix_now() -> f64 {
@@ -1463,6 +1546,12 @@ mod tests {
             proxy_id: None,
             tags: Vec::new(),
             priority: 50,
+            // 并行工作引入的 Grok Build 凭证字段, 测试填空默认
+            xai_sso_token: String::new(),
+            xai_access_token: String::new(),
+            xai_refresh_token: String::new(),
+            xai_token_expires_at: None,
+            xai_email: None,
         }
     }
 
@@ -1697,6 +1786,60 @@ mod tests {
         assert!(pool.should_auto_disable("a", 5));
         assert!(pool.auto_disable("a"));
         assert!(!pool.should_auto_disable("a", 5)); // 已禁用，consecutive 重置
+    }
+
+    /// 资格禁用 (免费号被 "Free plans can only use Auto" 拒): 立即禁、不进 reaper 自动恢复、
+    /// 解绑粘性会话、面板行带原因; 人工 set_enabled(true) 才清掉标记.
+    #[tokio::test]
+    async fn ineligible_is_immediate_persistent_and_explained() {
+        let pool = AccountPool::new(vec![acc("free", true), acc("paid", true)], 8);
+        // 先让会话粘到 free 号上
+        let (got, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
+        let sticky_id = got.id.clone();
+        drop(_p);
+        let reason = "upstream rejected: Named models unavailable: Free plans can only use Auto.";
+        assert!(pool.mark_ineligible(&sticky_id, reason), "first mark flips enabled→disabled");
+        assert!(!pool.mark_ineligible(&sticky_id, reason), "second mark is a no-op");
+        assert!(pool.ineligible_reason(&sticky_id).unwrap().contains("Free plans"));
+        assert!(pool.auto_disabled_remaining_secs(&sticky_id).is_none(), "not a quarantine");
+        // reaper 绝不恢复资格禁用
+        assert!(pool.reap_auto_disabled().is_empty());
+        // 粘性会话已解绑: 同 session 再来必须换到另一个号
+        let other = if sticky_id == "free" { "paid" } else { "free" };
+        for _ in 0..5 {
+            let (g, _p) = pool.acquire_by_session(Some("s1")).await.unwrap();
+            assert_eq!(g.id, other, "ineligible account must never be routed");
+        }
+        // 面板行 (admin /api/accounts 走 query_accounts → build_account_row) 带原因 + 最近错误
+        let page = pool.query_accounts("", "all", "id", 1, 50, "");
+        let rows = page["accounts"].as_array().unwrap();
+        let row = rows.iter().find(|r| r["id"] == sticky_id).unwrap();
+        assert_eq!(row["enabled"], false);
+        assert!(row["ineligible_reason"].as_str().unwrap().contains("Free plans"));
+        assert!(row["last_error"]["message"].as_str().unwrap().contains("Named models"));
+        assert!(row["auto_disabled_remaining_secs"].is_null());
+        // 人工启用 = 清标记, 重新可路由
+        pool.set_enabled(&sticky_id, true);
+        assert!(pool.ineligible_reason(&sticky_id).is_none());
+        let mut seen = false;
+        for _ in 0..10 {
+            let (g, _p) = pool.acquire().await.unwrap();
+            if g.id == sticky_id {
+                seen = true;
+            }
+        }
+        assert!(seen, "manually re-enabled account is routable again");
+    }
+
+    #[test]
+    fn note_error_keeps_latest_truncated() {
+        let pool = AccountPool::new(vec![acc("a", true)], 1);
+        assert!(pool.last_error("a").is_none());
+        pool.note_error("a", "first");
+        pool.note_error("a", &"x".repeat(500));
+        let (msg, ts) = pool.last_error("a").unwrap();
+        assert_eq!(msg.chars().count(), 200);
+        assert!(ts > 0.0);
     }
 
     #[test]
