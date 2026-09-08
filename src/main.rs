@@ -2228,13 +2228,31 @@ async fn inference_handler_inner(
     let frames = match frames_opt {
         Some(f) => f,
         None => {
+            // 到这里 = 重试循环没拿到任何上游流: 要么换号时池子空了 (break), 要么最后一次尝试在
+            // 代理分配处 continue 掉了. 之前统一回「no available account for retry」, 把 proxy_assign
+            // 这类根因藏掉了; 现在带上 last_error 并落账 (error_msg 列), 排查时能对上.
+            let msg = if last_error.is_empty() {
+                "no available account for retry".to_string()
+            } else {
+                format!("no available account for retry (last error: {last_error})")
+            };
+            state.ledger.record(
+                billing::BillingRecord::build(
+                    &bctx,
+                    &request_id,
+                    &model,
+                    &account_id,
+                    translate::Usage::default(),
+                    stream,
+                    503,
+                    start.elapsed().as_millis() as u64,
+                    &client_ip,
+                )
+                .with_error(&msg),
+            );
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(openai_error(
-                    "no available account for retry",
-                    "pool_exhausted",
-                    503,
-                )),
+                Json(openai_error(&msg, "pool_exhausted", 503)),
             )
                 .into_response());
         }
