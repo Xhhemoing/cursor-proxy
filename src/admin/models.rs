@@ -442,10 +442,32 @@ pub async fn api_groups_list() -> impl IntoResponse {
                 v
             };
             let resolved: Vec<&String> = known.iter().filter(|m| g.contains(m)).collect();
+            let resolved_base: Vec<&String> = resolved
+                .iter()
+                .copied()
+                .filter(|m| !m.ends_with("-fast"))
+                .collect();
+            let resolved_fast: Vec<&String> = resolved
+                .iter()
+                .copied()
+                .filter(|m| m.ends_with("-fast"))
+                .collect();
+            let kind = if resolved_fast.is_empty() && !resolved_base.is_empty() {
+                "base"
+            } else if resolved_base.is_empty() && !resolved_fast.is_empty() {
+                "fast"
+            } else if !resolved.is_empty() {
+                "mixed"
+            } else {
+                "empty"
+            };
             json!({
                 "id": g.id, "name": g.name, "members": g.members, "note": g.note,
                 "enabled": g.enabled,
+                "kind": kind,
                 "resolved_known": resolved,
+                "resolved_base": resolved_base,
+                "resolved_fast": resolved_fast,
             })
         })
         .collect();

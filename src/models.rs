@@ -46,7 +46,8 @@ fn default_true() -> bool {
     true
 }
 
-/// 模型组: 成员为模型名; 支持后缀 `*` 通配 (如 `claude-opus-*`), 精确名优先
+/// 模型组: 成员为模型名; 支持后缀 `*` 通配 (如 `claude-opus-*`), 精确名优先.
+/// 基础 / fast **分轨**: `foo*` 不命中 `*-fast`; 要 fast 必须写 `foo*-fast` 或精确 `-fast` 名.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelGroup {
     pub id: String,
@@ -66,17 +67,31 @@ impl ModelGroup {
     }
 }
 
-/// `*` 只支持结尾通配; `*` 单独 = 全部
+/// `*` 只支持结尾通配; `*` 单独 = 全部基础模型 (不含 `-fast`).
+///
+/// 基础 / fast 计价和门禁都不能合并:
+/// - `*`            → 非 fast
+/// - `*-fast`       → 任意 fast
+/// - `claude-*`     → 以 claude- 开头、且 **不是** `-fast` 的名字
+/// - `claude-*-fast`→ 以 claude- 开头、且以 `-fast` 结尾
+/// - 精确名         → 只匹配该字符串 (精确 `foo-fast` 仍只配 fast)
 pub fn pattern_matches(pattern: &str, model: &str) -> bool {
     let p = pattern.trim();
     if p.is_empty() {
         return false;
     }
+    let model_is_fast = model.ends_with("-fast");
     if p == "*" {
-        return true;
+        return !model_is_fast;
+    }
+    if p == "*-fast" {
+        return model_is_fast;
+    }
+    if let Some(prefix) = p.strip_suffix("*-fast") {
+        return model_is_fast && model.starts_with(prefix) && model.ends_with("-fast");
     }
     match p.strip_suffix('*') {
-        Some(prefix) => model.starts_with(prefix),
+        Some(prefix) => !model_is_fast && model.starts_with(prefix),
         None => p == model,
     }
 }
@@ -986,10 +1001,22 @@ mod tests {
     #[test]
     fn pattern_rules() {
         assert!(pattern_matches("*", "anything"));
-        assert!(pattern_matches("claude-opus-*", "claude-opus-5-fast"));
+        assert!(!pattern_matches("*", "anything-fast"));
+        assert!(pattern_matches("*-fast", "anything-fast"));
+        assert!(!pattern_matches("*-fast", "anything"));
+        // 基础通配不吃 fast
+        assert!(pattern_matches("claude-opus-*", "claude-opus-5"));
+        assert!(pattern_matches("claude-opus-*", "claude-opus-5-thinking-max"));
+        assert!(!pattern_matches("claude-opus-*", "claude-opus-5-fast"));
+        assert!(!pattern_matches("claude-opus-*", "claude-opus-5-thinking-max-fast"));
         assert!(!pattern_matches("claude-opus-*", "claude-fable-5"));
+        // fast 通配不吃基础
+        assert!(pattern_matches("claude-opus-*-fast", "claude-opus-5-fast"));
+        assert!(pattern_matches("claude-opus-*-fast", "claude-opus-5-thinking-max-fast"));
+        assert!(!pattern_matches("claude-opus-*-fast", "claude-opus-5"));
         assert!(pattern_matches("kimi-k3-high", "kimi-k3-high"));
         assert!(!pattern_matches("kimi-k3-high", "kimi-k3-high-fast"));
+        assert!(pattern_matches("kimi-k3-high-fast", "kimi-k3-high-fast"));
         assert!(!pattern_matches("", "x"));
     }
 
@@ -1320,8 +1347,20 @@ mod tests {
         assert!(r.allowed_by_groups(&none, "claude-fable-5")); // 不限
         let cheap = vec!["cheap".to_string()];
         assert!(r.allowed_by_groups(&cheap, "kimi-k3-high"));
+        assert!(!r.allowed_by_groups(&cheap, "kimi-k3-high-fast")); // 基础组不放行 fast
         assert!(r.allowed_by_groups(&cheap, "grok-4.6"));
         assert!(!r.allowed_by_groups(&cheap, "claude-opus-5"));
+        r.upsert_group(ModelGroup {
+            id: "cheap-fast".into(),
+            name: "便宜fast".into(),
+            members: vec!["kimi-*-fast".into()],
+            note: String::new(),
+            enabled: true,
+        })
+        .unwrap();
+        let cheap_fast = vec!["cheap-fast".to_string()];
+        assert!(r.allowed_by_groups(&cheap_fast, "kimi-k3-high-fast"));
+        assert!(!r.allowed_by_groups(&cheap_fast, "kimi-k3-high"));
         let both = vec!["cheap".to_string(), "opus".to_string()];
         assert!(r.allowed_by_groups(&both, "claude-opus-5"));
         // 引用不存在的组 = 不放行

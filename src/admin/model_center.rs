@@ -178,9 +178,13 @@ pub async fn api_models_families(State(state): State<Arc<AppState>>) -> Response
             let rule = snap.family_rules.iter().find(|r| &r.family == fam);
             let tier = rule.map(|r| r.default_tier).unwrap_or_default();
             let menu = rule.map(|r| r.menu).unwrap_or_default();
-            // 生效价: 注册表手动 > 内置; fast 行单独报 (×2 规则在 model_price 内)
+            // 生效价: 注册表手动 > 内置. 基础 / fast 分轨, 不能把基名价 ×2 当成 fast 价.
             let (pi, po, pcr, pcw) = cards::model_price(fam);
+            let fast_id = format!("{fam}-fast");
+            let (fi, fo, fcr, fcw) = cards::model_price(&fast_id);
+            let has_fast = variants.iter().any(|v| v.ends_with("-fast"));
             let manual = reg.get_exact(fam);
+            let manual_fast = reg.get_exact(&fast_id);
             let price_source = if manual.is_some() {
                 "manual"
             } else if cards::model_price_known(fam) {
@@ -188,10 +192,22 @@ pub async fn api_models_families(State(state): State<Arc<AppState>>) -> Response
             } else {
                 "fallback"
             };
+            let price_fast_source = if manual_fast.is_some() {
+                "manual"
+            } else if cards::model_price_known(&fast_id) {
+                "builtin"
+            } else {
+                "fallback"
+            };
             // 风控规则 (最长前缀命中, 与 rule_for 同口径)
             let pace = policy.rule_for(fam);
-            // 组
+            // 组: 基础名 / fast 名分轨 (foo* 组不含 fam-fast)
             let groups = reg.groups_of(fam);
+            let groups_fast = if has_fast {
+                reg.groups_of(&fast_id)
+            } else {
+                vec![]
+            };
             // 该家族在客户菜单里实际暴露的 id
             let client_ids: Vec<&String> = visible
                 .iter()
@@ -213,8 +229,16 @@ pub async fn api_models_families(State(state): State<Arc<AppState>>) -> Response
                 "blocked_tiers": rule.map(|r| r.blocked_tiers.clone()).unwrap_or_default(),
                 "price": {"input": pi, "output": po, "cache_read": pcr, "cache_write": pcw,
                           "source": price_source, "console_key": console_key(fam)},
+                "price_fast": if has_fast {
+                    json!({"input": fi, "output": fo, "cache_read": fcr, "cache_write": fcw,
+                           "source": price_fast_source, "model": fast_id})
+                } else {
+                    Value::Null
+                },
+                "has_fast": has_fast,
                 "pace_rule": pace,
                 "groups": groups,
+                "groups_fast": groups_fast,
                 "client_ids": client_ids,
                 "upstream_missing": upstream_missing,
                 "enabled": manual.as_ref().map(|e| e.enabled).unwrap_or(true),
