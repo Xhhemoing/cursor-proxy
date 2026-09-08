@@ -795,10 +795,17 @@ pub fn anthropic_to_openai_chat(body: &Value) -> Result<Value, String> {
                         "content": if text_bits.is_empty() { Value::Null } else { json!(text_bits.join("\n")) },
                         "tool_calls": tool_calls,
                     }));
-                } else if !text_bits.is_empty() {
-                    messages.push(json!({"role": role, "content": text_bits.join("\n")}));
+                    messages.extend(tool_results);
+                } else {
+                    // user 轮: tool_result 必须紧跟发起它的 assistant(tool_calls) — Cursor 转回 Anthropic 时
+                    // tool_result 与 tool_use 不相邻会被 Anthropic 400 拒绝 (Cursor 包成 Provider Error
+                    // providerStatusCode=400, 网关误判过载重试 3 次后 503). Claude Code 会在同一条 user 消息里
+                    // 把 `<system-reminder>`/排队的用户输入与 tool_result 混放, 顺序不定, 所以先出 tool 再出文本.
+                    messages.extend(tool_results);
+                    if !text_bits.is_empty() {
+                        messages.push(json!({"role": role, "content": text_bits.join("\n")}));
+                    }
                 }
-                messages.extend(tool_results);
             }
             _ => messages.push(json!({"role": role, "content": ""})),
         }
@@ -1602,6 +1609,61 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(chat["tool_choice"], "required");
+    }
+
+    /// Claude Code 在 tool_result 同一条 user 消息里夹带 text 块 (`<system-reminder>` / 排队的用户输入),
+    /// 顺序可能是 [tool_result, text] 也可能是 [text, tool_result]. 转成 Chat 形态时 tool 消息**必须**紧跟
+    /// 发起它的 assistant(tool_calls), 文本才能作为新的 user 消息排在后面. 之前 text 先入队、tool 后入队,
+    /// 得到 assistant(tool_calls) → user(text) → tool(result): Cursor 转回 Anthropic 时 tool_result 与
+    /// tool_use 不相邻 → Anthropic 400 → Cursor 包成 `Provider Error … providerStatusCode=400` →
+    /// 网关判为 capacity 错误同号重试 3 次 → 客户端 503. 2026-09-08 实测: 同内容 tool→text 顺序 200,
+    /// text→tool 顺序 100% 503 (`/tmp/cfp-503/order_test.py` c1/c2), 账本 opus-4-8-high 136×503/13×200.
+    #[test]
+    fn anthropic_tool_result_precedes_sibling_text_in_same_user_turn() {
+        let tu = json!({"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/a"}});
+        let tr = json!({"type": "tool_result", "tool_use_id": "toolu_1", "content": "hello"});
+        let txt = json!({"type": "text", "text": "<system-reminder>todo</system-reminder>"});
+        for user_blocks in [
+            json!([tr.clone(), txt.clone()]),
+            json!([txt.clone(), tr.clone()]),
+        ] {
+            let body = json!({
+                "model": "claude-opus-4-8",
+                "max_tokens": 64,
+                "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {}}}],
+                "messages": [
+                    {"role": "user", "content": "read /a"},
+                    {"role": "assistant", "content": [tu.clone()]},
+                    {"role": "user", "content": user_blocks},
+                ]
+            });
+            let chat = anthropic_to_openai_chat(&body).unwrap();
+            let roles: Vec<&str> = chat["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["role"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                roles,
+                vec!["user", "assistant", "tool", "user"],
+                "tool result must directly follow assistant tool_calls; got {roles:?}"
+            );
+            let msgs = chat["messages"].as_array().unwrap();
+            assert_eq!(msgs[2]["tool_call_id"], "toolu_1");
+            assert_eq!(
+                msgs[3]["content"],
+                "<system-reminder>todo</system-reminder>"
+            );
+        }
+        // 无 tool_result 的普通 user 文本块: 行为不变 (单条 user 消息)
+        let plain = anthropic_to_openai_chat(&json!({
+            "model": "claude-opus-4-8",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}]
+        }))
+        .unwrap();
+        assert_eq!(plain["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(plain["messages"][0]["content"], "a\nb");
     }
 
     /// Claude Code 形态: temperature=1 + top_p + stop_sequences + metadata.user_id 全部透传到 Chat 形态.
