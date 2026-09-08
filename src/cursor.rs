@@ -40,6 +40,7 @@ pub fn is_kimi_family(model: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingLevel {
     Low,
+    Medium,
     High,
     Max,
 }
@@ -62,10 +63,11 @@ pub fn thinking_level_from_model(model: &str) -> ThinkingLevel {
 
 /// 根据思考程度自动映射到具体模型名
 /// 用于客户端传入 kimi-k3 时，根据请求特征自动选择 max/high/low
+/// (kimi-k3 家族上游无 -medium 变体, Medium 回落 high)
 pub fn model_for_thinking_level(level: ThinkingLevel) -> &'static str {
     match level {
         ThinkingLevel::Max => "kimi-k3-max",
-        ThinkingLevel::High => "kimi-k3-high",
+        ThinkingLevel::High | ThinkingLevel::Medium => "kimi-k3-high",
         ThinkingLevel::Low => "kimi-k3-low",
     }
 }
@@ -96,6 +98,7 @@ pub fn explicit_thinking_level(body: &Value) -> Option<ThinkingLevel> {
         match tl.to_ascii_lowercase().as_str() {
             "max" => return Some(ThinkingLevel::Max),
             "high" => return Some(ThinkingLevel::High),
+            "medium" => return Some(ThinkingLevel::Medium),
             "low" => return Some(ThinkingLevel::Low),
             _ => {}
         }
@@ -112,7 +115,8 @@ pub fn explicit_thinking_level(body: &Value) -> Option<ThinkingLevel> {
     {
         match eff.to_ascii_lowercase().as_str() {
             "max" | "xhigh" | "extra-high" | "extra_high" => return Some(ThinkingLevel::Max),
-            "high" | "medium" => return Some(ThinkingLevel::High),
+            "high" => return Some(ThinkingLevel::High),
+            "medium" => return Some(ThinkingLevel::Medium),
             "low" | "minimal" | "none" => return Some(ThinkingLevel::Low),
             _ => {}
         }
@@ -886,8 +890,21 @@ mod tests {
             ThinkingLevel::High
         );
         assert_eq!(
+            auto_detect_thinking_level(&json!({"thinking_level": "medium", "messages": []})),
+            ThinkingLevel::Medium
+        );
+        assert_eq!(
             auto_detect_thinking_level(&json!({"thinking_level": "low", "messages": []})),
             ThinkingLevel::Low
+        );
+        // reasoning_effort: medium 不再并入 High
+        assert_eq!(
+            explicit_thinking_level(&json!({"reasoning_effort": "medium", "messages": []})),
+            Some(ThinkingLevel::Medium)
+        );
+        assert_eq!(
+            explicit_thinking_level(&json!({"reasoning_effort": "high", "messages": []})),
+            Some(ThinkingLevel::High)
         );
     }
 

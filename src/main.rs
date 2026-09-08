@@ -103,31 +103,19 @@ impl AppState {
         let map = tokio::task::block_in_place(|| {
             let conn = ledger.reader().ok()?;
             let since = chrono::Utc::now().timestamp_millis() - 30 * 86_400_000;
-            // 从 billing_records 聚合: 按模型统计 face_usd 和 latency 估算 lane_hours
-            // lane_hours ≈ SUM(latency_ms) / 3600000 (简化估算, 实际应按 session 聚合)
-            let mut st = conn
-                .prepare(
-                    "SELECT model, SUM(face_usd), SUM(latency_ms) / 3600000.0 as lane_hours
-                 FROM billing_records
-                 WHERE ts_ms >= ?1 AND status = 200
-                 GROUP BY model
-                 HAVING lane_hours >= 1.0",
-                )
-                .ok()?;
-            let rows = st
-                .query_map([since], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, f64>(1)?,
-                        r.get::<_, f64>(2)?,
-                    ))
-                })
-                .ok()?;
+            // 2026-09-08 重写: 旧 SQL 直接 SUM(face_usd) —— billing_records 根本没有这一列
+            // (face 由 token×官方价现算), 该查询永远失败 → price_map 恒 None → 智能路由
+            // 的「同族 $/槽·时最低」从未生效. 现在走 analytics::load_reqs+aggregate 同口径:
+            // lane_hours 是真 sessionize 槽·时 (不再是 SUM(latency) 近似).
+            let reqs = crate::analytics::load_reqs(&conn, Some(since), None, false, None, 2_000_000).ok()?;
+            let by_model = crate::analytics::aggregate(&reqs, |r| vec![r.model.clone()], None);
             let mut out = std::collections::BTreeMap::new();
-            for r in rows.flatten() {
-                let (model, face, lane_hours) = r;
-                if lane_hours > 1e-6 {
-                    out.insert(model, face / lane_hours);
+            for (model, agg) in by_model {
+                // 数据统计 ≥1h 槽·时才计入 (与旧 HAVING 语义一致)
+                if agg.lane_hours >= 1.0 {
+                    if let Some(p) = agg.usd_per_lane_hour() {
+                        out.insert(model, p);
+                    }
                 }
             }
             Some(out)
@@ -735,6 +723,22 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_models_import_builtin),
         )
         .route("/admin/api/models/resolve", get(admin::api_models_resolve))
+        .route(
+            "/admin/api/models/families",
+            get(admin::api_models_families),
+        )
+        .route(
+            "/admin/api/models/family-rule",
+            post(admin::api_models_family_rule_set),
+        )
+        .route(
+            "/admin/api/models/family-rule/:family",
+            axum::routing::delete(admin::api_models_family_rule_delete),
+        )
+        .route(
+            "/admin/api/models/route-preview",
+            get(admin::api_models_route_preview),
+        )
         .route(
             "/admin/api/models/upstream",
             get(admin::api_models_upstream),

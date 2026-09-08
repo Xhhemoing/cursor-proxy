@@ -282,6 +282,8 @@ pub async fn api_price_map_refresh(State(state): State<Arc<AppState>>) -> impl I
 
 /// #6 按模型降档: 往 RiskPolicy.model_rules 加/更新一条该模型前缀的 pace 规则.
 /// 只动 model_rules, 其余字段原样回写 (整表替换). 用户要求: 限速高价 30-40 / 便宜 60-80 tok/s.
+/// 2026-09-08 补全: ttft_floor_ms / speed_ratio / max_output_tokens 之前被硬编码归零,
+/// 面板改一次限速就把这三个字段抹掉 (模型中心的风控编辑器需要全字段).
 #[derive(Deserialize)]
 pub struct ModelPaceBody {
     pub prefix: String,
@@ -290,6 +292,13 @@ pub struct ModelPaceBody {
     pub pace_degraded_tps: Option<u32>,
     #[serde(default)]
     pub exempt: bool,
+    /// None = 保留旧值 (编辑); 新建时按 0
+    #[serde(default)]
+    pub ttft_floor_ms: Option<u32>,
+    #[serde(default)]
+    pub speed_ratio: Option<Option<f64>>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -309,6 +318,15 @@ pub async fn api_model_pace_rule_set(
         r.pace_normal_tps = b.pace_normal_tps;
         r.pace_soften_tps = b.pace_soften_tps;
         r.pace_degraded_tps = b.pace_degraded_tps;
+        if let Some(v) = b.ttft_floor_ms {
+            r.ttft_floor_ms = v;
+        }
+        if let Some(v) = b.speed_ratio {
+            r.speed_ratio = v;
+        }
+        if let Some(v) = b.max_output_tokens {
+            r.max_output_tokens = v;
+        }
         r.note = note;
     } else {
         p.model_rules.push(crate::cards::ModelPaceRule {
@@ -317,9 +335,9 @@ pub async fn api_model_pace_rule_set(
             pace_normal_tps: b.pace_normal_tps,
             pace_soften_tps: b.pace_soften_tps,
             pace_degraded_tps: b.pace_degraded_tps,
-            ttft_floor_ms: 0,
-            speed_ratio: None,
-            max_output_tokens: 0,
+            ttft_floor_ms: b.ttft_floor_ms.unwrap_or(0),
+            speed_ratio: b.speed_ratio.flatten(),
+            max_output_tokens: b.max_output_tokens.unwrap_or(0),
             note,
         });
     }

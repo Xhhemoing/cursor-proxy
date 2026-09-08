@@ -83,17 +83,19 @@ pub fn pattern_matches(pattern: &str, model: &str) -> bool {
 
 /// 剥掉一层官方变体后缀; 没有可剥的返回原名.
 /// 顺序敏感: 先剥 -fast, 再剥思考档, 再剥 -thinking (claude-opus-5-thinking-max-fast 需三轮).
+/// 思考档按长度降序匹配 —— `-high` 若排在 `-extra-high` 前会把 gpt-5.5-extra-high 剥成
+/// gpt-5.5-extra 幽灵名 (2026-09-08 实锤: 该幽灵进了客户菜单, 11 次请求全 502).
 pub fn strip_variant_suffix(model: &str) -> &str {
     const SUFFIXES: &[&str] = &[
         "-fast",
-        "-low",
+        "-extra-high",
+        "-minimal",
         "-medium",
-        "-high",
         "-xhigh",
+        "-high",
+        "-low",
         "-max",
         "-none",
-        "-minimal",
-        "-extra-high",
         "-thinking",
     ];
     for s in SUFFIXES {
@@ -106,12 +108,54 @@ pub fn strip_variant_suffix(model: &str) -> &str {
     model
 }
 
+/// 模型家族默认思考档 (面板「模型中心」可配, 存 models.json).
+/// Auto = 有价格数据按同族 $/槽·时最低选, 否则启发式 (旧行为).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultTier {
+    #[default]
+    Auto,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+/// 家族在客户菜单 (/v1/models) 里的形态.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuMode {
+    /// 基名 + 基名-fast (fast 价格 ×2, 单列方便客户显式选) —— 默认
+    #[default]
+    BaseAndFast,
+    /// 只列基名 (思考档由默认档/请求参数决定)
+    Base,
+    /// 全部上游真变体逐列 (调试/直选用)
+    All,
+    /// 不进客户菜单 (仍可被请求, 走智能路由)
+    Hidden,
+}
+
+/// 单个家族的规则 (按家族基名存, 如 claude-opus-5)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FamilyRule {
+    pub family: String,
+    #[serde(default)]
+    pub default_tier: DefaultTier,
+    #[serde(default)]
+    pub menu: MenuMode,
+    #[serde(default)]
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RegistryData {
     #[serde(default)]
     pub models: Vec<ModelEntry>,
     #[serde(default)]
     pub groups: Vec<ModelGroup>,
+    #[serde(default)]
+    pub family_rules: Vec<FamilyRule>,
 }
 
 pub struct ModelRegistry {
@@ -191,7 +235,13 @@ impl ModelRegistry {
         if crate::cards::builtin_model_known(model) {
             return true;
         }
-        Self::upstream_present(model, upstream)
+        // 裸 grok-4.6 这类客户端惯用名: 上游只有 cursor-grok-4.6-* 变体, 视为同族存在
+        // (智能路由会把 grok-4.6 解析到 cursor-grok-4.6-<档>).
+        if Self::upstream_present(model, upstream) {
+            return true;
+        }
+        let cursor_pref = format!("cursor-{model}");
+        Self::upstream_present(&cursor_pref, upstream)
     }
 
     /// 精确名 > 最长前缀命中 (注册表内条目名也当前缀用, 与内置表规则一致)
@@ -309,6 +359,52 @@ impl ModelRegistry {
             .iter()
             .find(|e| e.model == model)
             .map_or(false, |e| e.hidden)
+    }
+
+    // ── 家族规则 (默认思考档 / 菜单形态) ──
+
+    /// 查家族规则 (无记录返回 None, 调用方用默认 Auto/Base)
+    pub fn family_rule(&self, family: &str) -> Option<FamilyRule> {
+        self.data
+            .load()
+            .family_rules
+            .iter()
+            .find(|r| r.family == family)
+            .cloned()
+    }
+
+    /// 家族默认思考档 (无规则 = Auto)
+    pub fn family_default_tier(&self, family: &str) -> DefaultTier {
+        self.family_rule(family)
+            .map(|r| r.default_tier)
+            .unwrap_or_default()
+    }
+
+    /// 家族菜单形态 (无规则 = Base)
+    pub fn family_menu_mode(&self, family: &str) -> MenuMode {
+        self.family_rule(family).map(|r| r.menu).unwrap_or_default()
+    }
+
+    /// upsert 家族规则 (面板「模型中心」内联编辑)
+    pub fn upsert_family_rule(&self, rule: FamilyRule) -> anyhow::Result<()> {
+        let mut d = (*self.data.load_full()).clone();
+        match d.family_rules.iter_mut().find(|r| r.family == rule.family) {
+            Some(r) => *r = rule,
+            None => d.family_rules.push(rule),
+        }
+        d.family_rules.sort_by(|a, b| a.family.cmp(&b.family));
+        self.save(d)
+    }
+
+    pub fn delete_family_rule(&self, family: &str) -> anyhow::Result<bool> {
+        let mut d = (*self.data.load_full()).clone();
+        let n = d.family_rules.len();
+        d.family_rules.retain(|r| r.family != family);
+        let removed = d.family_rules.len() != n;
+        if removed {
+            self.save(d)?;
+        }
+        Ok(removed)
     }
 
     /// 整表替换 (面板「保存全部」)
@@ -440,13 +536,17 @@ impl ModelRegistry {
     ///
     /// 客户端传家族基名 (如 claude-opus-5) 且上游名单里**没有**这个精确名时,
     /// 按思考强度在该家族的上游变体里挑一个:
-    ///   thinking_level 显式字段 > reasoning_effort (OpenAI 习惯) > max_mode > 复杂度推断.
+    ///   thinking_level 显式字段 > reasoning_effort (OpenAI 习惯) > max_mode
+    ///   > 家族默认档 (FamilyRule.default_tier, 面板可配) > 同族 $/槽·时最低 > 复杂度推断.
     /// 档位映射 (家族里没有该档变体时向 nearest 可用档回落):
     ///   Max → -max > -xhigh > -extra-high > -high
     ///   High → -high > -medium > -low > -xhigh
+    ///   Medium → -medium > -low > -high
     ///   Low → -low > -minimal > -none > -medium
     /// 基名本身就在上游名单里 (gemini-3-flash / kimi-k2.7-code / claude-4-sonnet) → 原样放行.
     /// 客户端直接传了变体全名 (claude-opus-5-high-fast) → 原样放行, 不重写.
+    /// `<基名>-fast` 折叠名 → 路由到 `-<档>-fast` 真变体 (fast 价格 ×2, 档内选).
+    /// 裸 grok-4.6 → cursor-grok-4.6-<档> (上游只有 cursor- 前缀名).
     /// 返回 None = 无法解析 (家族在上游名单里没有任何变体), 调用方原样透传.
     pub fn resolve_smart_model(
         model: &str,
@@ -458,29 +558,66 @@ impl ModelRegistry {
 
     /// 带价格数据的智能路由: 默认按小时价格最低选择 (数据统计不足 1h 的不计入).
     /// price_map: 模型名 → usd_per_lane_hour (来自 analytics 聚合).
+    /// 家族默认档从全局注册表读 (生产路径); 测试用 `_with_rule` 显式注入.
     pub fn resolve_smart_model_with_price(
         model: &str,
         body: &serde_json::Value,
         upstream: &[String],
         price_map: Option<&std::collections::BTreeMap<String, f64>>,
     ) -> Option<String> {
+        Self::resolve_smart_model_full(model, body, upstream, price_map, None)
+    }
+
+    /// 全参数版: `default_tier` 显式给家族默认档 (None = 读全局注册表).
+    pub fn resolve_smart_model_full(
+        model: &str,
+        body: &serde_json::Value,
+        upstream: &[String],
+        price_map: Option<&std::collections::BTreeMap<String, f64>>,
+        default_tier: Option<DefaultTier>,
+    ) -> Option<String> {
         if upstream.is_empty() || upstream.iter().any(|u| u == model) {
             return None;
         }
-        let base = Self::family_base(model);
+        // `<基名>-fast` 折叠名: 剥掉 -fast 按基名走一遍, 命中后再拼回 -fast 变体.
+        // fast 各档同价 (×2), 档内选择与非 fast 完全一致.
+        if let Some(base) = model.strip_suffix("-fast") {
+            if Self::family_base(base) == base {
+                let resolved =
+                    Self::resolve_smart_model_full(base, body, upstream, price_map, default_tier)?;
+                return Some(format!("{resolved}-fast"))
+                    .filter(|want| upstream.iter().any(|u| u == want))
+                    .or(Some(resolved)); // 无 -fast 变体时回落非 fast (上游自己处理)
+            }
+        }
+        let mut base = Self::family_base(model);
         if base != model {
             return None; // 客户端已带变体后缀, 尊重显式选择
         }
+        // 裸 grok-4.6 → cursor-grok-4.6: 上游只有 cursor- 前缀家族, 视为同族路由.
+        // (2026-09-08 账本: grok-4.6 裸发 919 次 / 222 失败, 上游根本不认识这个名字.)
+        let cursor_base;
+        if !Self::family_has_variants(base, upstream) {
+            cursor_base = format!("cursor-{base}");
+            if Self::family_has_variants(&cursor_base, upstream) {
+                base = &cursor_base;
+            }
+        }
         // 家族须在上游名单里真有变体 (防止把任意字符串路由成不存在的模型)
-        let pref = format!("{base}-");
-        if !upstream
-            .iter()
-            .any(|u| u.starts_with(&pref) && Self::family_base(u) == base)
-        {
+        if !Self::family_has_variants(base, upstream) {
             return None;
         }
-        // 显式档位优先; 未显式指定时有价格数据按「同族 $/lane·h 最低」选, 无价格数据回落启发式
-        let level = crate::cursor::explicit_thinking_level(body);
+        // 显式档位 > 家族默认档 (面板可配) > 价格最省 > 启发式
+        let level = crate::cursor::explicit_thinking_level(body).or_else(|| {
+            let tier = default_tier.unwrap_or_else(|| registry().family_default_tier(base));
+            match tier {
+                DefaultTier::Auto => None,
+                DefaultTier::Low => Some(crate::cursor::ThinkingLevel::Low),
+                DefaultTier::Medium => Some(crate::cursor::ThinkingLevel::Medium),
+                DefaultTier::High => Some(crate::cursor::ThinkingLevel::High),
+                DefaultTier::Max => Some(crate::cursor::ThinkingLevel::Max),
+            }
+        });
         let pick = |cands: &[&str]| -> Option<String> {
             cands
                 .iter()
@@ -491,6 +628,7 @@ impl ModelRegistry {
         let resolved = match level {
             Some(Max) => pick(&["max", "xhigh", "extra-high", "high"]),
             Some(High) => pick(&["high", "medium", "low", "xhigh"]),
+            Some(Medium) => pick(&["medium", "low", "high"]),
             Some(Low) => pick(&["low", "minimal", "none", "medium"]),
             None => {
                 // 未显式指定: 有价格数据选同族 $/lane·h 最低 (≥1h 数据才计入), 否则启发式
@@ -506,6 +644,7 @@ impl ModelRegistry {
                 cheapest.or_else(|| match crate::cursor::heuristic_thinking_level(body) {
                     Max => pick(&["max", "xhigh", "extra-high", "high"]),
                     High => pick(&["high", "medium", "low", "xhigh"]),
+                    Medium => pick(&["medium", "low", "high"]),
                     Low => pick(&["low", "minimal", "none", "medium"]),
                 })
             }
@@ -544,6 +683,14 @@ impl ModelRegistry {
             }
         }
         resolved
+    }
+
+    /// 上游名单里是否存在「以 base 为家族基名」的变体 (grok 前缀识别与路由前置判定共用).
+    fn family_has_variants(base: &str, upstream: &[String]) -> bool {
+        let pref = format!("{base}-");
+        upstream
+            .iter()
+            .any(|u| u.starts_with(&pref) && Self::family_base(u) == base)
     }
 
     /// 模型是否对客户端可见 (进 /v1/models 与套餐可调清单).
@@ -596,7 +743,7 @@ impl ModelRegistry {
     /// 客户端可见的模型清单: 注册表(enabled) ∪ 上游家族基名 ∪ 上游无变体独立模型.
     /// 变体名 (claude-opus-5-high-fast) 不进列表 —— 客户端选基名, 网关按思考强度
     /// 路由到具体变体 (resolve_smart_model). extra 里的账本 seen 名同样按家族折叠.
-    /// 注意: fast 档 (如 claude-opus-5-fast) 价格不同, 不合并到基名, 单独列出.
+    /// fast 折叠名 `<基名>-fast` 按家族 MenuMode 决定是否单列 (默认 BaseAndFast).
     pub fn visible_models(&self, upstream: &[String], extra: &[String]) -> Vec<String> {
         let d = self.data.load();
         let mut out: Vec<String> = vec![];
@@ -613,17 +760,49 @@ impl ModelRegistry {
                 push(e.model.clone());
             }
         }
+        // 裸 grok-4.6 这类「内置价目认识 + cursor- 前缀家族在上游」的惯用名也进菜单
+        // (客户认知里的名字就是 grok-4.6; 智能路由会解析到 cursor-grok-4.6-<档>).
+        // 上游名单为空 = 未拉取过 → 不臆造 (与 upstream_present 空名单护栏同语义).
+        if !upstream.is_empty() {
+            for (name, ..) in crate::cards::builtin_table() {
+                if upstream.iter().any(|u| *u == name) {
+                    continue; // 真名走下面上游分支
+                }
+                let cursor_pref = format!("cursor-{name}");
+                if Self::upstream_present(&cursor_pref, upstream) && !self.is_hidden(name.as_str()) {
+                    push(name.to_string());
+                }
+            }
+        }
         for m in upstream.iter().chain(extra.iter()) {
             let base = Self::family_base(m);
-            // fast 档价格不同, 不合并到基名 —— 检查是否带 -fast 后缀
-            let is_fast_variant = m.ends_with("-fast") && Self::family_base(m) != *m;
-            if is_fast_variant {
-                // fast 变体单独列出 (不折叠到基名)
-                if self.is_visible(m, upstream) && !self.is_hidden(m) {
-                    push(m.clone());
+            if !self.is_visible(base, upstream) || self.is_hidden(base) {
+                continue;
+            }
+            match self.family_menu_mode(base) {
+                MenuMode::Hidden => {}
+                MenuMode::All => {
+                    // 全部真变体逐列 (调试/直选); 基名也列, 便于走智能路由
+                    push(base.to_string());
+                    if upstream.iter().any(|u| u == m) {
+                        push(m.clone());
+                    }
                 }
-            } else if self.is_visible(base, upstream) && !self.is_hidden(base) {
-                push(base.to_string());
+                MenuMode::Base => {
+                    push(base.to_string());
+                }
+                MenuMode::BaseAndFast => {
+                    push(base.to_string());
+                    // 家族有任一 -fast 真变体 → 列出 <基名>-fast 折叠入口
+                    // (resolve_smart_model 会路由到 -<档>-fast)
+                    let fast = format!("{base}-fast");
+                    let has_fast = upstream.iter().any(|u| {
+                        u.ends_with("-fast") && Self::family_base(u) == base
+                    }) || upstream.iter().any(|u| *u == fast);
+                    if has_fast && !self.is_hidden(&fast) {
+                        push(fast);
+                    }
+                }
             }
         }
         out
@@ -769,6 +948,10 @@ mod tests {
             "gpt-5.6-sol-none"
         );
         assert_eq!(strip_variant_suffix("kimi-k3"), "kimi-k3");
+        // -extra-high 必须先于 -high 剥: 否则 gpt-5.5-extra-high 被剥成幽灵 gpt-5.5-extra
+        assert_eq!(strip_variant_suffix("gpt-5.5-extra-high"), "gpt-5.5");
+        assert_eq!(ModelRegistry::family_base("gpt-5.5-extra-high-fast"), "gpt-5.5");
+        assert_eq!(ModelRegistry::family_base("gpt-5.5-extra-high"), "gpt-5.5");
     }
 
     #[test]
@@ -858,6 +1041,28 @@ mod tests {
             ModelRegistry::resolve_smart_model("foo-9", &b, &up2).as_deref(),
             Some("foo-9-fast")
         );
+        // <基名>-fast 折叠名 → 路由到 -<档>-fast 真变体
+        let b = json!({"model":"claude-opus-5-fast","thinking_level":"high","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5-fast", &b, &upstream).as_deref(),
+            Some("claude-opus-5-high-fast")
+        );
+        // fast 折叠名: 家族无该档 -fast 变体 → 回落同档非 fast (上游自己处理)
+        let b = json!({"model":"claude-opus-5-fast","thinking_level":"low","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("claude-opus-5-fast", &b, &upstream).as_deref(),
+            Some("claude-opus-5-low")
+        );
+        // 裸 grok-4.6 → cursor-grok-4.6-<档> (上游只有 cursor- 前缀家族)
+        let up3: Vec<String> = vec![
+            "cursor-grok-4.6-low".to_string(),
+            "cursor-grok-4.6-high".to_string(),
+        ];
+        let b = json!({"model":"grok-4.6","thinking_level":"high","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("grok-4.6", &b, &up3).as_deref(),
+            Some("cursor-grok-4.6-high")
+        );
         // 上游名单里完全没有的家族 → 不路由 (原样透传, 让上游报错)
         let b = json!({"model":"no-such-family","thinking_level":"low","messages":[]});
         assert_eq!(
@@ -870,6 +1075,26 @@ mod tests {
             ModelRegistry::resolve_smart_model("claude-opus-5", &b, &[]),
             None
         );
+        // 家族默认档 (面板可配): 无显式档时按 default_tier 选
+        // (用 _full 显式注入, 避免全局注册表单例在并行测试间串扰)
+        let b = json!({"model":"claude-opus-5","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model_full(
+                "claude-opus-5",
+                &b,
+                &upstream,
+                None,
+                Some(DefaultTier::Max)
+            )
+            .as_deref(),
+            Some("claude-opus-5-high") // 无 -max/-xhigh/-extra-high 变体 → 回落 high
+        );
+        // Medium 档
+        let b = json!({"model":"gpt-5.4","reasoning_effort":"medium","messages":[]});
+        assert_eq!(
+            ModelRegistry::resolve_smart_model("gpt-5.4", &b, &upstream).as_deref(),
+            Some("gpt-5.4-medium")
+        );
     }
 
     #[test]
@@ -878,6 +1103,7 @@ mod tests {
         let upstream: Vec<String> = vec![
             "claude-opus-5-low",
             "claude-opus-5-high",
+            "claude-opus-5-high-fast",
             "claude-opus-5-thinking-max",
             "gpt-5.4-low-fast",
             "gpt-5.4-xhigh",
@@ -892,12 +1118,47 @@ mod tests {
             vis,
             vec![
                 "claude-opus-5",
-                "gpt-5.4-low-fast", // fast 档价格不同, 单独列出
+                "claude-opus-5-fast", // 家族有 -fast 真变体 → 折叠入口
                 "gpt-5.4",
+                "gpt-5.4-fast",
                 "gemini-3-flash",
                 "kimi-k2.7-code"
             ]
         );
+        // 菜单形态: Base 只列基名
+        reg.upsert_family_rule(FamilyRule {
+            family: "gpt-5.4".into(),
+            default_tier: DefaultTier::Auto,
+            menu: MenuMode::Base,
+            note: String::new(),
+        })
+        .unwrap();
+        let vis_b = reg.visible_models(&upstream, &[]);
+        assert!(vis_b.iter().any(|m| m == "gpt-5.4"));
+        assert!(!vis_b.iter().any(|m| m == "gpt-5.4-fast"));
+        // 菜单形态: Hidden 整族不进菜单
+        reg.upsert_family_rule(FamilyRule {
+            family: "gpt-5.4".into(),
+            default_tier: DefaultTier::Auto,
+            menu: MenuMode::Hidden,
+            note: String::new(),
+        })
+        .unwrap();
+        let vis_h = reg.visible_models(&upstream, &[]);
+        assert!(!vis_h.iter().any(|m| m.starts_with("gpt-5.4")));
+        let _ = reg.delete_family_rule("gpt-5.4");
+        // 菜单形态: All 逐列真变体
+        reg.upsert_family_rule(FamilyRule {
+            family: "gpt-5.4".into(),
+            default_tier: DefaultTier::Auto,
+            menu: MenuMode::All,
+            note: String::new(),
+        })
+        .unwrap();
+        let vis_a = reg.visible_models(&upstream, &[]);
+        assert!(vis_a.iter().any(|m| m == "gpt-5.4-low-fast"));
+        assert!(vis_a.iter().any(|m| m == "gpt-5.4-xhigh"));
+        let _ = reg.delete_family_rule("gpt-5.4");
         // 注册表手动条目 (enabled) 即使不在上游也列出
         reg.upsert_model(ModelEntry {
             model: "my-custom".into(),
@@ -915,6 +1176,21 @@ mod tests {
         let vis2 = reg.visible_models(&upstream, &[]);
         assert!(vis2.iter().any(|m| m == "my-custom"));
         let _ = reg.delete_model("my-custom");
+    }
+
+    #[test]
+    fn visible_models_includes_cursor_prefixed_builtin_alias() {
+        // 裸 grok-4.6: 内置价目认识, 上游只有 cursor-grok-4.6-* → 菜单应列 grok-4.6
+        let reg = ModelRegistry::empty();
+        let upstream: Vec<String> = vec![
+            "cursor-grok-4.6-low".to_string(),
+            "cursor-grok-4.6-high".to_string(),
+        ];
+        let vis = reg.visible_models(&upstream, &[]);
+        assert!(vis.iter().any(|m| m == "grok-4.6"));
+        assert!(vis.iter().any(|m| m == "cursor-grok-4.6"));
+        // 上游名单为空 → 不列 (护栏: 未拉过名单时不臆造)
+        assert!(!reg.visible_models(&[], &[]).iter().any(|m| m == "grok-4.6"));
     }
 
     #[test]
@@ -1097,3 +1373,4 @@ mod tests {
         let _ = r.delete_model("gpt-5.4-fast");
     }
 }
+
