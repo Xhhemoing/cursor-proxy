@@ -160,6 +160,8 @@ pub struct PlanBody {
     pub min_hours: Option<u64>,
     // 套餐×模型限速覆盖
     pub model_pace: Option<Vec<crate::cards::ModelPaceRule>>,
+    // 费率固定购买单位 (时长锁死, 只选槽数)
+    pub fixed_unit: Option<bool>,
 }
 
 pub async fn api_card_plan_upsert(
@@ -209,7 +211,8 @@ pub async fn api_card_plan_upsert(
         allowed_group_ids,
         price_per_lane_hour,
         min_hours,
-        model_pace
+        model_pace,
+        fixed_unit
     );
     // expire_hours 是 Option<u64>, 单独处理 (0 = None)
     if let Some(h) = body.expire_hours {

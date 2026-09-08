@@ -1024,6 +1024,7 @@
                     <label>最少购买 h <input id="cp-min-hours" type="number" min="1" placeholder="1"></label>
                     <label>并发槽数 <input id="cp-conc" type="number" min="1" placeholder="1"></label>
                     <label>计时起点 <select id="cp-billing-mode"><option value="purchase_time">购买即计时</option><option value="first_call">首次调用</option></select></label>
+                    <label>购买单位 <select id="cp-fixed-unit"><option value="free">自由搭配时长×并发</option><option value="fixed">固定单位 (时长锁死, 只选槽数)</option></select></label>
                   </div>
                 </div>
                 <!-- ③ 模型权限 -->
@@ -2106,6 +2107,7 @@
       set('cp-rate', p.price_per_lane_hour || ''); set('cp-min-hours', p.min_hours || '');
       set('cp-quota', p.quota_usd || ''); set('cp-expire', p.expire_hours || '');
       set('cp-billing-mode', p.billing_mode || 'purchase_time'); set('cp-stack-mode', p.stack_mode || 'time_multiply');
+      set('cp-fixed-unit', p.fixed_unit ? 'fixed' : 'free');
       set('cp-allowed-groups', (p.allowed_group_ids || []).join(','));
       set('cp-extra-limits', (p.extra_limits || []).map((l) => l.hours + 'h:' + l.quota_usd).join(','));
       set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
@@ -2202,6 +2204,7 @@
       body.sub_plan_ids = pickedSubPlans();
       body.allowed_group_ids = g('cp-allowed-groups') ? g('cp-allowed-groups').split(',').map((s) => s.trim()).filter(Boolean) : [];
       body.model_pace = collectModelPace();
+      body.fixed_unit = g('cp-fixed-unit') === 'fixed';
       // extra_limits: "5h:100" → [{hours:5, quota_usd:100}]
       const el = g('cp-extra-limits');
       if (el) {

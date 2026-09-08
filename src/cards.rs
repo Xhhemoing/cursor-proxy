@@ -378,6 +378,9 @@ pub struct CardPlan {
     /// 费率模式最少购买小时
     #[serde(default = "default_min_hours")]
     pub min_hours: u64,
+    /// 费率模式固定购买单位: true = 时长锁死 duration_hours, 购买页只能选槽数 (单位不拆卖)
+    #[serde(default)]
+    pub fixed_unit: bool,
 }
 
 fn default_min_hours() -> u64 {
@@ -464,6 +467,7 @@ impl Default for CardPlan {
             price_per_lane_hour: 0.0,
             min_hours: 1,
             model_pace: vec![],
+            fixed_unit: false,
         }
     }
 }
@@ -3240,6 +3244,30 @@ mod tests {
         }];
         p.model_rules = vec![];
         assert_eq!(p.pace_for(&ext, Throttle::Normal, "claude-opus-5-high"), 100);
+    }
+
+    /// fixed_unit: 时长锁死 duration_hours, 与请求传入的 hours 无关 (单位不拆卖)
+    #[test]
+    fn fixed_unit_locks_hours() {
+        let mut plan = CardPlan::default();
+        plan.price_per_lane_hour = 1.0; // ¥1/槽·时
+        plan.duration_hours = 20;
+        plan.min_hours = 20;
+        plan.fixed_unit = true;
+        plan.max_concurrency = 4;
+        // 即使用户传 hours=10, 计价也按锁死的 20h
+        let hours = if plan.fixed_unit {
+            plan.expire_hours.unwrap_or(plan.duration_hours).max(1)
+        } else {
+            10_u64.max(plan.min_hours)
+        };
+        assert_eq!(hours, 20);
+        assert_eq!(plan.rate_price(hours, 1), 20.0); // ¥20 = 20h×1槽
+        assert_eq!(plan.rate_price(hours, 2), 40.0); // ¥40 = 20h×2槽
+        // 非固定单位: hours 透传
+        plan.fixed_unit = false;
+        let h2 = if plan.fixed_unit { 99 } else { 10_u64.max(plan.min_hours) };
+        assert_eq!(h2, 20, "min_hours=20 仍兜底");
     }
 
     /// 闸门: 前缀 ∧ 组 任一不过即拒; 全空 = 全放

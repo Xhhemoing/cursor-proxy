@@ -117,7 +117,16 @@ pub async fn api_portal_plans(headers: HeaderMap, State(state): State<Arc<AppSta
                 "note": p.note,
                 "price_per_lane_hour": p.price_per_lane_hour,
                 "min_hours": p.min_hours,
+                "fixed_unit": p.fixed_unit,
+                "expire_hours": p.expire_hours,
                 "billing_mode": format!("{:?}", p.billing_mode),
+                "sub_plan_ids": p.sub_plan_ids,
+                "model_groups": p.model_groups,
+                "model_pace": p.model_pace.iter().map(|r| json!({
+                    "prefix": r.prefix,
+                    "pace_normal_tps": r.pace_normal_tps,
+                    "exempt": r.exempt,
+                })).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -203,7 +212,12 @@ pub async fn api_portal_purchase(
 
     // ── 费率模式: 时长 × 并发 算价, 发卡不激活 ──
     let (price, hours, slots) = if plan.is_rate_mode() {
-        let hours = b.hours.unwrap_or(plan.min_hours).max(plan.min_hours);
+        // fixed_unit: 时长锁死 duration_hours (单位不拆卖), 用户只选槽数
+        let hours = if plan.fixed_unit {
+            plan.expire_hours.unwrap_or(plan.duration_hours).max(1)
+        } else {
+            b.hours.unwrap_or(plan.min_hours).max(plan.min_hours)
+        };
         let slots = b.slots.unwrap_or(1).clamp(1, plan.max_concurrency.max(1));
         (plan.rate_price(hours, slots), Some(hours), Some(slots))
     } else {

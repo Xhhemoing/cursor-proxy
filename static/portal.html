@@ -466,7 +466,9 @@
           '<h4>' + esc(p.name) + '</h4>' +
           (rateMode
             ? '<div class="price" style="font-size:18px">¥' + Number(p.price_per_lane_hour).toFixed(2) + '<span style="font-size:12px;color:var(--muted)">/槽·时</span></div>' +
-              '<div class="meta">时长 × 并发自由搭配 · 最多 ' + p.max_concurrency + ' 槽 · 购买后不激活</div>'
+              (p.fixed_unit
+                ? '<div class="meta">单位 ¥' + Number(p.price_per_lane_hour * (p.expire_hours || p.duration_hours || 24)).toFixed(0) + ' = ' + (p.expire_hours || p.duration_hours || 24) + 'h × 1 槽 · 最多 ' + p.max_concurrency + ' 槽 · 购买后不激活</div>'
+                : '<div class="meta">时长 × 并发自由搭配 · 最多 ' + p.max_concurrency + ' 槽 · 购买后不激活</div>')
             : '<div class="price">¥' + Number(p.price).toFixed(0) + '</div>' +
               '<div class="meta">' + fmtDur((p.duration_hours || 24) * 3600) + ' · ' + p.max_concurrency + ' 并发</div>') +
           modelLine(p) +
@@ -496,20 +498,30 @@
   let ratePlan = null;
   function showRateModal(p) {
     ratePlan = p;
+    const fixed = !!p.fixed_unit;
+    const unitHours = (p.expire_hours || p.duration_hours || 24);
     $('rate-title').textContent = '购买「' + p.name + '」';
-    $('rate-sub').textContent = '费率 ¥' + Number(p.price_per_lane_hour).toFixed(2) + '/槽·时 · 最少 ' + (p.min_hours || 1) + 'h';
+    $('rate-sub').textContent = fixed
+      ? '单位 ¥' + Number(p.price_per_lane_hour * unitHours).toFixed(0) + ' = ' + unitHours + 'h × 1 槽 · 选槽数'
+      : '费率 ¥' + Number(p.price_per_lane_hour).toFixed(2) + '/槽·时 · 最少 ' + (p.min_hours || 1) + 'h';
     const h = $('rate-hours'), s = $('rate-slots');
-    h.min = p.min_hours || 1; h.max = 720; h.value = 24;
+    if (fixed) {
+      h.min = unitHours; h.max = unitHours; h.value = unitHours; h.disabled = true;
+      $('rate-hours-v').textContent = unitHours + 'h (固定)';
+    } else {
+      h.disabled = false;
+      h.min = p.min_hours || 1; h.max = 720; h.value = Math.max(p.min_hours || 1, 24);
+    }
     s.min = 1; s.max = p.max_concurrency || 4; s.value = 1;
     const calc = () => {
-      const hours = parseInt(h.value) || 1, slots = parseInt(s.value) || 1;
-      $('rate-hours-v').textContent = hours + 'h';
+      const hours = fixed ? unitHours : (parseInt(h.value) || 1), slots = parseInt(s.value) || 1;
+      if (!fixed) $('rate-hours-v').textContent = hours + 'h';
       $('rate-slots-v').textContent = slots + ' 槽';
       $('rate-price').textContent = '¥' + (p.price_per_lane_hour * hours * slots).toFixed(2);
     };
     h.oninput = calc; s.oninput = calc; calc();
     $('rate-confirm').onclick = () => {
-      const hours = parseInt(h.value) || 1, slots = parseInt(s.value) || 1;
+      const hours = fixed ? unitHours : (parseInt(h.value) || 1), slots = parseInt(s.value) || 1;
       $('rate-modal').style.display = 'none';
       doPurchase({ plan_id: p.id, hours: hours, slots: slots });
     };
