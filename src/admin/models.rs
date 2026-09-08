@@ -479,6 +479,7 @@ pub struct GroupBody {
     pub id: String,
     pub name: Option<String>,
     pub members: Option<Vec<String>>,
+    pub exclude_members: Option<Vec<String>>,
     pub note: Option<String>,
     pub enabled: Option<bool>,
 }
@@ -501,12 +502,20 @@ pub async fn api_groups_upsert(
         id: id.clone(),
         name: id.clone(),
         members: vec![],
+        exclude_members: vec![],
         note: String::new(),
         enabled: true,
     });
     let members: Vec<String> = b
         .members
         .unwrap_or(cur.members)
+        .into_iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let exclude_members: Vec<String> = b
+        .exclude_members
+        .unwrap_or(cur.exclude_members)
         .into_iter()
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
@@ -519,6 +528,7 @@ pub async fn api_groups_upsert(
             .filter(|n| !n.is_empty())
             .unwrap_or(cur.name),
         members,
+        exclude_members,
         note: b.note.unwrap_or(cur.note),
         enabled: b.enabled.unwrap_or(cur.enabled),
     };

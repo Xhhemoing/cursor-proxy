@@ -54,6 +54,9 @@ pub struct ModelGroup {
     pub name: String,
     #[serde(default)]
     pub members: Vec<String>,
+    /// 排除成员 (通配同 members): 命中即排除, 优先级高于 members. 用于「全部但排除 X」语义.
+    #[serde(default)]
+    pub exclude_members: Vec<String>,
     #[serde(default)]
     pub note: String,
     /// 是否启用 (false = 该组不参与鉴权, 相当于临时禁用)
@@ -63,6 +66,9 @@ pub struct ModelGroup {
 
 impl ModelGroup {
     pub fn contains(&self, model: &str) -> bool {
+        if self.exclude_members.iter().any(|m| pattern_matches(m, model)) {
+            return false;
+        }
         self.members.iter().any(|m| pattern_matches(m, model))
     }
 }
@@ -1324,6 +1330,36 @@ mod tests {
         assert!(r.lookup("gpt-5").is_none());
     }
 
+    /// 组排除成员: exclude_members 命中即拒 (「全部但排除 fable/sol」语义)
+    #[test]
+    fn group_exclude_members() {
+        let r = reg();
+        r.upsert_group(ModelGroup {
+            id: "no-fs".into(),
+            name: "非fable/sol".into(),
+            members: vec!["*".into(), "*-fast".into()],
+            // 分轨: 基础/fast 都要排 (「fable-5-1*」不吃 fast)
+            exclude_members: vec![
+                "claude-fable-5-1*".into(),
+                "claude-fable-5-1*-fast".into(),
+                "gpt-5.6-sol-*".into(),
+                "gpt-5.6-sol-*-fast".into(),
+            ],
+            note: String::new(),
+            enabled: true,
+        })
+        .unwrap();
+        let g = vec!["no-fs".to_string()];
+        assert!(r.allowed_by_groups(&g, "kimi-k3-high"));
+        assert!(r.allowed_by_groups(&g, "claude-opus-5-high"));
+        assert!(r.allowed_by_groups(&g, "kimi-k3-high-fast"));
+        assert!(!r.allowed_by_groups(&g, "claude-fable-5-1-high"));
+        assert!(!r.allowed_by_groups(&g, "claude-fable-5-1-high-fast"));
+        assert!(!r.allowed_by_groups(&g, "gpt-5.6-sol-medium"));
+        assert!(!r.allowed_by_groups(&g, "gpt-5.6-sol-medium-fast"));
+        let _ = r.delete_group("no-fs");
+    }
+
     #[test]
     fn groups_gate() {
         let r = reg();
@@ -1331,6 +1367,7 @@ mod tests {
             id: "cheap".into(),
             name: "便宜".into(),
             members: vec!["kimi-*".into(), "grok-4.6".into()],
+            exclude_members: vec![],
             note: String::new(),
             enabled: true,
         })
@@ -1339,6 +1376,7 @@ mod tests {
             id: "opus".into(),
             name: "opus".into(),
             members: vec!["claude-opus-*".into()],
+            exclude_members: vec![],
             note: String::new(),
             enabled: true,
         })
@@ -1354,6 +1392,7 @@ mod tests {
             id: "cheap-fast".into(),
             name: "便宜fast".into(),
             members: vec!["kimi-*-fast".into()],
+            exclude_members: vec![],
             note: String::new(),
             enabled: true,
         })
@@ -1394,6 +1433,7 @@ mod tests {
             id: "test-g".into(),
             name: "t".into(),
             members: vec!["kimi-*".into()],
+            exclude_members: vec![],
             note: String::new(),
             enabled: true,
         })

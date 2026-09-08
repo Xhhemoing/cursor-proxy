@@ -3183,6 +3183,7 @@ mod tests {
                 id: "test-kimi-only".into(),
                 name: "kimi".into(),
                 members: vec!["kimi-*".into()],
+                exclude_members: vec![],
                 note: String::new(),
                 enabled: true,
             })
@@ -3285,6 +3286,7 @@ mod tests {
                 id: "test-pam".into(),
                 name: "t".into(),
                 members: vec!["kimi-*".into()],
+                exclude_members: vec![],
                 note: String::new(),
                 enabled: true,
             })
