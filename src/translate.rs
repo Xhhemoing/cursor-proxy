@@ -322,6 +322,10 @@ pub fn is_upstream_capacity_error(err: &str) -> bool {
     if is_max_mode_restricted(&e) {
         return false;
     }
+    // Cursor 把厂商的确定性 4xx 也包成 "Provider Error: trouble connecting" — 那不是过载, 归内容类
+    if provider_status_is_client_error(&e) {
+        return false;
+    }
     e.contains("high load")
         || e.contains("high demand")
         || e.contains("try again in a few moments")
@@ -370,6 +374,28 @@ pub fn is_request_content_error(err: &str) -> bool {
         || e.contains("error_bad_model_name")
         || e.contains("error_model_no_longer_supported")
         || e.contains("error_deprecated")
+        // 厂商内容审核 (Anthropic Usage Policy 等): 换号重发同样被拒, 之前落兜底分支罚号 3 次
+        || e.contains("blocked by anthropic")
+        || e.contains("usage policy")
+        // Cursor 把厂商 4xx 包成 "Provider Error: trouble connecting", 尾巴 providerStatusCode=4xx 才露真相
+        // (2026-09-08 实测 Anthropic 400: tool_result 与 tool_use 不相邻). 确定性错误, 同号重试 3 次必然同样结果.
+        || provider_status_is_client_error(&e)
+}
+
+/// 错误尾巴里 `providerStatusCode=4xx` (且不是 429 限流): 厂商对这条请求本身说不, 不是容量问题.
+/// 入参须已小写. 无该字段 / 5xx / 429 → false (保持过载语义).
+fn provider_status_is_client_error(e_lower: &str) -> bool {
+    let Some(idx) = e_lower.find("providerstatuscode=") else {
+        return false;
+    };
+    let digits: String = e_lower[idx + "providerstatuscode=".len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    match digits.parse::<u16>() {
+        Ok(code) => (400..500).contains(&code) && code != 429,
+        Err(_) => false,
+    }
 }
 
 /// 计算重试时的降低后 maxTokens: 当前值减半, 但不低于 floor.
@@ -1835,6 +1861,37 @@ mod tests {
         assert!(is_upstream_capacity_error(prov));
         assert!(!is_account_ineligible_error(prov));
         assert!(!is_request_content_error(prov));
+    }
+
+    /// Cursor 把厂商的确定性 4xx 也包成同一句 "Provider Error: trouble connecting", 只在尾巴里露出
+    /// `providerStatusCode=400, retryable=false` (2026-09-08 实测: Anthropic 因 tool_result 不相邻返回 400).
+    /// 这类不是过载: 同号重试 3 次必然同样结果, 白等 5–25s 后还给客户端一个误导性的 503 upstream_overloaded.
+    /// 必须归到「请求内容」类: 不罚号、不重试、400 直接把原话交给客户端.
+    /// 同理 "Request blocked by Anthropic … Usage Policy" 是内容审核, 之前落到兜底分支 → 换号 3 次 + 每个号
+    /// 冷却 30s + 计连续错误 (5 次就 auto_disable 一个好号).
+    #[test]
+    fn provider_4xx_and_policy_block_are_content_errors_not_capacity() {
+        let anthropic_400 = "upstream rejected: Provider Error: We're having trouble connecting to the model provider. This might be temporary - please try again in a moment. [code=ERROR_PROVIDER_ERROR, retryable=false, providerStatusCode=400]";
+        assert!(is_request_content_error(anthropic_400));
+        assert!(!is_upstream_capacity_error(anthropic_400));
+        assert!(!is_account_ineligible_error(anthropic_400));
+
+        let policy = "upstream rejected: Request blocked by Anthropic: We are unable to complete this request because it was blocked under Anthropic's Usage Policy. [code=ERROR_OPENAI, retryable=false]";
+        assert!(is_request_content_error(policy));
+        assert!(!is_upstream_capacity_error(policy));
+        assert!(!is_account_ineligible_error(policy));
+
+        // 厂商 429 / 5xx 仍是过载: 换号或退避有意义
+        let prov_429 = "upstream rejected: Provider Error: We're having trouble connecting to the model provider. [code=ERROR_PROVIDER_ERROR, retryable=true, providerStatusCode=429]";
+        let prov_529 = "upstream rejected: Provider Error: We're having trouble connecting to the model provider. [code=ERROR_PROVIDER_ERROR, retryable=false, providerStatusCode=529]";
+        for e in [prov_429, prov_529] {
+            assert!(is_upstream_capacity_error(e), "{e}");
+            assert!(!is_request_content_error(e), "{e}");
+        }
+        // 没有 providerStatusCode 的老式文案: 行为不变 (过载)
+        let bare = "upstream rejected: Provider Eror: We're having trouble connecting to the model provider. [code=ERROR_PROVIDER_ERROR, retryable=false]";
+        assert!(is_upstream_capacity_error(bare));
+        assert!(!is_request_content_error(bare));
     }
 
     #[tokio::test]
