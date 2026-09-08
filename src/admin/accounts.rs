@@ -269,6 +269,7 @@ pub async fn api_account_upsert(
         proxy_id: body.proxy_id.filter(|s| !s.trim().is_empty()),
         tags: body.tags,
         priority: body.priority.unwrap_or(50),
+        ..Default::default()
     };
     let existed = state.pool.has_account(&acc.id);
     let mut acc = acc;
@@ -533,6 +534,7 @@ pub async fn api_accounts_import(State(state): State<Arc<AppState>>, body: Strin
                     proxy_id: None,
                     tags: Vec::new(),
                     priority: 50,
+                    ..Default::default()
                 });
             }
         }
@@ -576,6 +578,11 @@ pub async fn api_accounts_import(State(state): State<Arc<AppState>>, body: Strin
                 proxy_id: None,
                 tags: Vec::new(),
                 priority: 50,
+                xai_sso_token: String::new(),
+                xai_access_token: String::new(),
+                xai_refresh_token: String::new(),
+                xai_token_expires_at: None,
+                xai_email: None,
             });
         }
     }

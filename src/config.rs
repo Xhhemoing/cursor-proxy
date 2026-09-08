@@ -348,10 +348,55 @@ pub struct Account {
     /// 调度优先级: 数字越小越先被选中 (默认 50)
     #[serde(default = "default_account_priority")]
     pub priority: i32,
+    /// ---- Grok Build (xAI) 凭证, 与 Cursor 凭证显式绑定 (account.id 为关联键) ----
+    /// grok.com 登录后的 sso cookie (仅录入时用一次, 换成 build token 后可清空)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub xai_sso_token: String,
+    /// xAI build access_token (cli-chat-proxy.grok.com 用)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub xai_access_token: String,
+    /// xAI build refresh_token (过期自动续期)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub xai_refresh_token: String,
+    /// xAI access_token 过期时间 (unix 秒)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xai_token_expires_at: Option<u64>,
+    /// 从 build token 解出的 email (绑定展示用, 不验签)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xai_email: Option<String>,
+}
+
+impl Account {
+    /// 是否已绑定可用的 Grok Build 凭证 (access token 或 refresh token 存在即可尝试)
+    pub fn has_grok_credential(&self) -> bool {
+        !self.xai_access_token.is_empty() || !self.xai_refresh_token.is_empty()
+    }
 }
 
 fn default_account_priority() -> i32 {
     50
+}
+
+impl Default for Account {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            access_token: String::new(),
+            machine_id: String::new(),
+            refresh_token: String::new(),
+            enabled: true,
+            token_expires_at: None,
+            refresh_url: None,
+            proxy_id: None,
+            tags: Vec::new(),
+            priority: default_account_priority(),
+            xai_sso_token: String::new(),
+            xai_access_token: String::new(),
+            xai_refresh_token: String::new(),
+            xai_token_expires_at: None,
+            xai_email: None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -412,6 +457,22 @@ pub fn upsert_account(account: Account) -> anyhow::Result<Vec<Account>> {
         existing.enabled = account.enabled;
         existing.proxy_id = account.proxy_id;
         existing.tags = account.tags;
+        // xAI 凭证: 仅当新值非空才覆盖, 避免普通 upsert 误清空已绑定的 grok 凭证
+        if !account.xai_sso_token.is_empty() {
+            existing.xai_sso_token = account.xai_sso_token;
+        }
+        if !account.xai_access_token.is_empty() {
+            existing.xai_access_token = account.xai_access_token;
+        }
+        if !account.xai_refresh_token.is_empty() {
+            existing.xai_refresh_token = account.xai_refresh_token;
+        }
+        if account.xai_token_expires_at.is_some() {
+            existing.xai_token_expires_at = account.xai_token_expires_at;
+        }
+        if account.xai_email.is_some() {
+            existing.xai_email = account.xai_email;
+        }
     } else {
         accounts.push(account);
     }
@@ -465,6 +526,11 @@ mod tests {
                 proxy_id: None,
                 tags: Vec::new(),
                 priority: 50,
+                xai_sso_token: String::new(),
+                xai_access_token: String::new(),
+                xai_refresh_token: String::new(),
+                xai_token_expires_at: None,
+                xai_email: None,
             }];
             atomic_write(
                 &accounts_path(),

@@ -201,6 +201,7 @@ mod tests {
                 proxy_id: None,
                 tags: Vec::new(),
                 priority: 50,
+                ..Default::default()
             }],
             2,
         );
