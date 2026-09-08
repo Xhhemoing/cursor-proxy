@@ -158,6 +158,7 @@ pub async fn api_models_upsert(
         enabled: true,
         hidden: false,
         upstream: false,
+        known: false,
         note: String::new(),
     });
     let e = ModelEntry {
@@ -169,6 +170,7 @@ pub async fn api_models_upsert(
         enabled: b.enabled.unwrap_or(cur.enabled),
         hidden: cur.hidden,
         upstream: cur.upstream,
+        known: cur.known,
         note: b.note.unwrap_or(cur.note),
     };
     if let Err(m) = validate_entry(&e) {
@@ -258,6 +260,7 @@ pub async fn api_models_import_builtin(
             enabled: true,
             hidden: cur.as_ref().map(|p| p.hidden).unwrap_or(false),
             upstream: cur.as_ref().map(|p| p.upstream).unwrap_or(false),
+            known: cur.as_ref().map(|p| p.known).unwrap_or(false),
             note: "builtin".into(),
         };
         if reg.upsert_model(e).is_ok() {
@@ -737,6 +740,7 @@ pub async fn api_models_sync_litellm(
                     enabled: cur.as_ref().map(|x| x.enabled).unwrap_or(true),
                     hidden: cur.as_ref().map(|x| x.hidden).unwrap_or(false),
                     upstream: cur.as_ref().map(|x| x.upstream).unwrap_or(false),
+                    known: cur.as_ref().map(|x| x.known).unwrap_or(false),
                     note: format!("litellm:{src}"),
                 };
                 if reg.upsert_model(e).is_ok() {

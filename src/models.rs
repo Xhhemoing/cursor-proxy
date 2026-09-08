@@ -279,6 +279,7 @@ impl ModelRegistry {
                     enabled: true,
                     hidden: true,
                     upstream: false,
+                    known: false,
                     note: "hidden".into(),
                 });
                 d.models.sort_by(|a, b| a.model.cmp(&b.model));
@@ -733,6 +734,7 @@ mod tests {
             enabled: true,
             hidden: false,
             upstream: false,
+            known: false,
             note: String::new(),
         }
     }
@@ -906,6 +908,7 @@ mod tests {
             enabled: true,
             hidden: false,
             upstream: false,
+            known: false,
             note: String::new(),
         })
         .unwrap();
@@ -1086,6 +1089,7 @@ mod tests {
             enabled: true,
             hidden: false,
             upstream: false,
+            known: false,
             note: String::new(),
         })
         .unwrap();
