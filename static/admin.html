@@ -309,8 +309,7 @@
       <nav id="nav">
         <a href="#overview" data-page="overview">概览</a>
         <div class="grp">定价</div>
-        <a href="#models" data-page="models">模型<span class="badge" id="nav-models-badge"></span></a>
-        <a href="#model-console" data-page="model-console">模型总控<span class="badge" id="nav-console-badge"></span></a>
+        <a href="#model-center" data-page="model-center">模型中心<span class="badge" id="nav-models-badge"></span></a>
         <a href="#cards" data-page="cards">套餐卡<span class="badge" id="nav-cards-badge"></span></a>
         <a href="#keys" data-page="keys">API Keys<span class="badge" id="nav-keys-badge"></span></a>
         <a href="#portal-users" data-page="portal-users">门户用户<span class="badge" id="nav-portal-badge"></span></a>
@@ -783,24 +782,63 @@
       </section>
 
       <!-- ================= 模型 ================= -->
-      <section class="page page-fill" id="page-models">
+      <section class="page page-fill" id="page-model-center">
         <div class="page-head">
-          <div><h2>模型</h2><p>手动定价 / 层级 / 停用 · 模型组（供 API Key 与套餐限定可访问范围）</p></div>
+          <div><h2>模型中心</h2><p>家族总览 · 客户菜单 · 定价表 · 模型组 · 路由测试 —— 名单只认上游 AvailableModels</p></div>
           <div class="actions">
-            <button type="button" class="ghost" id="md-fetch-upstream">获取可用模型</button>
-            <button type="button" class="ghost" id="md-sync-litellm">从 litellm 同步价格</button>
-            <button type="button" class="ghost" id="md-import-builtin">导入内置价格表</button>
-            <button type="button" class="ghost" id="md-refresh">刷新</button>
+            <button type="button" class="ghost" id="mc-fetch-upstream">获取可用模型</button>
+            <button type="button" class="ghost" id="mc-sync-litellm">从 litellm 同步价格</button>
+            <button type="button" class="ghost" id="mc-import-builtin">导入内置价格表</button>
+            <button type="button" class="ghost" id="mc-refresh">刷新</button>
           </div>
         </div>
-        <div id="models-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
+        <div id="mc-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
           <div class="tabs">
-            <button type="button" class="active" data-tab="prices">定价 / 层级</button>
+            <button type="button" class="active" data-tab="families">家族总览</button>
+            <button type="button" data-tab="menu">客户菜单</button>
+            <button type="button" data-tab="prices">定价表</button>
             <button type="button" data-tab="groups">模型组</button>
+            <button type="button" data-tab="route">路由测试</button>
           </div>
-          <div class="info" id="md-msg" style="min-height:18px;margin-bottom:6px"></div>
+          <div class="info" id="mc-msg" style="min-height:18px;margin-bottom:6px"></div>
 
-          <div id="md-tab-prices" style="display:flex;flex:1;min-height:0;flex-direction:column">
+          <!-- 家族总览 -->
+          <div id="mc-tab-families" style="display:flex;flex:1;min-height:0;flex-direction:column">
+            <div class="panel fill">
+              <div class="ph"><h3>模型家族 <span class="muted" id="mc-count"></span></h3>
+                <p class="muted" style="font-size:11px;margin:0">一行一个家族 · 展开看真实变体 · 默认档/菜单形态内联即改 · 统计三窗同口径 (24h/7d/30d)</p>
+              </div>
+              <div class="table-scroll">
+                <table class="nowrap">
+                  <thead><tr>
+                    <th>家族</th><th>变体</th><th>菜单形态</th><th>默认思考档</th>
+                    <th>生效价 in/out</th><th>来源</th>
+                    <th>24h 请求/错误率</th><th>7d $</th><th>30d $ · $/槽·时</th>
+                    <th>风控规则</th><th>组</th><th>状态</th><th></th>
+                  </tr></thead>
+                  <tbody id="mc-body"><tr><td colspan="13" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 客户菜单 -->
+          <div id="mc-tab-menu" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <div class="panel fill">
+              <div class="ph"><h3>客户菜单 <span class="muted" id="mc-menu-count"></span></h3>
+                <p class="muted" style="font-size:11px;margin:0">/v1/models 将返回什么 · 每项标「真名 / 基名→路由到哪几个真变体 / 别名」 · 只认上游名单</p>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>客户看到的 id</th><th>类型</th><th>路由到</th><th>说明</th></tr></thead>
+                  <tbody id="mc-menu-body"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- 定价表 -->
+          <div id="mc-tab-prices" style="display:none;flex:1;min-height:0;flex-direction:column">
             <details class="add" id="md-model-add">
               <summary>新增 / 编辑模型（同名即覆盖；名字也当前缀用，如 <code>claude-opus</code> 匹配所有 opus 变体，精确名优先）</summary>
               <div class="body">
@@ -843,7 +881,8 @@
             </div>
           </div>
 
-          <div id="md-tab-groups" style="display:none;flex:1;min-height:0;flex-direction:column">
+          <!-- 模型组 -->
+          <div id="mc-tab-groups" style="display:none;flex:1;min-height:0;flex-direction:column">
             <details class="add" id="md-group-add" open>
               <summary>新建 / 编辑模型组（成员一行一个或逗号分隔；支持结尾 <code>*</code> 通配，如 <code>kimi-*</code>；单独 <code>*</code> = 全部）</summary>
               <div class="body">
@@ -870,46 +909,24 @@
               </div>
             </div>
           </div>
-        </div>
-      </section>
 
-      <!-- ================= 模型总控 ================= -->
-      <section class="page page-fill" id="page-model-console">
-        <div class="page-head">
-          <div><h2>模型总控</h2><p>定价 · 消耗 · 降速 · 风控规则 一页统览 · 行 = 定价单元 (思考档折叠, fast ×2 独立) · 风控列只读 (整表替换)</p></div>
-          <div class="actions">
-            <span class="seg">
-              <button type="button" data-mc-window="24h" class="active">24h</button>
-              <button type="button" data-mc-window="7d">7d</button>
-              <button type="button" data-mc-window="30d">30d</button>
-            </span>
-            <button type="button" class="ghost" id="mc-refresh-prices" title="清价格缓存, 新定价立即在同族建议档生效">刷新价格缓存</button>
-            <button type="button" class="ghost" id="mc-refresh">刷新</button>
-          </div>
-        </div>
-        <div class="info" id="mc-msg" style="min-height:18px;margin-bottom:6px"></div>
-        <div class="panel fill">
-          <div class="ph"><h3>定价单元 <span class="muted" id="mc-count"></span></h3>
-            <p id="mc-summary"></p>
-          </div>
-          <div class="table-scroll">
-            <table class="nowrap">
-              <thead><tr>
-                <th title="定价单元: 思考档折叠到家族基名, -fast 价格×2 独立成行">模型</th>
-                <th>上游变体</th>
-                <th>定价 in/out</th>
-                <th>来源</th>
-                <th title="官方成本 / 该模型日均实收">成本占比</th>
-                <th title="车道·小时">lane·h</th>
-                <th title="面值美元">消耗$</th>
-                <th title="1 - 我们的 tps / 上游原生 tps">降速</th>
-                <th title="TTFT 下限 / 速度比例 / 输出上限 / 豁免">风控规则</th>
-                <th>组</th>
-                <th>状态</th>
-                <th></th>
-              </tr></thead>
-              <tbody id="mc-body"><tr><td colspan="12" class="muted">加载中…</td></tr></tbody>
-            </table>
+          <!-- 路由测试 -->
+          <div id="mc-tab-route" style="display:none;flex:1;min-height:0;flex-direction:column">
+            <div class="panel fill">
+              <div class="ph"><h3>路由测试</h3>
+                <p class="muted" style="font-size:11px;margin:0">输入模型名 + 可选档位 → 显示会发给 Cursor 的确切名字、价格、风控规则、是否过 404 闸门</p>
+              </div>
+              <div class="form-grid" style="max-width:720px;margin-bottom:10px">
+                <label>模型名 <input id="rt-model" placeholder="claude-opus-5 或 grok-4.6 或 kimi-k3"></label>
+                <label>thinking_level <select id="rt-tl"><option value="">(未指定)</option><option>low</option><option>medium</option><option>high</option><option>max</option></select></label>
+                <label>reasoning_effort <select id="rt-eff"><option value="">(未指定)</option><option>low</option><option>medium</option><option>high</option><option>max</option></select></label>
+                <label class="inline"><input type="checkbox" id="rt-max"> max_mode</label>
+              </div>
+              <div class="toolbar" style="margin-bottom:10px"><button type="button" id="rt-run">测试路由</button></div>
+              <div class="panel" style="flex:0 0 auto"><div class="ph"><h3>结果</h3></div>
+                <pre id="rt-out" class="mono" style="font-size:12px;white-space:pre-wrap;padding:10px">—</pre>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -2291,29 +2308,251 @@
     });
     // ---------- 模型 (定价 / 层级 / 模型组) ----------
     // innerHTML 只拼接 esc() 转义后的服务端字段与固定模板
-    let mdTab = 'prices';
+    // ---------- 模型中心 ----------
+    let mcTab = 'families';
+    let mcFamilies = null;   // /admin/api/models/families 响应
     let mdModels = [];
     let mdGroups = [];
-    const mdMsg = (m, err) => toast('md-msg', m, err);
-    document.querySelectorAll('#models-panel .tabs button').forEach((b) => {
+    const mcMsg = (m, err) => toast('mc-msg', m, err);
+    const mdMsg = mcMsg; // 定价表 tab 沿用同一消息条
+    document.querySelectorAll('#mc-panel .tabs button').forEach((b) => {
       b.addEventListener('click', () => {
-        mdTab = b.dataset.tab;
-        document.querySelectorAll('#models-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
-        ['prices', 'groups'].forEach((t) => { document.getElementById('md-tab-' + t).style.display = t === mdTab ? 'flex' : 'none'; });
-        loadModelsPage().catch((e) => mdMsg(e.message, true));
+        mcTab = b.dataset.tab;
+        document.querySelectorAll('#mc-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
+        ['families', 'menu', 'prices', 'groups', 'route'].forEach((t) => { document.getElementById('mc-tab-' + t).style.display = t === mcTab ? 'flex' : 'none'; });
+        loadModelCenter().catch((e) => mcMsg(e.message, true));
       });
     });
-    async function loadModelsPage() {
-      mdMsg('');
-      const d = await api('/admin/api/models');
-      mdModels = d.models || [];
-      const g = await api('/admin/api/models/groups');
-      mdGroups = g.groups || [];
+
+    async function loadModelCenter() {
+      mcMsg('');
+      // 家族树 + 旧定价列表 + 组 一次拉齐 (定价表/模型组 tab 复用旧端点)
+      const [fam, models, groups] = await Promise.all([
+        api('/admin/api/models/families'),
+        api('/admin/api/models'),
+        api('/admin/api/models/groups'),
+      ]);
+      mcFamilies = fam;
+      mdModels = models.models || [];
+      mdGroups = groups.groups || [];
+      renderFamilies();
+      renderMenu();
       renderModels();
       renderGroups();
       refreshGroupPickers();
-      document.getElementById('nav-models-badge').textContent = d.manual_count ? String(d.manual_count) : '';
+      document.getElementById('nav-models-badge').textContent = models.manual_count ? String(models.manual_count) : '';
     }
+    const loadModelsPage = loadModelCenter; // 旧调用点 (上游拉取/litellm/保存后刷新) 同名兼容
+
+    // ── tab 1: 家族总览 ──
+    const TIER_LABEL = { auto: '自动最省', low: 'low', medium: 'medium', high: 'high', max: 'max' };
+    const MENU_LABEL = { base_and_fast: '基名+fast', base: '只列基名', all: '全部变体', hidden: '隐藏' };
+    function renderFamilies() {
+      const rows = (mcFamilies && mcFamilies.families) || [];
+      document.getElementById('mc-count').textContent = '(' + rows.length + ' 家族 · 上游 ' + (mcFamilies.upstream_count || 0) + ' 名)';
+      const tb = document.getElementById('mc-body');
+      tb.innerHTML = '';
+      if (!rows.length) { tb.innerHTML = '<tr><td colspan="13" class="muted">无数据</td></tr>'; return; }
+      const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', fallback: '<span class="pill bad">兜底</span>' };
+      rows.forEach((r) => {
+        const tr = document.createElement('tr');
+        const w24 = r.w24h || {}, w7 = r.w7d || {}, w30 = r.w30d || {};
+        const p = r.price || {};
+        const ghost = r.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游 AvailableModels 无此家族 —— 误录/已下线">幽灵</span>' : '';
+        const errRate = w24.requests ? ((w24.error_rate || 0) * 100).toFixed(1) + '%' : '—';
+        const errCls = (w24.error_rate || 0) > 0.2 ? 'bad' : (w24.error_rate || 0) > 0.05 ? 'warn' : '';
+        const usdLane = w30.usd_per_lane_hour != null ? '$' + Number(w30.usd_per_lane_hour).toFixed(1) + '/h' : '<span class="muted">数据不足</span>';
+        const rule = r.pace_rule;
+        const ruleTxt = rule
+          ? (rule.exempt ? '<span class="pill ok">免限</span>'
+            : 'TTFT ' + (rule.ttft_floor_ms || 0) + 'ms · '
+              + (rule.speed_ratio != null ? '×' + rule.speed_ratio : (rule.pace_normal_tps || '沿用') + 'tps')
+              + (rule.max_output_tokens ? ' · ≤' + rule.max_output_tokens : ''))
+          : '<span class="muted">—</span>';
+        const statePill = r.hidden ? '<span class="pill bad">已隐藏</span>' : (r.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>');
+        tr.innerHTML =
+          '<td class="mono">' + esc(r.family) + ghost + '</td>' +
+          '<td class="mono">' + (r.variant_count || 0) + '</td>' +
+          '<td></td><td></td>' +
+          '<td class="mono">$' + Number(p.input || 0).toFixed(2) + '/$' + Number(p.output || 0).toFixed(2) + '</td>' +
+          '<td>' + (srcPill[p.source] || esc(p.source || '')) + '</td>' +
+          '<td class="mono">' + (w24.requests || 0) + ' / <span class="' + errCls + '">' + errRate + '</span></td>' +
+          '<td class="mono">$' + Number(w7.face_usd || 0).toFixed(2) + '</td>' +
+          '<td class="mono">$' + Number(w30.face_usd || 0).toFixed(2) + ' · ' + usdLane + '</td>' +
+          '<td style="font-size:11px">' + ruleTxt + '</td>' +
+          '<td class="mono" style="font-size:11px">' + (r.groups || []).map(esc).join(', ') + '</td>' +
+          '<td>' + statePill + '</td><td></td>';
+        // 菜单形态 (内联下拉)
+        const menuSel = el('select', { style: 'font-size:11px' });
+        Object.keys(MENU_LABEL).forEach((k) => {
+          const o = el('option', { value: k }, MENU_LABEL[k]);
+          if (r.menu === k) o.selected = true;
+          menuSel.appendChild(o);
+        });
+        menuSel.addEventListener('change', async () => {
+          try {
+            await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: r.family, menu: menuSel.value }) });
+            mcMsg(r.family + ' 菜单形态 → ' + MENU_LABEL[menuSel.value]);
+            await loadModelCenter();
+          } catch (e) { mcMsg(e.message, true); }
+        });
+        tr.children[2].appendChild(menuSel);
+        // 默认思考档 (内联下拉)
+        const tierSel = el('select', { style: 'font-size:11px' });
+        Object.keys(TIER_LABEL).forEach((k) => {
+          const o = el('option', { value: k }, TIER_LABEL[k]);
+          if (r.default_tier === k) o.selected = true;
+          tierSel.appendChild(o);
+        });
+        tierSel.addEventListener('change', async () => {
+          try {
+            await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: r.family, default_tier: tierSel.value }) });
+            mcMsg(r.family + ' 默认档 → ' + TIER_LABEL[tierSel.value]);
+            await loadModelCenter();
+          } catch (e) { mcMsg(e.message, true); }
+        });
+        tr.children[3].appendChild(tierSel);
+        // 操作: 展开变体 / 编辑定价 / 路由测试
+        const act = tr.lastElementChild;
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '变体')).addEventListener('click', () => {
+          const ex = document.getElementById('mc-exp-' + CSS.escape(r.family));
+          if (ex) { ex.remove(); return; }
+          const er = document.createElement('tr');
+          er.id = 'mc-exp-' + r.family;
+          const vars = (r.variants || []).map((v) => '<span class="mono" style="font-size:11px">' + esc(v) + '</span>').join(' · ');
+          er.innerHTML = '<td></td><td colspan="12" style="font-size:11px">' + (vars || '<span class="muted">上游无变体</span>') + '</td>';
+          tr.after(er);
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '定价')).addEventListener('click', () => {
+          // 跳定价表 tab 并预填
+          document.querySelector('#mc-panel .tabs button[data-tab="prices"]').click();
+          fillModelForm({ model: r.family, input_per_m: p.input, output_per_m: p.output, cache_read_per_m: p.cache_read, cache_write_per_m: p.cache_write, enabled: r.enabled, note: '' });
+          document.getElementById('md-model-add').open = true;
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '路由')).addEventListener('click', () => {
+          document.querySelector('#mc-panel .tabs button[data-tab="route"]').click();
+          document.getElementById('rt-model').value = r.family;
+          document.getElementById('rt-run').click();
+        });
+        tb.appendChild(tr);
+      });
+    }
+
+    // ── tab 2: 客户菜单 ──
+    function renderMenu() {
+      const menu = (mcFamilies && mcFamilies.menu) || [];
+      const fams = (mcFamilies && mcFamilies.families) || [];
+      document.getElementById('mc-menu-count').textContent = '(' + menu.length + ' 项)';
+      const tb = document.getElementById('mc-menu-body');
+      tb.innerHTML = '';
+      if (!menu.length) { tb.innerHTML = '<tr><td colspan="4" class="muted">空</td></tr>'; return; }
+      menu.forEach((id) => {
+        const fam = fams.find((f) => f.family === id.replace(/-fast$/, ''));
+        const isFast = id.endsWith('-fast') && fam;
+        const isAlias = id === 'kimi-k3';
+        const isExact = fam && (fam.variants || []).includes(id);
+        let kind, route, why;
+        if (isAlias) {
+          kind = '<span class="pill info">别名</span>';
+          route = 'kimi-k3-max/high/low (按请求特征)';
+          why = '网关侧自动路由别名, 上游无同名, 永久保留';
+        } else if (isFast) {
+          kind = '<span class="pill warn">fast 入口</span>';
+          route = (fam.variants || []).filter((v) => v.endsWith('-fast')).slice(0, 4).join(', ') || '(无 -fast 变体)';
+          why = '价格 ×2, 按思考档路由到 -<档>-fast 真变体';
+        } else if (isExact) {
+          kind = '<span class="pill ok">真名</span>';
+          route = id + ' (原样透传)';
+          why = '上游 AvailableModels 精确存在';
+        } else if (fam) {
+          kind = '<span class="pill info">基名</span>';
+          route = (fam.variants || []).slice(0, 5).join(', ') + ((fam.variants || []).length > 5 ? ' …' : '');
+          why = '家族基名, 按默认档/请求参数路由到上游真变体';
+        } else {
+          kind = '<span class="muted">手动</span>';
+          route = '(原样透传)';
+          why = '注册表手动条目 (逃生舱), 上游未确认';
+        }
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="mono">' + esc(id) + '</td><td>' + kind + '</td>' +
+          '<td class="mono" style="font-size:11px">' + esc(route) + '</td>' +
+          '<td style="font-size:11px" class="muted">' + esc(why) + '</td>';
+        tb.appendChild(tr);
+      });
+    }
+
+    // ── tab 5: 路由测试 ──
+    document.getElementById('rt-run').addEventListener('click', async () => {
+      const m = document.getElementById('rt-model').value.trim();
+      if (!m) { mcMsg('先填模型名', true); return; }
+      const q = new URLSearchParams({ model: m });
+      const tl = document.getElementById('rt-tl').value;
+      const eff = document.getElementById('rt-eff').value;
+      if (tl) q.set('thinking_level', tl);
+      if (eff) q.set('reasoning_effort', eff);
+      if (document.getElementById('rt-max').checked) q.set('max_mode', 'true');
+      try {
+        const d = await api('/admin/api/models/route-preview?' + q.toString());
+        const p = d.price || {};
+        const rule = d.pace_rule;
+        document.getElementById('rt-out').textContent =
+          '输入:        ' + d.input + '\n' +
+          '闸门:        ' + d.gate + (d.upstream_exact ? ' (上游精确名)' : '') + '\n' +
+          '路由结果:    ' + (d.resolved ? d.input + ' → ' + d.resolved : '(不重写, 原样透传)') + '\n' +
+          '发给 Cursor: ' + d.final_model + '\n' +
+          '家族:        ' + d.family + (d.family_rule ? ' (默认档 ' + (d.family_rule.default_tier || 'auto') + ')' : ' (无自定义规则)') + '\n' +
+          '价格:        in $' + Number(p.input || 0).toFixed(2) + ' / out $' + Number(p.output || 0).toFixed(2) + ' / cr $' + Number(p.cache_read || 0).toFixed(2) + ' / cw $' + Number(p.cache_write || 0).toFixed(2) + ' /1M\n' +
+          '风控规则:    ' + (rule ? JSON.stringify(rule) : '(无, 沿用套餐/全局)');
+      } catch (e) { mcMsg(e.message, true); }
+    });
+
+    // 顶栏按钮 (原「模型」页的搬来, id 改名 mc-*)
+    document.getElementById('mc-refresh').addEventListener('click', () => loadModelCenter().catch((e) => mcMsg(e.message, true)));
+    document.getElementById('mc-import-builtin').addEventListener('click', async () => {
+      if (!confirm('把内置官方价格表全部写成手动条目？已有的手动条目会被覆盖')) return;
+      try {
+        const d = await api('/admin/api/models/import-builtin', { method: 'POST', body: '{}' });
+        mcMsg('已导入 ' + (d.imported || 0) + ' 条内置价格');
+        await loadModelCenter();
+      } catch (e) { mcMsg(e.message, true); }
+    });
+    document.getElementById('mc-fetch-upstream').addEventListener('click', async () => {
+      mcMsg('正在向上游拉取可用模型…');
+      try {
+        const d = await api('/admin/api/models/upstream');
+        const news = (d.models || []).filter((m) => !m.in_registry);
+        mcMsg('账号 ' + d.account + ' 返回 ' + d.count + ' 个模型；' + news.length + ' 个未在模型列表');
+        const box = document.getElementById('md-upstream-box');
+        box.style.display = '';
+        const tb = document.getElementById('md-upstream-body');
+        tb.innerHTML = '';
+        (d.models || []).forEach((m) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td class="mono">' + esc(m.model) + '</td>' +
+            '<td class="mono">$' + Number(m.price[0]).toFixed(2) + '/$' + Number(m.price[1]).toFixed(2) + '</td>' +
+            '<td>' + (m.in_registry ? '<span class="muted">已有</span>' : '<span class="pill warn">未添加</span>') + '</td><td></td>';
+          if (!m.in_registry) {
+            tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '添加')).addEventListener('click', async () => {
+              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, input_per_m: m.price[0], output_per_m: m.price[1], cache_read_per_m: m.price[2], cache_write_per_m: m.price[3], note: 'upstream' }) });
+              await loadModelCenter();
+              document.getElementById('mc-fetch-upstream').click();
+            });
+          }
+          tb.appendChild(tr);
+        });
+        // 拉到上游名单后自动切到定价表 tab 展示
+        document.querySelector('#mc-panel .tabs button[data-tab="prices"]').click();
+      } catch (e) { mcMsg(e.message, true); }
+    });
+    document.getElementById('mc-sync-litellm').addEventListener('click', async () => {
+      if (!confirm('从 litellm 公共价格表同步价格？只填未手动设置过的模型，不覆盖你的手改')) return;
+      mcMsg('正在同步 litellm…');
+      try {
+        const d = await api('/admin/api/models/sync-litellm', { method: 'POST' });
+        mcMsg('已填 ' + (d.filled || []).length + ' 个；跳过手动 ' + (d.skipped_manual || []).length + ' 个；无价格 ' + (d.no_price || []).length + ' 个');
+        await loadModelCenter();
+      } catch (e) { mcMsg(e.message, true); }
+    });
     function renderModels() {
       const q = document.getElementById('md-q').value.trim().toLowerCase();
       const src = document.getElementById('md-src').value;
@@ -2403,12 +2642,6 @@
       try { await api('/admin/api/models', { method: 'POST', body: JSON.stringify(body) }); mdMsg('已保存 ' + body.model); await loadModelsPage(); }
       catch (e) { mdMsg(e.message, true); }
     });
-    document.getElementById('md-import-builtin').addEventListener('click', async () => {
-      if (!confirm('把内置官方价格表全部导入为手动条目？已有手动条目不覆盖')) return;
-      try { const d = await api('/admin/api/models/import-builtin', { method: 'POST' }); mdMsg('导入 ' + d.written + ' 个'); await loadModelsPage(); }
-      catch (e) { mdMsg(e.message, true); }
-    });
-    document.getElementById('md-refresh').addEventListener('click', () => loadModelsPage().catch((e) => mdMsg(e.message, true)));
     // 模型组
     function groupUsage(id) {
       const keys = (lastKeys || []).filter((k) => (k.model_groups || []).includes(id)).map((k) => k.name || k.prefix);
@@ -2698,42 +2931,6 @@
       } catch (_) {}
     }
 
-    // ---------- 模型页: 上游可用模型 + litellm 同步 ----------
-    document.getElementById('md-fetch-upstream').addEventListener('click', async () => {
-      mdMsg('正在向上游拉取可用模型…');
-      try {
-        const d = await api('/admin/api/models/upstream');
-        const news = (d.models || []).filter((m) => !m.in_registry);
-        mdMsg('账号 ' + d.account + ' 返回 ' + d.count + ' 个模型；' + news.length + ' 个未在模型列表');
-        const box = document.getElementById('md-upstream-box');
-        box.style.display = '';
-        const tb = document.getElementById('md-upstream-body');
-        tb.innerHTML = '';
-        (d.models || []).forEach((m) => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = '<td class="mono">' + esc(m.model) + '</td>' +
-            '<td class="mono">$' + Number(m.price[0]).toFixed(2) + '/$' + Number(m.price[1]).toFixed(2) + '</td>' +
-            '<td>' + (m.in_registry ? '<span class="muted">已有</span>' : '<span class="pill warn">未添加</span>') + '</td><td></td>';
-          if (!m.in_registry) {
-            tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '添加')).addEventListener('click', async () => {
-              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, input_per_m: m.price[0], output_per_m: m.price[1], cache_read_per_m: m.price[2], cache_write_per_m: m.price[3], note: 'upstream' }) });
-              await loadModelsPage();
-              document.getElementById('md-fetch-upstream').click();
-            });
-          }
-          tb.appendChild(tr);
-        });
-      } catch (e) { mdMsg(e.message, true); }
-    });
-    document.getElementById('md-sync-litellm').addEventListener('click', async () => {
-      if (!confirm('从 litellm 公共价格表同步价格？只填未手动设置过的模型，不覆盖你的手改')) return;
-      mdMsg('正在同步 litellm…');
-      try {
-        const d = await api('/admin/api/models/sync-litellm', { method: 'POST' });
-        mdMsg('已填 ' + (d.filled || []).length + ' 个；跳过手动 ' + (d.skipped_manual || []).length + ' 个；无价格 ' + (d.no_price || []).length + ' 个');
-        await loadModelsPage();
-      } catch (e) { mdMsg(e.message, true); }
-    });
     // ---------- 消耗分析 ----------
     let anTab = 'presence';
     let anData = null;
@@ -2969,7 +3166,7 @@
     setInterval(() => { if (location.hash.startsWith('#analytics') && anTab === 'presence' && document.getElementById('an-sessions').style.display === 'none') loadPresence().catch(() => {}); }, 10000);
 
     // ---------- 路由: hash → 页面 ----------
-    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'analytics', 'cards', 'models', 'model-console', 'settings', 'logs', 'health'];
+    const PAGES = ['overview', 'pool', 'proxies', 'keys', 'analytics', 'cards', 'model-center', 'settings', 'logs', 'health'];
     PAGES.push('portal-users');
     function showPage(name) {
       // 支持 #analytics/presence 直达 tab
@@ -2984,8 +3181,7 @@
       document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
       if (name === 'analytics' && !sub) loadAnalytics().catch((e) => toast('an-msg', e.message, true));
       if (name === 'cards') { ensureGroups().then(refreshGroupPickers); loadCardsTab().catch((e) => toast('cd-msg', e.message, true)); }
-      if (name === 'models') loadModelsPage().catch((e) => toast('md-msg', e.message, true));
-      if (name === 'model-console') loadModelConsole().catch((e) => toast('mc-msg', e.message, true));
+      if (name === 'model-center') loadModelCenter().catch((e) => toast('mc-msg', e.message, true));
       if (name === 'portal-users') loadPortalUsers().catch((e) => toast('pu-msg', e.message, true));
       if (name === 'logs') { lgLastId = 0; loadLogsPage(true).catch((e) => toast('lg-msg', e.message, true)); }
       if (name === 'keys') ensureGroups().then(refreshGroupPickers);
@@ -3665,10 +3861,6 @@
     // 操作后即时刷新（不等待下一轮轮询）
     function refreshSoon() { setTimeout(() => loadAll().catch(() => {}), 100); }
 
-    // ---------- 模型总控 ----------
-    let mcWindow = '24h';
-    let mcData = null;
-
     // ---------- 门户用户管理 ----------
     async function loadPortalUsers() {
       toast('pu-msg', '');
@@ -3749,124 +3941,6 @@
         loadPortalUsers();
       } catch (e) { toast('pu-msg', e.message, true); }
     });
-    async function loadModelConsole() {
-      toast('mc-msg', '');
-      const d = await api('/admin/api/models/console?window=' + mcWindow);
-      mcData = d;
-      const rows = d.rows || [];
-      document.getElementById('mc-count').textContent = '(' + rows.length + ' 定价单元)';
-      const c = d.counts || {};
-      document.getElementById('mc-summary').textContent =
-        '窗口 ' + (d.window || mcWindow) + ' · 已定价 ' + (c.priced || 0) + ' / ' + (c.rows || 0) + ' · 幽灵 ' + (c.ghost || 0) + ' 个';
-      const tb = document.getElementById('mc-body');
-      tb.innerHTML = '';
-      if (!rows.length) { tb.innerHTML = '<tr><td colspan="12" class="muted">无数据</td></tr>'; return; }
-      rows.forEach((r) => {
-        const tr = document.createElement('tr');
-        const p = r.price || {};
-        const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', fallback: '<span class="pill bad">兜底</span>' }[p.source] || esc(p.source || '');
-        const ghost = r.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游无此模型 (影子价兜底: 能计价但不出现在内置/上游名单)">幽灵</span>' : '';
-        const priceableTip = p.priceable === false ? ' <span class="pill warn" style="font-size:10px" title="fast 折叠行需先录 -fast 专属条目才能直接定价, 否则前缀匹配会吃掉 ×2">先录fast条目</span>' : '';
-        // 成本占比 = 官方成本 / (日均实收/套餐天数) —— 定价台核心指标, >60% 红 >30% 黄
-        const cons = r.consumption || {};
-        const face = Number(cons.face_usd || 0);
-        const laneH = Number(cons.lane_hours || 0);
-        const usdLaneH = cons.usd_per_lane_hour;
-        const paceR = cons.pace_ratio;
-        const tps50 = cons.tps_p50, upTps = cons.upstream_tps_p50;
-        const rule = r.risk_rule;
-        const ruleTxt = rule
-          ? (rule.exempt ? '<span class="pill ok">免限</span>' :
-             'TTFT ' + (rule.ttft_floor_ms || 0) + 'ms · ' +
-             (rule.speed_ratio != null ? '×' + rule.speed_ratio : (rule.pace_normal_tps || '沿用') + 'tps') +
-             (rule.max_output_tokens ? ' · ≤' + rule.max_output_tokens : ''))
-          : '<span class="muted">—</span>';
-        const paceTxt = paceR == null ? '<span class="muted">—</span>' :
-          '<span class="' + (paceR > 40 ? 'bad' : paceR > 10 ? 'warn' : 'ok') + '">' + Number(paceR).toFixed(0) + '%</span>' +
-          (tps50 != null && upTps != null ? '<div class="muted" style="font-size:10px">' + Number(tps50).toFixed(0) + '/' + Number(upTps).toFixed(0) + '</div>' : '');
-        const laneTxt = laneH >= 1 ? laneH.toFixed(1) + 'h' : '<span class="muted" title="数据不足 1h, $/lane·h 不显示">' + laneH.toFixed(2) + 'h</span>';
-        const usdTxt = usdLaneH != null ? '$' + Number(usdLaneH).toFixed(1) + '/h' : '<span class="muted">数据不足</span>';
-        const statePill = r.hidden ? '<span class="pill bad">已隐藏</span>' : (r.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>');
-        // #3 成本占比: 成本/面值 (面值=官方口径成本, 恒 100%) —— 占位, 真「成本/收入」需套餐收入归集 (门户)
-        const costRatio = cons.cost_ratio;
-        const costRatioTxt = costRatio == null ? '<span class="muted">—</span>' :
-          '<span class="' + (costRatio > 0.8 ? 'bad' : costRatio > 0.6 ? 'warn' : 'ok') + '">' + (costRatio * 100).toFixed(0) + '%</span>';
-        const cheap = r.cheapest_variant;
-        const cheapTip = cheap ? '<div class="muted" style="font-size:10px" title="同族 $/lane·h 最低变体">建议 ' + esc(cheap.variant) + ' $' + Number(cheap.usd_per_lane_hour).toFixed(1) + '</div>' : '';
-        // #10 7 天趋势 sparkline: 复用 consumption 的 hourly 数据 (后端补 trend_7d 字段前先占位)
-        const trend = r.trend_7d || [];
-        const trendSvg = trend.length >= 2 ? (() => {
-          const max = Math.max(...trend, 0.01);
-          const pts = trend.map((v, i) => (i * 40 / (trend.length - 1)).toFixed(1) + ',' + (20 - v / max * 18).toFixed(1)).join(' ');
-          return '<svg width="40" height="20" style="vertical-align:middle"><polyline points="' + pts + '" fill="none" stroke="var(--ink)" stroke-width="1" opacity="0.6"/></svg>';
-        })() : '<span class="muted" style="font-size:10px">—</span>';
-        // #12 智能建议: 低价 + 低限速 + 低错误率 = 推荐 (综合评分)
-        const errRate = cons.requests > 0 ? (cons.errors || 0) / cons.requests : 0;
-        const pacePenalty = paceR != null ? paceR / 100 : 0;
-        const priceScore = p.output_per_m ? (1 / Math.max(0.1, p.output_per_m)) * 10 : 0; // 输出价越低分越高
-        const smartScore = (priceScore * (1 - pacePenalty) * (1 - errRate)).toFixed(1);
-        const smartTip = '<div class="muted" style="font-size:10px" title="综合评分: 输出价倒数 × (1-降速) × (1-错误率)">评分 ' + smartScore + '</div>';
-        tr.innerHTML =
-          '<td class="mono">' + esc(r.key) + ghost + priceableTip + (r.variants > 1 ? ' <span class="muted" style="font-size:10px">' + r.variants + '变体</span>' : '') + cheapTip + '</td>' +
-          '<td class="mono" style="font-size:10px">' + (r.variant_names || []).slice(0, 3).map(esc).join('<br>') + (r.variants > 3 ? '<br><span class="muted">+' + (r.variants - 3) + '</span>' : '') + '</td>' +
-          '<td class="mono">$' + Number(p.input_per_m || 0).toFixed(2) + ' / $' + Number(p.output_per_m || 0).toFixed(2) + '</td>' +
-          '<td>' + srcPill + '</td>' +
-          '<td class="mono">' + costRatioTxt + '</td>' +
-          '<td class="mono">' + (face > 0 ? '$' + face.toFixed(2) : '<span class="muted">—</span>') + '</td>' +
-          '<td class="mono">' + laneTxt + '</td>' +
-          '<td class="mono">' + usdTxt + '</td>' +
-          '<td class="mono">' + paceTxt + '</td>' +
-          '<td style="font-size:11px">' + ruleTxt + '</td>' +
-          '<td class="mono" style="font-size:10px">' + (r.groups || []).map(esc).join(', ') + '</td>' +
-          '<td>' + statePill + '</td>' +
-          '<td></td>';
-        const act = tr.lastElementChild;
-        if (p.priceable !== false) {
-          act.appendChild(el('button', { class: 'ghost', type: 'button' }, '改价')).addEventListener('click', () => {
-            location.hash = '#models';
-            setTimeout(() => fillModelForm({ model: r.key, input_per_m: p.input_per_m, output_per_m: p.output_per_m, cache_read_per_m: p.cache_read_per_m, cache_write_per_m: p.cache_write_per_m, note: '', enabled: r.enabled }), 300);
-          });
-        } else {
-          act.appendChild(el('button', { class: 'ghost', type: 'button', title: 'fast 折叠行需先在模型页录 -fast 专属条目' }, '录fast条目')).addEventListener('click', () => {
-            location.hash = '#models';
-          });
-        }
-        act.appendChild(el('button', { class: 'ghost', type: 'button' }, r.enabled ? '停用' : '启用')).addEventListener('click', async () => {
-          await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: r.key, enabled: !r.enabled }) });
-          await loadModelConsole();
-        });
-        // #6 按模型降档: 写 RiskPolicy.model_rules (只动该前缀, 其余原样)
-        act.appendChild(el('button', { class: 'ghost', type: 'button', title: '限速高价 30-40 / 便宜 60-80 tok/s; 免限=该模型不限速' }, '降档')).addEventListener('click', async () => {
-          const cur = r.risk_rule || {};
-          const curPace = cur.pace_normal_tps || '';
-          const input = prompt('模型 ' + r.key + ' 限速 (tok/s)\n留空=沿用, 0=免限, 建议: 高价模型 30-40 / 便宜 60-80\n当前: ' + (cur.exempt ? '免限' : (curPace || '沿用')), cur.exempt ? '0' : curPace);
-          if (input === null) return;
-          const v = input.trim();
-          const body = { prefix: r.key };
-          if (v === '0') body.exempt = true;
-          else if (v !== '') { body.pace_normal_tps = parseInt(v, 10) || 0; body.pace_soften_tps = Math.max(1, Math.floor((parseInt(v, 10) || 0) * 0.6)); body.pace_degraded_tps = Math.max(1, Math.floor((parseInt(v, 10) || 0) * 0.3)); }
-          await api('/admin/api/models/pace-rule', { method: 'POST', body: JSON.stringify(body) });
-          toast('mc-msg', '已写风控规则: ' + r.key, false);
-          await loadModelConsole();
-        });
-        tb.appendChild(tr);
-      });
-    }
-    document.querySelectorAll('[data-mc-window]').forEach((b) => b.addEventListener('click', () => {
-      document.querySelectorAll('[data-mc-window]').forEach((x) => x.classList.toggle('active', x === b));
-      mcWindow = b.dataset.mcWindow;
-      loadModelConsole().catch((e) => toast('mc-msg', e.message, true));
-    }));
-    document.getElementById('mc-refresh').addEventListener('click', () => loadModelConsole().catch((e) => toast('mc-msg', e.message, true)));
-    // #5 手动清价格缓存: 新模型定价后立即在「同族建议档」生效
-    document.getElementById('mc-refresh-prices').addEventListener('click', async () => {
-      try {
-        const d = await api('/admin/api/analytics/refresh-price-map', { method: 'POST', body: '{}' });
-        toast('mc-msg', '价格缓存已清, ' + (d.models || 0) + ' 个模型重算', false);
-        loadModelConsole().catch(() => {});
-      } catch (e) { toast('mc-msg', e.message, true); }
-    });
-
     if (!location.hash) location.hash = '#overview';
     showPage(location.hash.slice(1));
     loadAll().catch((e) => { setLive(false); toast('acc-msg', e.message, true); });
