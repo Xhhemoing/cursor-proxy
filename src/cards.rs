@@ -306,7 +306,7 @@ pub struct CardPlan {
     pub duration_hours: u64,
     /// 正常并发上限
     pub max_concurrency: u32,
-    /// 每分钟请求数上限 (RPM), 防脚本瞬间打满
+    /// 每分钟请求数上限 (RPM), 防脚本瞬间打满 — 已废弃, 保留字段仅兼容旧配置/观测
     pub rpm_limit: u32,
     /// 公平使用帽: 每日请求软上限, 超过进压制档. 0 = 不按次数
     pub fair_use_rpd: u32,
@@ -365,6 +365,19 @@ pub struct CardPlan {
     /// 仅对这些用户组开放 (空 = 全部)
     #[serde(default)]
     pub allowed_group_ids: Vec<String>,
+
+    // ── 门户钱包重构 (2026-09-08) ──
+    /// 畅饮费率模式: ¥/槽·时. >0 时购买页按「时长 × 并发」算价, price 字段忽略.
+    /// 0 = 固定价模式 (price + duration_hours, 一键购买).
+    #[serde(default)]
+    pub price_per_lane_hour: f64,
+    /// 费率模式最少购买小时
+    #[serde(default = "default_min_hours")]
+    pub min_hours: u64,
+}
+
+fn default_min_hours() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -423,7 +436,7 @@ impl Default for CardPlan {
             face_usd: 0.0,
             duration_hours: 24,
             max_concurrency: 1,
-            rpm_limit: 30,
+            rpm_limit: 0, // 已废弃, 0 = 不限
             fair_use_rpd: 0,
             degraded_concurrency: 1,
             daily_quota_usd: 0.0,
@@ -443,6 +456,9 @@ impl Default for CardPlan {
             sub_plan_ids: vec![],
             stack_mode: StackMode::default(),
             allowed_group_ids: vec![],
+            // 门户钱包重构字段 (并行智能体加的, Default impl 漏了)
+            price_per_lane_hour: 0.0,
+            min_hours: 1,
         }
     }
 }
@@ -457,7 +473,7 @@ impl CardPlan {
             kind: PlanKind::Unlimited,
             duration_hours: 24,
             max_concurrency: conc,
-            rpm_limit: 30 * conc,
+            rpm_limit: 0, // 已废弃, 0 = 不限
             note: "无限畅饮: 24h 不限次, 不限速 (pace_* 全 0); 行为评分 ≥55 仅降并发".into(),
             ..CardPlan::default()
         };
@@ -469,7 +485,7 @@ impl CardPlan {
             face_usd: face,
             duration_hours: 24 * 7,
             max_concurrency: 4,
-            rpm_limit: 120,
+            rpm_limit: 0, // 已废弃, 0 = 不限
             pace_normal_tps: 0,
             abuse_score_threshold: 0,
             note: "定额卡: 官方口径面值, 7 天有效, 用完即止, 不限速".into(),
@@ -524,6 +540,43 @@ pub struct Card {
     /// 主套餐卡 key (子套餐卡指向主卡)
     #[serde(default)]
     pub parent_card_key: Option<String>,
+
+    // ── 门户钱包重构 (2026-09-08) ──
+    /// 并发槽数覆盖 (畅饮卡加减槽). None = 用套餐 max_concurrency
+    #[serde(default)]
+    pub slots: Option<u32>,
+    /// 费率模式购买的时长 (小时). 激活时 expires_at = now + 该值×3600
+    #[serde(default)]
+    pub duration_hours: Option<u64>,
+}
+
+impl Card {
+    /// 未激活 = expires_at == 0 (费率模式购买后不激活, 首调或手动激活才倒计时)
+    pub fn activated(&self) -> bool {
+        self.expires_at > 0
+    }
+    /// 有效并发槽 (卡覆盖 > 套餐)
+    pub fn effective_slots(&self, plan: &CardPlan) -> u32 {
+        self.slots.unwrap_or(plan.max_concurrency).max(1)
+    }
+}
+
+impl CardPlan {
+    /// 费率模式 = 按 ¥/槽·时 计价, 购买时选时长×并发
+    pub fn is_rate_mode(&self) -> bool {
+        self.price_per_lane_hour > 0.0
+    }
+    /// 费率模式算价: 费率 × 小时 × 槽. 返回元 (保留 2 位)
+    pub fn rate_price(&self, hours: u64, slots: u32) -> f64 {
+        ((self.price_per_lane_hour * hours as f64 * slots as f64) * 100.0).round() / 100.0
+    }
+}
+
+/// 卡的有效时长 (小时): 卡上记录 > 套餐 expire_hours > 套餐 duration_hours
+pub fn card_effective_hours(card: &Card, plan: &CardPlan) -> u64 {
+    card.duration_hours
+        .unwrap_or_else(|| plan.expire_hours.unwrap_or(plan.duration_hours))
+        .max(1)
 }
 
 /// 申诉记录. 一张卡同时只有一条; 再提交覆盖 (pending 期间不能重复提)
@@ -561,7 +614,8 @@ impl Appeal {
 
 impl Card {
     pub fn is_expired(&self, now: u64) -> bool {
-        now >= self.expires_at
+        // expires_at == 0 = 未激活, 不算过期
+        self.activated() && now >= self.expires_at
     }
     pub fn remaining_secs(&self, now: u64) -> u64 {
         self.expires_at.saturating_sub(now)
@@ -1187,6 +1241,21 @@ impl CardStore {
                  card_key TEXT PRIMARY KEY,
                  face_used_micro INTEGER NOT NULL DEFAULT 0,
                  updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS user_quota (
+                 user_id TEXT PRIMARY KEY,
+                 credited_micro INTEGER NOT NULL DEFAULT 0,
+                 used_micro INTEGER NOT NULL DEFAULT 0,
+                 updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS user_quota_log (
+                 id INTEGER PRIMARY KEY,
+                 user_id TEXT NOT NULL,
+                 delta_usd REAL NOT NULL,
+                 kind TEXT NOT NULL,
+                 ref_id TEXT,
+                 ts_ms INTEGER NOT NULL,
+                 operator TEXT NOT NULL
              );",
         );
         if let Err(e) = init {
@@ -1297,6 +1366,202 @@ impl CardStore {
     }
     pub fn tz_offset_minutes(&self) -> i32 {
         self.tz_offset_minutes
+    }
+
+    // ── 用户定额钱包 (2026-09-08 门户钱包重构) ──
+
+    /// 充值定额池 (正数) 或手动调整 (可负). 写 user_quota + user_quota_log.
+    pub fn quota_credit(
+        &self,
+        user_id: &str,
+        delta_usd: f64,
+        kind: &str,
+        ref_id: Option<&str>,
+        operator: &str,
+    ) -> Result<f64, String> {
+        if !delta_usd.is_finite() || delta_usd == 0.0 {
+            return Err("金额非法".into());
+        }
+        let micro = (delta_usd * 1e6).round() as i64;
+        let now = now_unix() as i64;
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Err("cards.db unavailable".into());
+        };
+        let conn = ledger.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_quota (user_id, credited_micro, used_micro, updated_at)
+             VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET credited_micro = credited_micro + ?2, updated_at = ?3",
+            rusqlite::params![user_id, micro.max(0), now],
+        )
+        .map_err(|e| e.to_string())?;
+        if micro < 0 {
+            // 负调整直接减 used (即减少已用 → 等效充值) 更直观: 不减 credited 防历史报表失真
+            conn.execute(
+                "UPDATE user_quota SET used_micro = MAX(0, used_micro + ?2), updated_at = ?3 WHERE user_id = ?1",
+                rusqlite::params![user_id, micro, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let _ = conn.execute(
+            "INSERT INTO user_quota_log (user_id, delta_usd, kind, ref_id, ts_ms, operator) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![user_id, delta_usd, kind, ref_id, now * 1000, operator],
+        );
+        drop(conn);
+        Ok(self.quota_remaining(user_id))
+    }
+
+    /// 剩余定额 (官方 $)
+    pub fn quota_remaining(&self, user_id: &str) -> f64 {
+        let (c, u) = self.quota_totals(user_id);
+        ((c - u).max(0)) as f64 / 1e6
+    }
+
+    /// (已充 micro, 已用 micro)
+    pub fn quota_totals(&self, user_id: &str) -> (u64, u64) {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return (0, 0);
+        };
+        let Ok(conn) = ledger.lock() else {
+            return (0, 0);
+        };
+        conn.query_row(
+            "SELECT credited_micro, used_micro FROM user_quota WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .map(|(c, u)| (c.max(0) as u64, u.max(0) as u64))
+        .unwrap_or((0, 0))
+    }
+
+    /// 钱包版 B1 预扣: 余额(含在途预扣)不足 → 402. 成功返回 (hold_micro, 预扣句柄槽).
+    /// 句柄是 (user_id, hold) 的纯数据, 调用方在 settle 时传回 — 钱包无 CardRuntime, hold 存调用方.
+    /// 并发安全靠 SQLite 事务内 UPDATE ... WHERE used + ? <= credited (原子 CAS).
+    pub fn quota_admit(&self, user_id: &str, model: &str, est_input_tok: u64) -> Result<u64, (u16, String)> {
+        let hold = Self::hold_estimate_micro(model, est_input_tok);
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Err((500, "cards.db unavailable".into()));
+        };
+        let conn = ledger.lock().map_err(|_| (500, "db lock".to_string()))?;
+        // 原子扣预扣: used_micro 直接加 hold, 结算时再 (used = used - hold + actual).
+        // 注意: 持 conn 锁期间不得调 quota_totals (内部也要锁同一 Mutex → 死锁).
+        let n = conn
+            .execute(
+                "UPDATE user_quota SET used_micro = used_micro + ?2, updated_at = ?3
+                 WHERE user_id = ?1 AND used_micro + ?2 <= credited_micro",
+                rusqlite::params![user_id, hold as i64, now_unix() as i64],
+            )
+            .map_err(|e| (500, e.to_string()))?;
+        if n == 0 {
+            let (c, u): (i64, i64) = conn
+                .query_row(
+                    "SELECT credited_micro, used_micro FROM user_quota WHERE user_id = ?1",
+                    rusqlite::params![user_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+            drop(conn);
+            return Err((
+                402,
+                format!(
+                    "quota exhausted (${:.2} / ${:.2}, est ${:.4})",
+                    u as f64 / 1e6,
+                    c as f64 / 1e6,
+                    hold as f64 / 1e6
+                ),
+            ));
+        }
+        Ok(hold)
+    }
+
+    /// 钱包结算: used = used - hold + actual. 幂等由调用方 (QuotaHold struct) 保证.
+    pub fn quota_settle(&self, user_id: &str, hold_micro: u64, actual_usd: f64) {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return;
+        };
+        let actual = (actual_usd * 1e6).round() as i64;
+        if let Ok(conn) = ledger.lock() {
+            let _ = conn.execute(
+                "UPDATE user_quota SET used_micro = MAX(0, used_micro - ?2 + ?3), updated_at = ?4 WHERE user_id = ?1",
+                rusqlite::params![user_id, hold_micro as i64, actual, now_unix() as i64],
+            );
+        }
+    }
+
+    /// 中断/panic 兜底: 只释放预扣不加消耗
+    pub fn quota_release(&self, user_id: &str, hold_micro: u64) {
+        self.quota_settle(user_id, hold_micro, 0.0);
+    }
+
+    /// 钱包流水 (充值/调整)
+    pub fn quota_log(&self, user_id: &str, limit: usize) -> Vec<Value> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return vec![];
+        };
+        let Ok(conn) = ledger.lock() else {
+            return vec![];
+        };
+        let mut out = vec![];
+        if let Ok(mut st) = conn.prepare(
+            "SELECT delta_usd, kind, ref_id, ts_ms, operator FROM user_quota_log WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2",
+        ) {
+            if let Ok(rows) = st.query_map(rusqlite::params![user_id, limit as i64], |r| {
+                Ok(json!({
+                    "delta_usd": r.get::<_, f64>(0)?,
+                    "kind": r.get::<_, String>(1)?,
+                    "ref_id": r.get::<_, Option<String>>(2)?,
+                    "ts_ms": r.get::<_, i64>(3)?,
+                    "operator": r.get::<_, String>(4)?,
+                }))
+            }) {
+                for r in rows.flatten() {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn activate_card(&self, key: &str) -> Result<Card, String> {
+        let card = self.get_card(key).ok_or("card not found")?;
+        if card.activated() {
+            return Ok(card);
+        }
+        let plan = self.get_plan(&card.plan_id).ok_or("plan missing")?;
+        let now = now_unix();
+        self.update_card(key, |c| {
+            let hours = card_effective_hours(c, &plan);
+            c.first_call_at = Some(now);
+            c.expires_at = now + hours * 3600;
+        })
+    }
+
+    /// 畅饮卡加时: expires_at += hours (已过期/未激活从 now 重基). 返回新卡.
+    pub fn extend_card_hours(&self, key: &str, hours: u64) -> Result<Card, String> {
+        if hours == 0 {
+            return Err("hours must be > 0".into());
+        }
+        let card = self.get_card(key).ok_or("card not found")?;
+        let now = now_unix();
+        self.update_card(key, |c| {
+            let base = if c.activated() { c.expires_at.max(now) } else { now };
+            if !card.activated() {
+                c.first_call_at = Some(now);
+            }
+            c.expires_at = base + hours * 3600;
+        })
+    }
+
+    /// 畅饮卡改槽数. None = 回退套餐值.
+    pub fn set_card_slots(&self, key: &str, slots: Option<u32>) -> Result<Card, String> {
+        let card = self.get_card(key).ok_or("card not found")?;
+        let plan = self.get_plan(&card.plan_id).ok_or("plan missing")?;
+        if let Some(s) = slots {
+            if s == 0 || s > plan.max_concurrency.max(1) {
+                return Err(format!("slots must be 1..={}", plan.max_concurrency.max(1)));
+            }
+        }
+        self.update_card(key, |c| c.slots = slots)
     }
 
     /// 写入预置套餐 (已存在的 id 不覆盖, 返回新增数)
@@ -1439,6 +1704,18 @@ impl CardStore {
         owner: &str,
         paid_rmb: Option<f64>,
     ) -> Result<Card, String> {
+        self.issue_card_full(plan_id, owner, paid_rmb, None, None)
+    }
+
+    /// 门户费率模式开卡: 可选 hours/slots. hours 给定且套餐 first_call 时购买不激活 (expires_at=0).
+    pub fn issue_card_full(
+        &self,
+        plan_id: &str,
+        owner: &str,
+        paid_rmb: Option<f64>,
+        hours: Option<u64>,
+        slots: Option<u32>,
+    ) -> Result<Card, String> {
         let plan = self.get_plan(plan_id).ok_or("plan not found")?;
         if !plan.enabled {
             return Err("plan disabled".into());
@@ -1446,13 +1723,20 @@ impl CardStore {
         if plan.kind == PlanKind::Quota && plan.face_usd <= 0.0 {
             return Err("quota plan requires face_usd > 0".into());
         }
+        if let Some(s) = slots {
+            if s == 0 || s > plan.max_concurrency.max(1) {
+                return Err(format!("slots must be 1..={}", plan.max_concurrency.max(1)));
+            }
+        }
         let now = now_unix();
+        let dur = hours.unwrap_or(plan.duration_hours).max(1);
+        let lazy = plan.billing_mode == BillingMode::FirstCall;
         let card = Card {
             card_key: format!("card-{}", uuid::Uuid::new_v4().simple()),
             plan_id: plan_id.to_string(),
             owner: owner.to_string(),
             issued_at: now,
-            expires_at: now + plan.duration_hours * 3600,
+            expires_at: if lazy { 0 } else { now + dur * 3600 },
             enabled: true,
             paid_rmb: paid_rmb.unwrap_or(plan.price),
             face_used_micro: 0,
@@ -1460,6 +1744,8 @@ impl CardStore {
             user_id: None,
             first_call_at: None,
             parent_card_key: None,
+            slots,
+            duration_hours: if hours.is_some() { Some(dur) } else { None },
         };
         self.cards.insert(card.card_key.clone(), card.clone());
         self.save();
@@ -1839,12 +2125,20 @@ impl CardStore {
             return Err((403, "plan disabled".into()));
         }
 
-        // P1: billing_mode=first_call 时, 首次调用记 first_call_at 并重算 expires_at
-        if plan.billing_mode == BillingMode::FirstCall && card.first_call_at.is_none() {
+        // 未激活卡 (expires_at == 0): 首次调用自动激活, 从 now 起计时长
+        if !card.activated() {
+            let mut c = self.cards.get_mut(key).ok_or((500, "card lost".to_string()))?;
+            let hours = card_effective_hours(&c, &plan);
+            c.first_call_at = Some(now);
+            c.expires_at = now + hours * 3600;
+            drop(c);
+            self.save();
+        }
+
+        // P1: billing_mode=first_call 且发卡时没记时长 (旧路径), 首次调用补记
+        if plan.billing_mode == BillingMode::FirstCall && card.first_call_at.is_none() && card.activated() {
             let mut c = self.cards.get_mut(key).ok_or((500, "card lost".to_string()))?;
             c.first_call_at = Some(now);
-            let hours = plan.expire_hours.unwrap_or(plan.duration_hours);
-            c.expires_at = now + hours * 3600;
             drop(c);
             self.save();
         }
@@ -1902,14 +2196,9 @@ impl CardStore {
         }
         let ds = self.roll_day(&rt, now);
 
-        // RPM 闸门 (先于计数, 拒绝时不污染当日计数)
-        let rpm_now = rt.rpm.tick(now);
-        if rpm_now > plan.rpm_limit as u64 {
-            return Err((
-                429,
-                format!("card RPM limit exceeded ({}/{})", rpm_now, plan.rpm_limit),
-            ));
-        }
+        // RPM 观测: 仍 tick 计数供 admin 面板查看, 但不再硬拒绝 (D 方案 2026-09-07).
+        // 高并发下固定窗口 30 RPM 会瞬间打满 → 429 洪灾; 实际限流由并发闸门 + 行为分承担.
+        let _rpm_now = rt.rpm.tick(now);
 
         // 行为信号 + 档位判定 (在 day_count 递增前评估, 用的是截至上一条的状态)
         rt.behavior.on_arrive(now, ds);
@@ -1918,8 +2207,8 @@ impl CardStore {
         rt.hold_micro.fetch_add(hold, Ordering::Relaxed);
 
         let conc_cap = match throttle {
-            Throttle::Normal => plan.max_concurrency.max(1),
-            Throttle::Soften => (plan.max_concurrency / 2)
+            Throttle::Normal => card.effective_slots(&plan),
+            Throttle::Soften => (card.effective_slots(&plan) / 2)
                 .max(plan.degraded_concurrency)
                 .max(1),
             Throttle::Degraded => plan.degraded_concurrency.max(1),
@@ -2309,8 +2598,15 @@ impl CardPermit {
     }
     /// B7: 向该卡的共享匀速桶放一帧 (估算 token 数), 返回调用方应 sleep 的时长.
     /// 同卡所有并发流共用一个桶 → 卡总输出 ≤ pace_tps. pace=0 时恒 ZERO.
+    /// 首帧免限速: 本请求还未放出任何 token 时直接放行, 不被同卡前序流的欠债堵首字.
     pub fn pace_admit(&mut self, tokens: f64) -> std::time::Duration {
         if self.pace_tps == 0 || tokens <= 0.0 {
+            return std::time::Duration::ZERO;
+        }
+        // 首帧短路: sent_tokens==0 说明这是本请求第一帧, 直接放行不计桶.
+        // 否则同卡前序流占满桶时, 新流的首字会被排队 (实测 fable 首帧 pace_wait 占 TTFT 主因).
+        if self.sent_tokens == 0.0 {
+            self.sent_tokens += tokens;
             return std::time::Duration::ZERO;
         }
         self.sent_tokens += tokens;
@@ -2493,7 +2789,7 @@ mod tests {
             price: 50.0,
             duration_hours: 24,
             max_concurrency: 2,
-            rpm_limit: 100,
+            rpm_limit: 0, // 已废弃, 0 = 不限
             fair_use_rpd: 5,
             degraded_concurrency: 1,
             abuse_score_threshold: 0, // 单测默认关行为评分, 单独测
@@ -2755,6 +3051,7 @@ mod tests {
     }
 
     /// B7: 同卡两条并发流共用一个匀速桶 —— 合计放出量受 pace 约束, 而不是各自一份.
+    /// 2026-09-07 起: 每条流的首帧免限速 (sent_tokens==0 短路), 从第二帧起才进共享桶.
     #[tokio::test]
     async fn shared_pacer_caps_total_output_across_streams() {
         let s = store();
@@ -2767,11 +3064,16 @@ mod tests {
         let (_, _, mut g1, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
         let (_, _, mut g2, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
         assert_eq!(g1.pace_tps(), 10);
-        // 流 1 用掉 1s burst (10 tok) 不等
+        // 流 1 首帧免限速: 10 tok 直接放行, 且不喂共享桶
         assert_eq!(g1.pace_admit(10.0), std::time::Duration::ZERO);
-        // 流 2 紧接着再放 10 tok: 若各自一桶会是 ZERO; 共享桶下要等 ~1s
-        let w = g2.pace_admit(10.0);
-        assert!(w.as_secs_f64() > 0.9 && w.as_secs_f64() <= 1.0, "{w:?}");
+        // 流 1 第二帧进共享桶: 桶空, allowed=10 (1s burst), 放 20 → 欠 10 → 等 ~1s
+        let w1 = g1.pace_admit(20.0);
+        assert!(w1.as_secs_f64() > 0.9 && w1.as_secs_f64() <= 1.1, "{w1:?}");
+        // 流 2 首帧免限速 (不被流 1 的欠债堵首字)
+        assert_eq!(g2.pace_admit(10.0), std::time::Duration::ZERO);
+        // 流 2 第二帧进共享桶: 流 1 已欠 10, 此时 allowed≈10, sent≈30 → 等 ~2s
+        let w2 = g2.pace_admit(10.0);
+        assert!(w2.as_secs_f64() > 1.5 && w2.as_secs_f64() <= 3.0, "{w2:?}");
         // pace=0 的卡: 恒不等
         let s0 = store();
         s0.upsert_plan(CardPlan {
@@ -2782,6 +3084,30 @@ mod tests {
         let c0 = s0.issue_card("np", "x").unwrap();
         let (_, _, mut g0, _) = s0.acquire(&c0.card_key, "kimi-k3", 0).await.unwrap();
         assert_eq!(g0.pace_admit(1e6), std::time::Duration::ZERO);
+    }
+
+    /// 首帧免限速: 即使共享桶已被同卡前序流占满, 新流的第一帧也立即放行.
+    /// 这是首字延迟 (TTFT) 治理的核心 —— 实测 fable 首帧 pace_wait 曾占 TTFT 主因.
+    #[tokio::test]
+    async fn first_frame_bypasses_shared_pacer() {
+        let s = store();
+        let mut p = plan("ff");
+        p.max_concurrency = 4;
+        p.fair_use_rpd = 0;
+        p.pace_normal_tps = 10;
+        s.upsert_plan(p);
+        let c = s.issue_card("ff", "pace").unwrap();
+        // 流 1 先把桶打爆: 首帧 10 tok 免等, 第二帧 50 tok 进桶, 欠 40 tok → 后续要等 4s
+        let (_, _, mut g1, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
+        assert_eq!(g1.pace_admit(10.0), std::time::Duration::ZERO); // 首帧免等
+        let w1 = g1.pace_admit(50.0); // 第二帧进桶, 欠债
+        assert!(w1.as_secs_f64() > 3.0, "{w1:?}");
+        // 流 2 新来: 首帧必须免等, 不被流 1 的 4s 欠债堵首字
+        let (_, _, mut g2, _) = s.acquire(&c.card_key, "kimi-k3", 0).await.unwrap();
+        assert_eq!(g2.pace_admit(5.0), std::time::Duration::ZERO);
+        // 流 2 第二帧起恢复正常限速
+        let w2 = g2.pace_admit(5.0);
+        assert!(w2.as_secs_f64() > 0.0, "{w2:?}");
     }
 
     /// B7: 共享桶空闲后不能无限 burst — 空闲重同步把基线拉回 1s burst.
@@ -2915,6 +3241,7 @@ mod tests {
                 enabled: false,
                 hidden: false,
                 upstream: false,
+                known: false,
                 note: String::new(),
             })
             .unwrap();
@@ -3037,6 +3364,7 @@ mod tests {
             enabled: true,
             hidden: false,
             upstream: false,
+            known: false,
             note: String::new(),
         };
         reg.upsert_model(mk(base, 4.0, 20.0)).unwrap();
@@ -3498,5 +3826,154 @@ mod tests {
         rt.degraded_since.store(now_unix() - 1801, Ordering::Relaxed);
         assert_eq!(s.card_status(&c.card_key).unwrap()["throttle"], "normal");
         assert_eq!(rt.degraded_since.load(Ordering::Relaxed), 0);
+    }
+    // ── 门户钱包重构 (2026-09-08) ──
+
+    fn rate_plan(id: &str) -> CardPlan {
+        CardPlan {
+            id: id.into(),
+            name: "费率卡".into(),
+            kind: PlanKind::Unlimited,
+            price_per_lane_hour: 2.0, // ¥2/槽·时
+            min_hours: 2,
+            max_concurrency: 4,
+            billing_mode: BillingMode::FirstCall,
+            duration_hours: 24,
+            abuse_score_threshold: 0,
+            ..CardPlan::default()
+        }
+    }
+
+    #[test]
+    fn rate_price_calc() {
+        let p = rate_plan("r");
+        assert!(p.is_rate_mode());
+        assert_eq!(p.rate_price(10, 2), 40.0); // 2×10×2
+        assert!(!plan("q").is_rate_mode());
+    }
+
+    #[test]
+    fn rate_card_issued_unactivated_then_first_call_activates() {
+        let s = store();
+        s.upsert_plan(rate_plan("r"));
+        let c = s
+            .issue_card_full("r", "bob", Some(40.0), Some(10), Some(2))
+            .unwrap();
+        assert!(!c.activated(), "购买后不激活: expires_at={}", c.expires_at);
+        assert!(!c.is_expired(now_unix()), "未激活不算过期");
+        assert_eq!(c.slots, Some(2));
+        assert_eq!(c.duration_hours, Some(10));
+        // 首次调用自动激活 (admit 内部已改库; acquire_now 返回的是 admit 前的快照, 重查)
+        let (_, _, permit, _) = s.acquire_now(&c.card_key, "kimi-k3").unwrap();
+        let c2 = s.get_card(&c.card_key).unwrap();
+        assert!(c2.activated(), "首调后激活");
+        assert_eq!(c2.expires_at, c2.first_call_at.unwrap() + 10 * 3600);
+        drop(permit);
+    }
+
+    #[test]
+    fn manual_activate_and_extend_rebase() {
+        let s = store();
+        s.upsert_plan(rate_plan("r"));
+        let c = s.issue_card_full("r", "bob", Some(40.0), Some(10), Some(1)).unwrap();
+        let t0 = now_unix();
+        let c1 = s.activate_card(&c.card_key).unwrap();
+        assert!(c1.expires_at >= t0 + 10 * 3600);
+        // 加时 5h
+        let c2 = s.extend_card_hours(&c.card_key, 5).unwrap();
+        assert_eq!(c2.expires_at, c1.expires_at + 5 * 3600);
+        // 已过期卡从 now 重基
+        s.update_card(&c.card_key, |c| c.expires_at = now_unix() - 10).unwrap();
+        let c3 = s.extend_card_hours(&c.card_key, 3).unwrap();
+        assert!(c3.expires_at >= now_unix() + 3 * 3600 - 5);
+    }
+
+    #[test]
+    fn set_card_slots_respects_plan_cap() {
+        let s = store();
+        s.upsert_plan(rate_plan("r"));
+        let c = s.issue_card_full("r", "bob", None, Some(4), Some(1)).unwrap();
+        assert!(s.set_card_slots(&c.card_key, Some(3)).is_ok());
+        assert!(s.set_card_slots(&c.card_key, Some(9)).is_err(), "超套餐上限拒绝");
+        // 有效槽进并发闸门
+        let (c2, p2, _pm, _) = s.acquire_now(&c.card_key, "kimi-k3").unwrap();
+        assert_eq!(c2.effective_slots(&p2), 3);
+    }
+
+    #[test]
+    fn quota_wallet_credit_admit_settle() {
+        let s = store();
+        // 充 $1
+        let rem = s.quota_credit("u1", 1.0, "purchase", Some("quota-50"), "u1").unwrap();
+        assert!((rem - 1.0).abs() < 1e-6);
+        // 再充 $0.5 累加
+        let rem = s.quota_credit("u1", 0.5, "purchase", None, "u1").unwrap();
+        assert!((rem - 1.5).abs() < 1e-6);
+        let (c, u) = s.quota_totals("u1");
+        assert_eq!(c, 1_500_000);
+        assert_eq!(u, 0);
+        // 预扣: kimi-k3 est 0 → hold>0 且远小于余额, 成功
+        let hold = s.quota_admit("u1", "kimi-k3", 1_000).unwrap();
+        assert!(hold > 0);
+        // 结算: hold 转实际 $0.05
+        s.quota_settle("u1", hold, 0.05);
+        let (_, u2) = s.quota_totals("u1");
+        assert_eq!(u2, 50_000);
+        // 重复充值同一用户幂等累加
+        assert!(s.quota_remaining("u1") > 1.44);
+    }
+
+    #[test]
+    fn quota_wallet_402_on_exhaust() {
+        let s = store();
+        s.quota_credit("u2", 0.000001, "purchase", None, "u2").unwrap(); // $1e-6 ≈ 0
+        let r = s.quota_admit("u2", "kimi-k3", 10_000);
+        assert!(r.is_err(), "余额不足必须 402");
+        assert_eq!(r.unwrap_err().0, 402);
+        // 无记录用户
+        assert_eq!(s.quota_admit("ghost", "kimi-k3", 0).unwrap_err().0, 402);
+    }
+
+    #[test]
+    fn quota_hold_release_on_drop_path() {
+        let s = store();
+        s.quota_credit("u3", 1.0, "purchase", None, "u3").unwrap();
+        let hold = s.quota_admit("u3", "kimi-k3", 500).unwrap();
+        let (_, used_mid) = s.quota_totals("u3");
+        assert_eq!(used_mid, hold, "预扣期内 used 含 hold");
+        s.quota_release("u3", hold);
+        let (_, used_after) = s.quota_totals("u3");
+        assert_eq!(used_after, 0, "释放后 hold 退回");
+    }
+
+    #[test]
+    fn quota_admin_negative_adjust() {
+        let s = store();
+        s.quota_credit("u4", 2.0, "purchase", None, "admin").unwrap();
+        s.quota_settle("u4", 0, 0.5); // 已用 0.5
+        let rem = s.quota_credit("u4", -1.0, "admin_adjust", Some("refund"), "admin").unwrap();
+        // 负调整减 used: remaining = 2 - max(0, 0.5-1) = 2
+        assert!((rem - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quota_log_written() {
+        let s = store();
+        s.quota_credit("u5", 1.0, "purchase", Some("quota-50"), "u5").unwrap();
+        let log = s.quota_log("u5", 10);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0]["kind"], "purchase");
+        assert_eq!(log[0]["delta_usd"], 1.0);
+    }
+
+    #[test]
+    fn unactivated_card_never_expires_in_listing() {
+        let s = store();
+        s.upsert_plan(rate_plan("r"));
+        let c = s.issue_card_full("r", "bob", None, Some(2), Some(1)).unwrap();
+        // 模拟过了一年: 未激活卡不过期
+        assert!(!c.is_expired(now_unix() + 365 * 86400));
+        let st = s.card_status(&c.card_key).unwrap();
+        assert_eq!(st["expired"], false);
     }
 }

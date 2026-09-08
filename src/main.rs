@@ -16,6 +16,7 @@ mod cards;
 mod config;
 mod cursor;
 pub mod error;
+mod grok_auth;
 mod health;
 mod kvv;
 mod logbuf;
@@ -27,6 +28,7 @@ mod protocol;
 mod proxypool;
 mod quota;
 mod ratelimit;
+mod rejected_dump;
 mod translate;
 mod upstream;
 
@@ -715,12 +717,20 @@ async fn main() -> anyhow::Result<()> {
             post(admin::api_admin_portal_add_balance),
         )
         .route(
+            "/admin/api/portal/users/:id/quota",
+            post(admin::api_admin_portal_add_quota),
+        )
+        .route(
             "/admin/api/portal/groups",
             post(admin::api_admin_portal_upsert_group),
         )
         .route(
             "/admin/api/models/import-builtin",
             post(admin::api_models_import_builtin),
+        )
+        .route(
+            "/admin/api/models/prune-variant-prices",
+            post(admin::api_models_prune_variant_prices),
         )
         .route("/admin/api/models/resolve", get(admin::api_models_resolve))
         .route(
@@ -836,8 +846,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/portal/api/balance", get(admin::api_portal_balance))
         .route("/portal/api/plans", get(admin::api_portal_plans))
         .route("/portal/api/purchase", post(admin::api_portal_purchase))
-        .route("/portal/api/boost", post(admin::api_portal_boost))
         .route("/portal/api/cards", get(admin::api_portal_cards))
+        .route("/portal/api/keys", get(admin::api_portal_keys).post(admin::api_portal_create_key))
+        .route("/portal/api/keys/:key", post(admin::api_portal_update_key).delete(admin::api_portal_delete_key))
+        .route("/portal/api/cards/activate", post(admin::api_portal_activate))
+        .route("/portal/api/cards/extend", post(admin::api_portal_extend))
+        .route("/portal/api/cards/slots", post(admin::api_portal_slots))
         .route("/portal/api/aff", get(admin::api_portal_aff))
         .route("/v1/models", get(models_handler))
         // 套餐卡客户自助: 查自己的档位/评分/限速, 提交申诉 (Bearer = 卡 key)
@@ -1166,7 +1180,95 @@ async fn models_handler(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, Response> {
     let config = state.config.load();
-    let _used_key = check_auth(&headers, &config)?;
+    let raw_token = extract_token(&headers);
+
+    // ── 鉴权 + 模型访问范围解析 ──
+    // 返回 (允许访问的模型组, 允许访问的模型前缀):
+    //   卡 token → 该卡套餐的 model_groups/model_prefixes
+    //   API key  → key 的 model_groups (ApiKeyRecord 无前缀字段)
+    //   未启用鉴权 (api_keys 为空) → 全开放, 两组约束都为空
+    // 两组约束都为空 = 不限.
+    let (allow_groups, allow_prefixes): (Vec<String>, Vec<String>) = if raw_token.starts_with("card-") {
+        // 卡前缀必须命中 cards.json; 查不到 = 伪卡, 401 (与 inference_handler 同口径)
+        let card = state.card_store.get_card(&raw_token).ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(openai_error("Invalid card key", "invalid_card", 401)),
+            )
+                .into_response()
+        })?;
+        if !card.enabled {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(openai_error("Card disabled", "invalid_card", 401)),
+            )
+                .into_response());
+        }
+        let now = chrono::Utc::now().timestamp() as u64;
+        if card.is_expired(now) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(openai_error("Card expired", "invalid_card", 401)),
+            )
+                .into_response());
+        }
+        let plan = state.card_store.get_plan(&card.plan_id).ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(openai_error("Card plan missing", "internal_error", 500)),
+            )
+                .into_response()
+        })?;
+        (plan.model_groups.clone(), plan.model_prefixes.clone())
+    } else if raw_token.starts_with(crate::portal::PortalStore::KEY_PREFIX) {
+        // 门户 key: card 模式按绑定套餐的模型范围过滤; quota 模式不限
+        let pk = portal::portal().find_key(&raw_token).ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(openai_error("Invalid api key", "invalid_api_key", 401)),
+            )
+                .into_response()
+        })?;
+        if !pk.enabled || !portal::portal().key_user_enabled(&pk) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(openai_error("Key disabled", "invalid_api_key", 401)),
+            )
+                .into_response());
+        }
+        if pk.mode == portal::KeyMode::Card {
+            let Some(ck) = pk.card_key.as_deref() else {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(openai_error("Key not bound to any card", "no_card_bound", 403)),
+                )
+                    .into_response());
+            };
+            let Some(card) = state.card_store.get_card(ck) else {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(openai_error("Bound card missing", "invalid_card", 401)),
+                )
+                    .into_response());
+            };
+            let plan = state.card_store.get_plan(&card.plan_id).ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(openai_error("Card plan missing", "internal_error", 500)),
+                )
+                    .into_response()
+            })?;
+            (plan.model_groups.clone(), plan.model_prefixes.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    } else if config.api_keys.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let rec = check_auth(&headers, &config)?.expect("api_keys 非空时 check_auth 必返回 Some");
+        (rec.model_groups.clone(), Vec::new())
+    };
+
     let created = chrono::Utc::now().timestamp();
     // 动态列表: 注册表(enabled) ∪ 内置表 ∪ 上游确认 ∪ 账本 seen, 过可见性闸门.
     // 可见性: 注册表条目看 enabled; 非注册表模型须上游确认 (拉过 AvailableModels 或变体后缀收敛)
@@ -1178,6 +1280,11 @@ async fn models_handler(
         .collect();
     let mut ids: Vec<String> = vec![];
     let mut push = |id: String| {
+        // 卡/key 的模型组+前缀闸门: 都不限 = 全过; 任一限制非空就必须通过
+        let restricted = !allow_groups.is_empty() || !allow_prefixes.is_empty();
+        if restricted && models::plan_allows_model(&allow_groups, &allow_prefixes, &id).is_err() {
+            return;
+        }
         if !ids.iter().any(|x| *x == id) {
             ids.push(id);
         }
@@ -1477,9 +1584,18 @@ async fn inference_handler_inner(
     // 匀速流出目标 (tok/s); 0 = 不限. 卡请求由档位决定, 非卡请求恒 0
     let mut card_pace_tps: u32 = 0;
     let mut card_key_for_log = String::new();
+    // 门户 key (uk-): 定额模式的钱包预扣句柄 (user_id, hold_micro)
+    let mut quota_hold: Option<(String, u64)> = None;
+    // 门户 key 模式/并发帽 (card 模式走卡闸门, quota 模式走钱包)
+    let mut portal_key: Option<crate::portal::PortalKey> = None;
     // B1/B3: 请求体输入 token 估算 (CJK 1 tok/字, ASCII 0.25 tok/字). 卡路径用于预扣,
     // 流式中断路径用于兜底结算. 非卡请求也算 (代价 O(body)), 保持一份口径.
     let est_in = cards::estimate_request_input_tokens(&body);
+    let req_model_early = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&config.default_model)
+        .to_string();
     if raw_token.starts_with("card-") {
         // 卡前缀的 token 必须命中 cards.json; 查不到 = 伪卡, 直接 401, 不落回 key 体系
         if state.card_store.get_card(&raw_token).is_none() {
@@ -1533,6 +1649,79 @@ async fn inference_handler_inner(
     } else {
         check_auth(&headers, &config)?
     };
+
+    // ── 门户 key (uk-): api_keys 未命中后再查门户 ──
+    if key_rec.is_none() && card_permit.is_none() && raw_token.starts_with(crate::portal::PortalStore::KEY_PREFIX) {
+        let pk = portal::portal().find_key(&raw_token);
+        match pk {
+            Some(pk) if pk.enabled => {
+                if !portal::portal().key_user_enabled(&pk) {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(openai_error("Account disabled", "account_disabled", 403)),
+                    )
+                        .into_response());
+                }
+                match pk.mode {
+                    portal::KeyMode::Card => {
+                        // 畅饮卡模式: 走绑定的卡闸门 (同 card- 直通)
+                        let Some(bound) = pk.card_key.as_deref() else {
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                Json(openai_error("Key not bound to any card", "no_card_bound", 403)),
+                            )
+                                .into_response());
+                        };
+                        match state.card_store.acquire(bound, &req_model_early, est_in).await {
+                            Ok((card, _plan, permit, throttle)) => {
+                                card_throttle = throttle;
+                                card_pace_tps = permit.pace_tps();
+                                card_key_for_log = card.card_key.clone();
+                                card_permit = Some(permit);
+                            }
+                            Err((code, msg)) => {
+                                return Err((
+                                    StatusCode::from_u16(code).unwrap_or(StatusCode::FORBIDDEN),
+                                    Json(openai_error(&msg, "card_rejected", code)),
+                                )
+                                    .into_response());
+                            }
+                        }
+                    }
+                    portal::KeyMode::Quota => {
+                        // 定额模式: 钱包预扣 (B1 同款)
+                        match state.card_store.quota_admit(&pk.user_id, &req_model_early, est_in) {
+                            Ok(hold) => {
+                                quota_hold = Some((pk.user_id.clone(), hold));
+                            }
+                            Err((code, msg)) => {
+                                return Err((
+                                    StatusCode::from_u16(code).unwrap_or(StatusCode::FORBIDDEN),
+                                    Json(openai_error(&msg, "insufficient_quota", code)),
+                                )
+                                    .into_response());
+                            }
+                        }
+                    }
+                }
+                portal_key = Some(pk);
+            }
+            Some(_) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(openai_error("Key disabled", "key_disabled", 403)),
+                )
+                    .into_response());
+            }
+            None => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(openai_error("Invalid api key", "invalid_api_key", 401)),
+                )
+                    .into_response());
+            }
+        }
+    }
     let used_key = match key_rec {
         Some(rec) => {
             let (tok, reqs) = state.key_usage.snapshot(&rec.key);
@@ -1563,8 +1752,34 @@ async fn inference_handler_inner(
         None => card_key_for_log.clone(),
     };
 
-    // Key 并发信号量: 限制同一 key 的并发请求数
-    let _key_permit = match key_rec {
+    // Key 并发信号量: 限制同一 key 的并发请求数 (api_keys 或门户 quota key)
+    let _key_permit = if let Some(pk) = portal_key.as_ref().filter(|p| p.mode == portal::KeyMode::Quota) {
+        // 门户定额 key: 并发帽用户自调 (免费, 防脚本失控)
+        let max_conc = pk.max_concurrency.max(1) as usize;
+        let sem = state
+            .key_semaphores
+            .entry(pk.key.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(max_conc)))
+            .clone();
+        match sem.try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                if let Some((uid, hold)) = quota_hold.take() {
+                    state.card_store.quota_release(&uid, hold);
+                }
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(openai_error(
+                        &format!("concurrency limit exceeded (max {})", max_conc),
+                        "rate_limit_exceeded",
+                        429,
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        match key_rec {
         Some(rec) if rec.max_concurrency.is_some() => {
             let max_conc = rec.max_concurrency.unwrap() as usize;
             let sem = state
@@ -1589,6 +1804,7 @@ async fn inference_handler_inner(
             }
         }
         _ => None,
+        }
     };
     let upstream_timeout = Duration::from_secs(config.timeout_s.max(1));
 
@@ -1748,6 +1964,11 @@ async fn inference_handler_inner(
         bctx.key_name = card_key_for_log.clone();
         bctx.key_hash = billing::key_hash(&card_key_for_log);
         bctx.key_prefix = card_key_for_log.chars().take(13).collect();
+    } else if let Some(pk) = portal_key.as_ref() {
+        // 门户 key: 账本记 uk- token, 消耗分析按 key 归属用户
+        bctx.key_name = pk.key.clone();
+        bctx.key_hash = billing::key_hash(&pk.key);
+        bctx.key_prefix = pk.key.chars().take(11).collect();
     }
     if !bctx.quote.priced {
         warn!(event = "billing_unpriced", req_id = %request_id, model = %model, "model not in any price table; face value uses fallback price");
@@ -2051,12 +2272,28 @@ async fn inference_handler_inner(
                 if translate::is_request_content_error(&last_error) {
                     state.metrics.observe_err();
                     // 不调 pool.release: 既不算账号错误 (号没问题) 也不算成功 (别清别人的连续错误计数)
+                    // 落盘请求体 (图片 base64 截断) 到 ./rejected/, 供 replay 定位还有哪种消息形态被厂商 400.
+                    // 2026-09-08: tool_result 顺序修复后同卡仍 101 次 providerStatusCode=400, 日志里只有尾巴没有样本.
+                    let dump_path = if rejected_dump::enabled() {
+                        rejected_dump::dump(
+                            std::path::Path::new("rejected"),
+                            &request_id,
+                            &model,
+                            &account_id,
+                            &card_key_for_log,
+                            &last_error,
+                            &body,
+                        )
+                    } else {
+                        None
+                    };
                     warn!(
                         event = "request_rejected_by_model",
                         req_id = %request_id,
                         account = %account_id,
                         model = %model,
                         error = %last_error,
+                        dump = %dump_path.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
                         "model rejected request content; not retrying, not penalizing account"
                     );
                     state.ledger.record(
@@ -2282,6 +2519,9 @@ async fn inference_handler_inner(
         let card_store_s = state.card_store.clone();
         let est_in_s = est_in;
         let _ = card_pace_tps; // 已由 permit 携带
+        // 门户定额 key: 预扣句柄随流走, 与 card_permit 同一 settle 点
+        let mut quota_hold_s = quota_hold.take();
+        let card_store_q = state.card_store.clone();
 
         tokio::spawn(async move {
             // permit 随转发 task 走: 流式请求在整个输出期间占用账号槽位, 而不是 handler 返回就释放
@@ -2346,6 +2586,13 @@ async fn inference_handler_inner(
                                 let (i, o, cr, cw) =
                                     settle_usage_for_card(&usage, local_in_est, local_out_est);
                                 card_store_s.settle_permit(p, i, o, cr, cw);
+                            }
+                            // 门户定额 key: 同一出口结算钱包
+                            if let Some((uid, hold)) = quota_hold_s.take() {
+                                let (i, o, cr, cw) =
+                                    settle_usage_for_card(&usage, local_in_est, local_out_est);
+                                let usd = cards::estimate_quota_cost_full(&model_clone, i, o, cr, cw);
+                                card_store_q.quota_settle(&uid, hold, usd);
                             }
                             ledger.record(
                                 billing::BillingRecord::build(
@@ -2519,6 +2766,12 @@ async fn inference_handler_inner(
                 }
                 card_store_s.settle_permit(p, i, o, cr, cw);
             }
+            // 门户定额 key: 正常收尾/断连/上游错误 统一结算钱包
+            if let Some((uid, hold)) = quota_hold_s.take() {
+                let (i, o, cr, cw) = settle_usage_for_card(&usage, local_in_est, local_out_est);
+                let usd = cards::estimate_quota_cost_full(&model_clone, i, o, cr, cw);
+                card_store_q.quota_settle(&uid, hold, usd);
+            }
             metrics.observe_ok(usage.total());
             ledger.record(
                 billing::BillingRecord::build(
@@ -2575,6 +2828,10 @@ async fn inference_handler_inner(
                 // B3: 非流式超时 — 上游可能已算完 (输入已烧), 按输入估算结算
                 if let Some(p) = card_permit.as_mut() {
                     state.card_store.settle_permit(p, est_in, 0, 0, 0);
+                }
+                if let Some((uid, hold)) = quota_hold.take() {
+                    let usd = cards::estimate_quota_cost_full(&model, est_in, 0, 0, 0);
+                    state.card_store.quota_settle(&uid, hold, usd);
                 }
                 error!(
                     event = "upstream_timeout",
@@ -2733,6 +2990,12 @@ async fn inference_handler_inner(
                     let (i, o, cr, cw) = settle_usage_for_card(&usage, est_in, 0.0);
                     state.card_store.settle_permit(p, i, o, cr, cw);
                 }
+                // 门户定额 key: 非流式正常收尾结算钱包
+                if let Some((uid, hold)) = quota_hold.take() {
+                    let (i, o, cr, cw) = settle_usage_for_card(&usage, est_in, 0.0);
+                    let usd = cards::estimate_quota_cost_full(&model, i, o, cr, cw);
+                    state.card_store.quota_settle(&uid, hold, usd);
+                }
                 state.metrics.observe_ok(usage.total());
                 state.ledger.record(billing::BillingRecord::build(
                     &bctx,
@@ -2755,6 +3018,10 @@ async fn inference_handler_inner(
                 // B3: 翻译失败 — 上游已消费输入, 按输入估算结算
                 if let Some(p) = card_permit.as_mut() {
                     state.card_store.settle_permit(p, est_in, 0, 0, 0);
+                }
+                if let Some((uid, hold)) = quota_hold.take() {
+                    let usd = cards::estimate_quota_cost_full(&model, est_in, 0, 0, 0);
+                    state.card_store.quota_settle(&uid, hold, usd);
                 }
                 error!(
                     event = "translate_error",

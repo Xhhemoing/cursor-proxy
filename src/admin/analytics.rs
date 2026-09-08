@@ -202,6 +202,12 @@ pub async fn api_analytics_consumption(
         }
     }
     let mut key_rows = agg_rows(by_key, rmb, "key_name");
+    let portal_keys: std::collections::BTreeMap<String, crate::portal::PortalKey> = crate::portal::portal()
+        .data_keys_all()
+        .into_iter()
+        .map(|k| (k.key.clone(), k))
+        .collect();
+    let portal_users = crate::portal::portal();
     for r in &mut key_rows {
         let k = r["key_name"].as_str().unwrap_or("").to_string();
         if let Some(cd) = cards.get(&k) {
@@ -213,8 +219,17 @@ pub async fn api_analytics_consumption(
             r["enabled"] = json!(cd.enabled);
             let cost = r["cost_rmb"].as_f64().unwrap_or(0.0);
             r["profit_rmb"] = json!(cd.paid_rmb - cost);
+        } else if let Some(pk) = portal_keys.get(&k) {
+            // 门户 key: owner 记用户名
+            let uname = portal_users
+                .get_user(&pk.user_id)
+                .map(|u| u.username)
+                .unwrap_or_default();
+            r["owner"] = json!(uname);
+            r["enabled"] = json!(pk.enabled);
         }
         r["is_card"] = json!(k.starts_with("card-"));
+        r["is_portal_key"] = json!(k.starts_with(crate::portal::PortalStore::KEY_PREFIX));
     }
 
     Json(json!({

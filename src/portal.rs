@@ -60,6 +60,41 @@ pub struct UserGroup {
     pub plan_whitelist: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyMode {
+    /// 定额模式: 烧用户钱包的定额池 (官方口径 $)
+    #[default]
+    Quota,
+    /// 畅饮卡模式: 走绑定的畅饮卡闸门
+    Card,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortalKey {
+    /// 完整 key ("uk-" + 24 hex). 用户可见全文 (自己的 key).
+    pub key: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mode: KeyMode,
+    /// mode=card 时绑定的畅饮卡 card_key
+    #[serde(default)]
+    pub card_key: Option<String>,
+    /// quota 模式并发帽 (1..=8). card 模式忽略 (走卡的 slots)
+    #[serde(default = "default_key_conc")]
+    pub max_concurrency: u32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+fn default_key_conc() -> u32 {
+    2
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceLogEntry {
     pub user_id: String,
@@ -77,6 +112,9 @@ pub struct PortalData {
     pub users: Vec<PortalUser>,
     #[serde(default)]
     pub groups: Vec<UserGroup>,
+    /// 用户调用 Key (uk- 前缀)
+    #[serde(default)]
+    pub keys: Vec<PortalKey>,
     #[serde(default)]
     pub next_user_seq: u32,
 }
@@ -367,6 +405,104 @@ impl PortalStore {
         } else {
             Some(g.plan_whitelist)
         }
+    }
+
+    // ── 用户调用 Key (uk-) ──
+
+    pub const KEY_PREFIX: &'static str = "uk-";
+    /// quota 模式 key 并发帽硬顶
+    pub const KEY_MAX_CONC: u32 = 8;
+
+    pub fn list_keys(&self, user_id: &str) -> Vec<PortalKey> {
+        self.data
+            .load()
+            .keys
+            .iter()
+            .filter(|k| k.user_id == user_id)
+            .cloned()
+            .collect()
+    }
+
+    /// 全量 key (admin 分析用)
+    pub fn data_keys_all(&self) -> Vec<PortalKey> {
+        self.data.load().keys.clone()
+    }
+
+    /// 按完整 token 查 key (推理路径热查)
+    pub fn find_key(&self, token: &str) -> Option<PortalKey> {
+        if !token.starts_with(Self::KEY_PREFIX) {
+            return None;
+        }
+        self.data.load().keys.iter().find(|k| k.key == token).cloned()
+    }
+
+    pub fn create_key(
+        &self,
+        user_id: &str,
+        name: &str,
+        mode: KeyMode,
+        card_key: Option<String>,
+        max_concurrency: Option<u32>,
+    ) -> Result<PortalKey, String> {
+        if self.data.load().users.iter().all(|u| u.id != user_id) {
+            return Err("user not found".into());
+        }
+        let key = format!("{}{}", Self::KEY_PREFIX, &uuid::Uuid::new_v4().simple().to_string()[..24]);
+        let pk = PortalKey {
+            key,
+            user_id: user_id.to_string(),
+            name: name.trim().chars().take(32).collect(),
+            mode,
+            card_key: card_key.filter(|s| !s.trim().is_empty()),
+            max_concurrency: max_concurrency.unwrap_or(2).clamp(1, Self::KEY_MAX_CONC),
+            enabled: true,
+            created_at: now_unix(),
+        };
+        let mut d = (*self.data.load_full()).clone();
+        d.keys.push(pk.clone());
+        self.save(d).map_err(|e| e.to_string())?;
+        Ok(pk)
+    }
+
+    /// 更新 key 字段 (mode/card_key/max_concurrency/name/enabled). 返回更新后的 key.
+    pub fn update_key(
+        &self,
+        user_id: &str,
+        token: &str,
+        f: impl FnOnce(&mut PortalKey),
+    ) -> Result<PortalKey, String> {
+        let mut d = (*self.data.load_full()).clone();
+        let k = d
+            .keys
+            .iter_mut()
+            .find(|k| k.key == token && k.user_id == user_id)
+            .ok_or("key not found")?;
+        f(k);
+        k.max_concurrency = k.max_concurrency.clamp(1, Self::KEY_MAX_CONC);
+        let out = k.clone();
+        self.save(d).map_err(|e| e.to_string())?;
+        Ok(out)
+    }
+
+    pub fn delete_key(&self, user_id: &str, token: &str) -> Result<(), String> {
+        let mut d = (*self.data.load_full()).clone();
+        let n = d.keys.len();
+        d.keys.retain(|k| !(k.key == token && k.user_id == user_id));
+        if d.keys.len() == n {
+            return Err("key not found".into());
+        }
+        self.save(d).map_err(|e| e.to_string())
+    }
+
+    /// 推理路径用: key 所属用户是否启用 (禁用用户所有 key 立即失效)
+    pub fn key_user_enabled(&self, pk: &PortalKey) -> bool {
+        self.data
+            .load()
+            .users
+            .iter()
+            .find(|u| u.id == pk.user_id)
+            .map(|u| u.enabled)
+            .unwrap_or(false)
     }
 }
 

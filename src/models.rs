@@ -146,6 +146,10 @@ pub struct FamilyRule {
     pub menu: MenuMode,
     #[serde(default)]
     pub note: String,
+    /// 禁用的思考档 (low/medium/high/max). 客户请求被禁档时回落到 default_tier.
+    /// Auto 不在此列 (它是「按价格选档」策略, 不是档位本身).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_tiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -380,6 +384,13 @@ impl ModelRegistry {
             .unwrap_or_default()
     }
 
+    /// 家族禁用的思考档 (无规则 = 空)
+    pub fn family_blocked_tiers(&self, family: &str) -> Vec<String> {
+        self.family_rule(family)
+            .map(|r| r.blocked_tiers)
+            .unwrap_or_default()
+    }
+
     /// 家族菜单形态 (无规则 = Base)
     pub fn family_menu_mode(&self, family: &str) -> MenuMode {
         self.family_rule(family).map(|r| r.menu).unwrap_or_default()
@@ -603,13 +614,15 @@ impl ModelRegistry {
                 base = &cursor_base;
             }
         }
+        // 家族规则查找基名: 客户惯用名 (grok-4.6), 而不是上游内部名 (cursor-grok-4.6)
+        let rule_base = base.strip_prefix("cursor-").unwrap_or(base);
         // 家族须在上游名单里真有变体 (防止把任意字符串路由成不存在的模型)
         if !Self::family_has_variants(base, upstream) {
             return None;
         }
         // 显式档位 > 家族默认档 (面板可配) > 价格最省 > 启发式
-        let level = crate::cursor::explicit_thinking_level(body).or_else(|| {
-            let tier = default_tier.unwrap_or_else(|| registry().family_default_tier(base));
+        let mut level = crate::cursor::explicit_thinking_level(body).or_else(|| {
+            let tier = default_tier.unwrap_or_else(|| registry().family_default_tier(rule_base));
             match tier {
                 DefaultTier::Auto => None,
                 DefaultTier::Low => Some(crate::cursor::ThinkingLevel::Low),
@@ -618,6 +631,36 @@ impl ModelRegistry {
                 DefaultTier::Max => Some(crate::cursor::ThinkingLevel::Max),
             }
         });
+        // 禁档回落: 显式指定的档位被家族规则禁了 → 回落到默认档 (若默认档也被禁, 任其走 None=价格最省)
+        if let Some(l) = level {
+            let tier_str = match l {
+                crate::cursor::ThinkingLevel::Low => "low",
+                crate::cursor::ThinkingLevel::Medium => "medium",
+                crate::cursor::ThinkingLevel::High => "high",
+                crate::cursor::ThinkingLevel::Max => "max",
+            };
+            if registry().family_blocked_tiers(rule_base).iter().any(|t| t == tier_str) {
+                let dt = default_tier.unwrap_or_else(|| registry().family_default_tier(rule_base));
+                let dt_str = match dt {
+                    DefaultTier::Low => "low",
+                    DefaultTier::Medium => "medium",
+                    DefaultTier::High => "high",
+                    DefaultTier::Max => "max",
+                    DefaultTier::Auto => "",
+                };
+                if !dt_str.is_empty() && !registry().family_blocked_tiers(rule_base).iter().any(|t| t == dt_str) {
+                    level = match dt {
+                        DefaultTier::Low => Some(crate::cursor::ThinkingLevel::Low),
+                        DefaultTier::Medium => Some(crate::cursor::ThinkingLevel::Medium),
+                        DefaultTier::High => Some(crate::cursor::ThinkingLevel::High),
+                        DefaultTier::Max => Some(crate::cursor::ThinkingLevel::Max),
+                        DefaultTier::Auto => None,
+                    };
+                } else {
+                    level = None; // 默认档也被禁 → 走价格最省
+                }
+            }
+        }
         let pick = |cands: &[&str]| -> Option<String> {
             cands
                 .iter()
@@ -1131,6 +1174,7 @@ mod tests {
             default_tier: DefaultTier::Auto,
             menu: MenuMode::Base,
             note: String::new(),
+            blocked_tiers: vec![],
         })
         .unwrap();
         let vis_b = reg.visible_models(&upstream, &[]);
@@ -1142,6 +1186,7 @@ mod tests {
             default_tier: DefaultTier::Auto,
             menu: MenuMode::Hidden,
             note: String::new(),
+            blocked_tiers: vec![],
         })
         .unwrap();
         let vis_h = reg.visible_models(&upstream, &[]);
@@ -1153,6 +1198,7 @@ mod tests {
             default_tier: DefaultTier::Auto,
             menu: MenuMode::All,
             note: String::new(),
+            blocked_tiers: vec![],
         })
         .unwrap();
         let vis_a = reg.visible_models(&upstream, &[]);

@@ -154,6 +154,10 @@ pub struct PlanBody {
     pub sub_plan_ids: Option<Vec<String>>,
     pub stack_mode: Option<crate::cards::StackMode>,
     pub allowed_group_ids: Option<Vec<String>>,
+
+    // 门户钱包重构: 费率模式
+    pub price_per_lane_hour: Option<f64>,
+    pub min_hours: Option<u64>,
 }
 
 pub async fn api_card_plan_upsert(
@@ -200,7 +204,9 @@ pub async fn api_card_plan_upsert(
         extra_limits,
         sub_plan_ids,
         stack_mode,
-        allowed_group_ids
+        allowed_group_ids,
+        price_per_lane_hour,
+        min_hours
     );
     // expire_hours 是 Option<u64>, 单独处理 (0 = None)
     if let Some(h) = body.expire_hours {
