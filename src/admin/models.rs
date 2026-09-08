@@ -273,6 +273,52 @@ pub async fn api_models_import_builtin(
     Json(json!({"ok": true, "written": n})).into_response()
 }
 
+/// 清理「基名已有手动价」的变体条目: 让主模型价通过最长前缀罩住变体.
+/// 保留差异化的变体 (变体价与基名价不同时).
+/// dry_run=true 只报告会删哪些, 不动数据.
+pub async fn api_models_prune_variant_prices(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let dry_run = q.get("dry_run").map(|s| s == "1" || s == "true").unwrap_or(false);
+    let reg = registry();
+    let snap = reg.snapshot();
+    let mut pruned: Vec<Value> = vec![];
+    let mut kept: Vec<Value> = vec![];
+    for e in &snap.models {
+        let model = e.model.as_str();
+        let base = crate::models::ModelRegistry::family_base(model);
+        if base == model {
+            continue; // 主模型本身, 不动
+        }
+        // 基名是否有手动价 (优先) 或内置价
+        let base_manual = reg.get_exact(base);
+        let base_price = if let Some(b) = &base_manual {
+            Some((b.input_per_m, b.output_per_m, b.cache_read_per_m, b.cache_write_per_m))
+        } else {
+            cards::builtin_table().iter().find(|(m, ..)| *m == base).map(|(_, i, o, c, w)| (*i, *o, *c, *w))
+        };
+        let Some(bp) = base_price else {
+            kept.push(json!({"model": model, "reason": "基名无价, 变体自成一档"}));
+            continue;
+        };
+        let same = (e.input_per_m - bp.0).abs() < 1e-9
+            && (e.output_per_m - bp.1).abs() < 1e-9
+            && (e.cache_read_per_m - bp.2).abs() < 1e-9
+            && (e.cache_write_per_m - bp.3).abs() < 1e-9;
+        if same {
+            pruned.push(json!({"model": model, "covered_by": base, "price": [bp.0, bp.1, bp.2, bp.3]}));
+            if !dry_run {
+                let _ = reg.delete_model(model);
+            }
+        } else {
+            kept.push(json!({"model": model, "reason": "变体价 ≠ 基名价, 差异化保留", "variant_price": [e.input_per_m, e.output_per_m, e.cache_read_per_m, e.cache_write_per_m], "base_price": [bp.0, bp.1, bp.2, bp.3]}));
+        }
+    }
+    state.audit.key_op("models_prune_variant_prices", "*", json!({"pruned": pruned.len(), "kept": kept.len(), "dry_run": dry_run}));
+    Json(json!({"ok": true, "dry_run": dry_run, "pruned": pruned, "kept": kept})).into_response()
+}
+
 pub async fn api_models_delete(
     State(state): State<Arc<AppState>>,
     Path(model): Path<String>,
@@ -549,6 +595,72 @@ pub async fn api_models_upstream(State(state): State<Arc<AppState>>) -> Response
         }
         Err((code, msg)) => (code, Json(json!({"error": msg}))).into_response(),
     }
+}
+
+/// POST /admin/api/models/sync-from-upstream
+/// 全流程: 拉上游 → 过滤视频/图片生成 → 按 family_base 归类 → 给每个主模型建手动条目 (如果还没有)
+/// → 默认价用官方表 (内置). 返回 {families_added, families_total, variants_seen, skipped_video_image}.
+pub async fn api_models_sync_from_upstream(State(state): State<Arc<AppState>>) -> Response {
+    let (names, _) = match refresh_upstream_names(&state).await {
+        Ok(r) => r,
+        Err((code, msg)) => return (code, Json(json!({"error": msg}))).into_response(),
+    };
+    // 过滤视频/图片生成 (名字含 image/video/imagen/veo/dalle/flux/-sd/draw 等)
+    const SKIP_KEYWORDS: &[&str] = &[
+        "image", "video", "imagen", "veo", "dalle", "dall-e", "flux", "-sd", "draw", "paint", "art",
+    ];
+    let chat_models: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            let ln = n.to_lowercase();
+            !SKIP_KEYWORDS.iter().any(|k| ln.contains(k))
+        })
+        .collect();
+    let skipped = names.len() - chat_models.len();
+    // 按 family_base 归类
+    let mut fams: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for m in &chat_models {
+        let base = crate::models::ModelRegistry::family_base(m).to_string();
+        fams.entry(base).or_default().push((*m).clone());
+    }
+    let reg = registry();
+    let mut added = 0usize;
+    for base in fams.keys() {
+        if reg.get_exact(base).is_some() {
+            continue; // 已有手动条目, 不动
+        }
+        // 默认价: 内置官方表
+        let (i, o, c, w) = cards::builtin_model_price(base);
+        let e = ModelEntry {
+            model: base.clone(),
+            input_per_m: i,
+            output_per_m: o,
+            cache_read_per_m: c,
+            cache_write_per_m: w,
+            enabled: true,
+            hidden: false,
+            upstream: true,
+            known: true,
+            note: "sync-from-upstream".into(),
+        };
+        if reg.upsert_model(e).is_ok() {
+            added += 1;
+        }
+    }
+    state.audit.key_op("models_sync_from_upstream", "*", json!({
+        "families_added": added,
+        "families_total": fams.len(),
+        "variants_seen": chat_models.len(),
+        "skipped_video_image": skipped,
+    }));
+    Json(json!({
+        "ok": true,
+        "families_added": added,
+        "families_total": fams.len(),
+        "variants_seen": chat_models.len(),
+        "skipped_video_image": skipped,
+        "families": fams.keys().collect::<Vec<_>>(),
+    })).into_response()
 }
 
 /// 拉取上游名单并写入 CardStore + 注册表置位. 面板按钮与定时任务 (#9) 共用.

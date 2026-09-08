@@ -732,6 +732,10 @@ async fn main() -> anyhow::Result<()> {
             "/admin/api/models/prune-variant-prices",
             post(admin::api_models_prune_variant_prices),
         )
+        .route(
+            "/admin/api/models/sync-from-upstream",
+            post(admin::api_models_sync_from_upstream),
+        )
         .route("/admin/api/models/resolve", get(admin::api_models_resolve))
         .route(
             "/admin/api/models/families",

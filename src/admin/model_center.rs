@@ -210,6 +210,7 @@ pub async fn api_models_families(State(state): State<Arc<AppState>>) -> Response
                 "default_tier": tier,
                 "menu": menu,
                 "rule_note": rule.map(|r| r.note.clone()).unwrap_or_default(),
+                "blocked_tiers": rule.map(|r| r.blocked_tiers.clone()).unwrap_or_default(),
                 "price": {"input": pi, "output": po, "cache_read": pcr, "cache_write": pcw,
                           "source": price_source, "console_key": console_key(fam)},
                 "pace_rule": pace,
@@ -246,6 +247,8 @@ pub struct FamilyRuleBody {
     pub menu: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default)]
+    pub blocked_tiers: Option<Vec<String>>,
 }
 
 fn parse_tier(s: &str) -> Result<DefaultTier, String> {
@@ -299,6 +302,15 @@ pub async fn api_models_family_rule_set(
             None => cur.menu,
         },
         note: b.note.unwrap_or(cur.note),
+        blocked_tiers: b
+            .blocked_tiers
+            .map(|v| {
+                v.into_iter()
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| matches!(s.as_str(), "low" | "medium" | "high" | "max"))
+                    .collect()
+            })
+            .unwrap_or(cur.blocked_tiers),
     };
     if let Err(e) = reg.upsert_family_rule(rule) {
         return (

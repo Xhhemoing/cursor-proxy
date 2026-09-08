@@ -28,15 +28,23 @@ impl LogBuffer {
 
     pub fn with_persist(capacity: usize, path: std::path::PathBuf) -> Self {
         let (tx, rx) = mpsc::channel::<String>();
+        // 启动时从最新 proxy.log 读回尾部 N 条灌回 ring (修复: 重启后面板「请求日志」空白)
+        let restored = load_tail_from_disk(&path, capacity);
+        let max_restored_id = restored.last().and_then(|e| e.get("_id").and_then(|v| v.as_u64())).unwrap_or(0);
+        let mut entries = VecDeque::with_capacity(capacity);
+        for e in restored {
+            entries.push_back(e);
+        }
         std::thread::Builder::new()
             .name("log-writer".into())
             .spawn(move || persist_loop(path, rx))
             .expect("spawn log writer thread");
         Self {
-            entries: Mutex::new(VecDeque::with_capacity(capacity)),
+            entries: Mutex::new(entries),
             capacity,
             persist_tx: Some(tx),
-            next_id: std::sync::atomic::AtomicU64::new(1),
+            // 恢复的日志用旧 _id, 新日志从 max+1 开始 (避免 _id 冲突)
+            next_id: std::sync::atomic::AtomicU64::new(max_restored_id + 1),
         }
     }
 
@@ -142,6 +150,29 @@ fn rotated_path(path: &std::path::Path, gen: usize) -> std::path::PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(format!(".{gen}"));
     std::path::PathBuf::from(s)
+}
+
+/// 启动时从 proxy.log 尾部读回 N 条 (JSONL), 灌回 ring buffer.
+/// 读最新一代 (path 本身, 不读轮转出去的 .1/.2 — 那是历史归档).
+/// 每行必须是合法 JSON; 解析失败的行跳过 (容忍写盘半途崩溃的残行).
+fn load_tail_from_disk(path: &std::path::Path, capacity: usize) -> Vec<serde_json::Value> {
+    use std::io::{BufRead, BufReader};
+    let Ok(f) = std::fs::File::open(path) else {
+        return vec![];
+    };
+    // 文件可能几百 MB, 只读尾部: 先 seek 到末尾倒推, 再向后读.
+    // 简化: 全读 + 取尾部 (proxy.log 默认 512MiB 上限, 启动时一次读盘可接受).
+    let reader = BufReader::new(f);
+    let mut ring: std::collections::VecDeque<serde_json::Value> = std::collections::VecDeque::with_capacity(capacity);
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() { continue }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            if ring.len() >= capacity { ring.pop_front(); }
+            ring.push_back(v);
+        }
+    }
+    ring.into_iter().collect()
 }
 
 /// 按大小轮转: path -> path.1 -> path.2 ... 超出 keep 的丢掉.
