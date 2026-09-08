@@ -799,8 +799,6 @@
         <div id="mc-panel" style="display:flex;flex-direction:column;flex:1;min-height:0">
           <div class="tabs">
             <button type="button" class="active" data-tab="families">家族总览</button>
-            <button type="button" data-tab="menu">客户菜单</button>
-            <button type="button" data-tab="prices">定价表</button>
             <button type="button" data-tab="groups">模型组</button>
             <button type="button" data-tab="route">路由测试</button>
           </div>
@@ -816,83 +814,28 @@
               <div class="table-scroll">
                 <table class="nowrap">
                   <thead><tr>
-                    <th>家族</th><th>变体</th><th>菜单形态</th><th>默认档</th>
+                    <th title="勾选 = 进 /v1/models 客户菜单">进菜单</th><th>家族</th><th>变体</th><th>菜单形态</th><th>默认档</th>
                     <th>价 in/out</th>
                     <th>24h 请求</th><th>30d $ / $槽时</th>
                     <th>风控/组</th><th></th>
                   </tr></thead>
-                  <tbody id="mc-body"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
+                  <tbody id="mc-body"><tr><td colspan="10" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
+              <!-- 异常分区: 幽灵 (上游不存在) + seen 未定价, 默认折叠 -->
+              <details id="mc-abnormal" style="border-top:1px solid var(--line);padding:6px 12px;flex:0 0 auto">
+                <summary class="muted" style="font-size:11px;cursor:pointer">异常 (幽灵/未定价) <span id="mc-abnormal-count"></span></summary>
+                <div class="table-scroll" style="max-height:220px;margin-top:6px">
+                  <table class="nowrap" style="font-size:11px">
+                    <thead><tr><th>模型</th><th>类型</th><th>30d</th><th></th></tr></thead>
+                    <tbody id="mc-abnormal-body"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+                  </table>
+                </div>
+              </details>
             </div>
           </div>
 
           <!-- 客户菜单 -->
-          <div id="mc-tab-menu" style="display:none;flex:1;min-height:0;flex-direction:column">
-            <div class="panel fill">
-              <div class="ph"><h3>客户菜单 <span class="muted" id="mc-menu-count"></span></h3>
-                <p class="muted" style="font-size:11px;margin:0">勾选 = 进 /v1/models · 形态 = 基名+fast/只基名/全部变体/隐藏 · 禁档 = 客户请求该档时回落默认档</p>
-              </div>
-              <div class="table-scroll">
-                <table>
-                  <thead><tr><th>进菜单</th><th>家族</th><th>形态</th><th>禁档</th><th>路由到</th><th>30d</th></tr></thead>
-                  <tbody id="mc-menu-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <!-- 定价表 -->
-          <div id="mc-tab-prices" style="display:none;flex:1;min-height:0;flex-direction:column">
-            <details class="add" id="md-model-add">
-              <summary>新增 / 编辑模型（从上游已确认的主模型中选；高级场景可自定义名）</summary>
-              <div class="body">
-                <div class="form-grid">
-                  <label>主模型 <select id="mp-model-pick" style="width:100%"><option value="">— 选择上游主模型 —</option></select></label>
-                  <label>input $/1M <input id="mp-in" type="number" step="0.01" min="0"></label>
-                  <label>output $/1M <input id="mp-out" type="number" step="0.01" min="0"></label>
-                  <label>cache read $/1M <input id="mp-cr" type="number" step="0.01" min="0"></label>
-                  <label>cache write $/1M <input id="mp-cw" type="number" step="0.01" min="0"></label>
-                  <label>备注 <input id="mp-note"></label>
-                  <label class="inline"><input type="checkbox" id="mp-enabled" checked> 允许调用</label>
-                </div>
-                <details style="margin-top:6px"><summary class="muted" style="font-size:11px">高级: 自定义模型名 (不在上游名单里)</summary>
-                  <div style="margin-top:4px"><label style="font-size:11px">模型名 <input id="mp-model" placeholder="留空 = 用上面选的" style="width:100%"></label>
-                  <div id="mp-ghost-warn" class="bad" style="font-size:11px;display:none;margin-top:2px">⚠️ 上游无此模型, 将成幽灵 (客户点名 404)</div></div>
-                </details>
-                <input type="hidden" id="mp-model-final">
-                <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
-                  <button type="button" class="ghost" id="mp-reset">清空</button>
-                  <button type="button" id="mp-save">保存</button>
-                </div>
-              </div>
-            </details>
-            <form class="filter" id="md-filter" onsubmit="return false">
-              <div class="fields">
-                <label>搜索 <input id="md-q" placeholder="模型名"></label>
-                <label>来源 <select id="md-src"><option value="">全部</option><option value="manual">手动设置</option><option value="builtin">内置</option><option value="seen">仅账本出现</option></select></label>
-                <button type="button" class="ghost" id="md-prune-variants" title="删除基名已有同价的变体条目, 让主模型价通过前缀罩住">清理变体价</button>
-                <button type="button" id="md-sync-upstream" title="拉上游 → 过滤视频/图片 → 按家族归类 → 给每个主模型建手动条目 (默认官方价)">从上游同步主模型</button>
-              </div>
-            </form>
-            <div class="panel" id="md-upstream-box" style="display:none;flex:0 0 auto;margin-bottom:8px">
-              <div class="ph"><h3>上游可用模型</h3></div>
-              <div class="table-scroll" style="max-height:220px"><table>
-                <thead><tr><th>模型</th><th>价格 in/out</th><th>状态</th><th></th></tr></thead>
-                <tbody id="md-upstream-body"></tbody>
-              </table></div>
-            </div>
-            <div class="panel fill">
-              <div class="ph"><h3>模型列表 <span class="muted" id="md-count"></span></h3></div>
-              <div class="table-scroll">
-                <table>
-                  <thead><tr><th>模型</th><th>来源</th><th>input</th><th>output</th><th>cache r</th><th>cache w</th><th>30d 请求</th><th>所属组</th><th>状态</th><th></th></tr></thead>
-                  <tbody id="md-body"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
           <!-- 模型组 -->
           <div id="mc-tab-groups" style="display:none;flex:1;min-height:0;flex-direction:column">
             <details class="add" id="md-group-add" open>
@@ -2371,7 +2314,7 @@
       b.addEventListener('click', () => {
         mcTab = b.dataset.tab;
         document.querySelectorAll('#mc-panel .tabs button').forEach((x) => x.classList.toggle('active', x === b));
-        ['families', 'menu', 'prices', 'groups', 'route'].forEach((t) => { document.getElementById('mc-tab-' + t).style.display = t === mcTab ? 'flex' : 'none'; });
+        ['families', 'groups', 'route'].forEach((t) => { document.getElementById('mc-tab-' + t).style.display = t === mcTab ? 'flex' : 'none'; });
         loadModelCenter().catch((e) => mcMsg(e.message, true));
       });
     });
@@ -2388,11 +2331,9 @@
       mdModels = models.models || [];
       mdGroups = groups.groups || [];
       renderFamilies();
-      renderMenu();
-      renderModels();
+      renderAbnormal();
       renderGroups();
       refreshGroupPickers();
-      fillUpstreamPicker();
       document.getElementById('nav-models-badge').textContent = models.manual_count ? String(models.manual_count) : '';
     }
     document.getElementById('mc-show-all').addEventListener('change', () => { renderFamilies(); });
@@ -2410,7 +2351,7 @@
       document.getElementById('mc-count').textContent = '(' + shown.length + '/' + rows.length + ' 家族 · 上游 ' + (mcFamilies.upstream_count || 0) + ' 名' + (dead ? ' · ' + dead + ' 族 30d 零流量已收' : '') + ')';
       const tb = document.getElementById('mc-body');
       tb.innerHTML = '';
-      if (!shown.length) { tb.innerHTML = '<tr><td colspan="9" class="muted">无数据</td></tr>'; return; }
+      if (!shown.length) { tb.innerHTML = '<tr><td colspan="10" class="muted">无数据</td></tr>'; return; }
       // 30d 面值最高者作基线 (迷你柱 100%)
       const max30 = Math.max(1e-9, ...shown.map((r) => (r.w30d && r.w30d.face_usd) || 0));
       const srcPill = { manual: '<span class="pill info" style="font-size:10px">手动</span>', builtin: '<span class="muted" style="font-size:10px">内置</span>', fallback: '<span class="pill bad" style="font-size:10px">兜底</span>' };
@@ -2437,6 +2378,7 @@
         const ruleGroup = [ruleTxt, groupTxt].filter(Boolean).join(' ') || '<span class="muted">—</span>';
         const statePill = r.hidden ? '<span class="pill bad" style="font-size:10px">隐藏</span>' : (r.enabled ? '' : '<span class="pill bad" style="font-size:10px">停用</span>');
         tr.innerHTML =
+          '<td data-menu-cell></td>' +
           '<td class="mono">' + esc(r.family) + ghost + statePill + '</td>' +
           '<td class="mono">' + (r.variant_count || 0) + '</td>' +
           '<td></td><td></td>' +
@@ -2525,6 +2467,19 @@
         if ((r.variants || []).some((v) => v.endsWith('-fast'))) {
           priceCell.appendChild(priceRow('fast', 'fast'));
         }
+        // 进菜单 checkbox
+        const menuCell = tr.querySelector('[data-menu-cell]');
+        const inCb = el('input', { type: 'checkbox', title: '勾选 = 进 /v1/models 客户菜单' });
+        inCb.checked = r.menu !== 'hidden';
+        inCb.addEventListener('change', async () => {
+          const newMenu = inCb.checked ? 'base_and_fast' : 'hidden';
+          try {
+            await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: r.family, menu: newMenu }) });
+            mcMsg(r.family + (inCb.checked ? ' 进菜单' : ' 出菜单'));
+            await loadModelCenter();
+          } catch (e) { mcMsg(e.message, true); inCb.checked = !inCb.checked; }
+        });
+        menuCell.appendChild(inCb);
         // 操作: 展开变体 / 编辑定价 / 路由测试
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '变体')).addEventListener('click', () => {
@@ -2550,7 +2505,7 @@
             : '<span class="muted">— (无规则, 走全局默认)</span>';
           const w30 = r.w30d || {};
           const statsTxt = '30d ' + (w30.requests || 0) + ' 请求 · $' + Number(w30.face_usd || 0).toFixed(2) + (w30.usd_per_lane_hour != null ? ' · $' + Number(w30.usd_per_lane_hour).toFixed(1) + '/槽·时' : '');
-          er.innerHTML = '<td></td><td colspan="8" style="font-size:11px;padding:10px 12px">' +
+          er.innerHTML = '<td></td><td colspan="9" style="font-size:11px;padding:10px 12px">' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">' +
               '<div><div class="muted" style="font-size:10px;margin-bottom:2px">上游变体 (' + (r.variants || []).length + ')</div><div>' + (vars || '<span class="muted">上游无变体</span>') + '</div></div>' +
               '<div><div class="muted" style="font-size:10px;margin-bottom:2px">生效价 in/out/cr/cw</div><div class="mono">' + priceTxt + '</div></div>' +
@@ -2562,10 +2517,9 @@
           tr.after(er);
         });
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '定价')).addEventListener('click', () => {
-          // 跳定价表 tab 并预填
-          document.querySelector('#mc-panel .tabs button[data-tab="prices"]').click();
-          fillModelForm({ model: r.family, input_per_m: p.input, output_per_m: p.output, cache_read_per_m: p.cache_read, cache_write_per_m: p.cache_write, enabled: r.enabled, note: '' });
-          document.getElementById('md-model-add').open = true;
+          // 定价已收口到家族行的「价 in/out」列 —— 聚焦过去
+          const cell = tr.querySelector('[data-price-cell] input');
+          if (cell) { cell.focus(); cell.select(); }
         });
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '路由')).addEventListener('click', () => {
           document.querySelector('#mc-panel .tabs button[data-tab="route"]').click();
@@ -2576,84 +2530,51 @@
       });
     }
 
-    // ── tab 2: 客户菜单 (可编辑: 进菜单 / 形态 / 禁档) ──
-    function renderMenu() {
-      const menu = new Set((mcFamilies && mcFamilies.menu) || []);
+    // ── 异常分区: 幽灵 (上游不存在) + seen 未定价 ──
+    function renderAbnormal() {
       const fams = (mcFamilies && mcFamilies.families) || [];
-      const visible = fams.filter((f) => !f.upstream_missing);
-      const inMenu = visible.filter((f) => menu.has(f.family) || menu.has(f.family + '-fast'));
-      const withFast = visible.filter((f) => menu.has(f.family + '-fast'));
-      const withBlocked = visible.filter((f) => (f.blocked_tiers || []).length > 0);
-      document.getElementById('mc-menu-count').textContent = '(客户可见 ' + inMenu.length + ' · 带 fast ' + withFast.length + ' · 禁档 ' + withBlocked.length + ' / 共 ' + visible.length + ' 家族)';
-      const tb = document.getElementById('mc-menu-body');
+      const ghosts = fams.filter((f) => f.upstream_missing);
+      const seenOnly = fams.filter((f) => !f.upstream_missing && f.price && f.price.source === 'fallback' && !(f.w30d && f.w30d.requests > 0));
+      document.getElementById('mc-abnormal-count').textContent = '(' + ghosts.length + ' 幽灵 · ' + seenOnly.length + ' 未定价)';
+      const tb = document.getElementById('mc-abnormal-body');
       tb.innerHTML = '';
-      if (!visible.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">无数据</td></tr>'; return; }
-      visible.forEach((fam) => {
-        const inM = menu.has(fam.family);
-        const hasFast = menu.has(fam.family + '-fast');
-        const blocked = new Set(fam.blocked_tiers || []);
-        const w30 = fam.w30d || {};
-        const v = fam.variants || [];
-        const route = v.slice(0, 3).join(', ') + (v.length > 3 ? ' … (' + v.length + ')' : ' (' + v.length + ')');
+      if (!ghosts.length && !seenOnly.length) {
+        tb.innerHTML = '<tr><td colspan="4" class="muted">干净</td></tr>';
+        return;
+      }
+      const addRow = (fam, kind, kindPill) => {
         const tr = document.createElement('tr');
+        const w30 = fam.w30d || {};
         tr.innerHTML =
-          '<td></td>' +
           '<td class="mono">' + esc(fam.family) + '</td>' +
-          '<td></td>' +
-          '<td></td>' +
-          '<td class="mono" style="font-size:11px">' + esc(route) + '</td>' +
-          '<td class="mono" style="font-size:11px">$' + Number(w30.face_usd || 0).toFixed(0) + '</td>';
-        // 进菜单 checkbox
-        const inCb = el('input', { type: 'checkbox' });
-        inCb.checked = inM;
-        inCb.addEventListener('change', async () => {
-          const newMenu = inCb.checked ? 'base_and_fast' : 'hidden';
-          try {
-            await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: fam.family, menu: newMenu }) });
-            mcMsg(fam.family + (inCb.checked ? ' 进菜单' : ' 出菜单'));
-            await loadModelCenter();
-          } catch (e) { mcMsg(e.message, true); inCb.checked = !inCb.checked; }
-        });
-        tr.children[0].appendChild(inCb);
-        // 形态下拉
-        const menuSel = el('select', { style: 'font-size:11px' });
-        Object.entries({ base_and_fast: '基名+fast', base: '只基名', all: '全部变体', hidden: '隐藏' }).forEach(([k, label]) => {
-          const o = el('option', { value: k }, label);
-          if (fam.menu === k) o.selected = true;
-          menuSel.appendChild(o);
-        });
-        menuSel.addEventListener('change', async () => {
-          try {
-            await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: fam.family, menu: menuSel.value }) });
-            mcMsg(fam.family + ' 形态 → ' + menuSel.value);
-            await loadModelCenter();
-          } catch (e) { mcMsg(e.message, true); }
-        });
-        tr.children[2].appendChild(menuSel);
-        // 禁档 chips
-        const chipWrap = el('div', { style: 'display:flex;gap:2px' });
-        ['low', 'medium', 'high', 'max'].forEach((t) => {
-          const on = !blocked.has(t);
-          const chip = el('button', {
-            type: 'button',
-            class: on ? 'pill ok' : 'pill bad',
-            style: 'font-size:9px;padding:1px 6px;cursor:pointer;border:none;opacity:' + (on ? '1' : '0.55'),
-            title: on ? ('点击禁 ' + t + ' 档') : ('已禁 ' + t + ' 档, 点击恢复'),
-          }, t);
-          chip.addEventListener('click', async () => {
-            const next = new Set(blocked);
-            if (next.has(t)) next.delete(t); else next.add(t);
+          '<td>' + kindPill + '</td>' +
+          '<td class="mono">' + (w30.requests || 0) + '</td>' +
+          '<td></td>';
+        const act = tr.lastElementChild;
+        if (kind === 'ghost') {
+          act.appendChild(el('button', { class: 'danger', type: 'button', style: 'font-size:11px;padding:2px 8px' }, '下架')).addEventListener('click', async () => {
+            if (!confirm('下架幽灵 ' + fam.family + '？上游不存在, 客户点名 404')) return;
             try {
-              await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: fam.family, blocked_tiers: [...next] }) });
-              mcMsg(fam.family + ' 禁档 → ' + ([...next].join(',') || '无'));
+              await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: fam.family, menu: 'hidden' }) });
+              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: fam.family, enabled: false }) });
+              mcMsg(fam.family + ' 已下架');
               await loadModelCenter();
             } catch (e) { mcMsg(e.message, true); }
           });
-          chipWrap.appendChild(chip);
-        });
-        tr.children[3].appendChild(chipWrap);
+        } else {
+          act.appendChild(el('button', { class: 'ghost', type: 'button', style: 'font-size:11px;padding:2px 8px', title: '用内置官方价建一条手动条目' }, '按官方价定')).addEventListener('click', async () => {
+            const p = fam.price || {};
+            try {
+              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: fam.family, input_per_m: p.input, output_per_m: p.output, cache_read_per_m: p.cache_read, cache_write_per_m: p.cache_write }) });
+              mcMsg(fam.family + ' 已按官方价定');
+              await loadModelCenter();
+            } catch (e) { mcMsg(e.message, true); }
+          });
+        }
         tb.appendChild(tr);
-      });
+      };
+      ghosts.forEach((f) => addRow(f, 'ghost', '<span class="pill bad" style="font-size:10px">幽灵</span>'));
+      seenOnly.forEach((f) => addRow(f, 'seen', '<span class="pill warn" style="font-size:10px">未定价</span>'));
     }
 
     // ── tab 5: 路由测试 ──
@@ -2698,29 +2619,9 @@
     document.getElementById('mc-fetch-upstream').addEventListener('click', async () => {
       mcMsg('正在向上游拉取可用模型…');
       try {
-        const d = await api('/admin/api/models/upstream');
-        const news = (d.models || []).filter((m) => !m.in_registry);
-        mcMsg('账号 ' + d.account + ' 返回 ' + d.count + ' 个模型；' + news.length + ' 个未在模型列表');
-        const box = document.getElementById('md-upstream-box');
-        box.style.display = '';
-        const tb = document.getElementById('md-upstream-body');
-        tb.innerHTML = '';
-        (d.models || []).forEach((m) => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = '<td class="mono">' + esc(m.model) + '</td>' +
-            '<td class="mono">$' + Number(m.price[0]).toFixed(2) + '/$' + Number(m.price[1]).toFixed(2) + '</td>' +
-            '<td>' + (m.in_registry ? '<span class="muted">已有</span>' : '<span class="pill warn">未添加</span>') + '</td><td></td>';
-          if (!m.in_registry) {
-            tr.lastElementChild.appendChild(el('button', { class: 'ghost', type: 'button' }, '添加')).addEventListener('click', async () => {
-              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, input_per_m: m.price[0], output_per_m: m.price[1], cache_read_per_m: m.price[2], cache_write_per_m: m.price[3], note: 'upstream' }) });
-              await loadModelCenter();
-              document.getElementById('mc-fetch-upstream').click();
-            });
-          }
-          tb.appendChild(tr);
-        });
-        // 拉到上游名单后自动切到定价表 tab 展示
-        document.querySelector('#mc-panel .tabs button[data-tab="prices"]').click();
+        const d = await api('/admin/api/models/sync-from-upstream', { method: 'POST', body: '{}' });
+        mcMsg('✅ 同步: ' + d.families_total + ' 家族 · 新增 ' + d.families_added + ' 主模型 · 变体 ' + d.variants_seen + ' · 跳过视频/图片 ' + d.skipped_video_image);
+        await loadModelCenter();
       } catch (e) { mcMsg(e.message, true); }
     });
     document.getElementById('mc-sync-litellm').addEventListener('click', async () => {
@@ -2731,257 +2632,6 @@
         mcMsg('已填 ' + (d.filled || []).length + ' 个；跳过手动 ' + (d.skipped_manual || []).length + ' 个；无价格 ' + (d.no_price || []).length + ' 个');
         await loadModelCenter();
       } catch (e) { mcMsg(e.message, true); }
-    });
-    function renderModels() {
-      const q = document.getElementById('md-q').value.trim().toLowerCase();
-      const src = document.getElementById('md-src').value;
-      const rows = mdModels.filter((m) => (!q || m.model.toLowerCase().includes(q)) && (!src || m.source === src));
-      // 主模型 vs 变体判定 (与后端 family_base 同规则: 剥掉 -(thinking-)?(low|medium|high|xhigh|max|none|minimal|extra-high)(-fast)?$ 和 -fast)
-      const VARIANT_RE = /-(thinking-)?(low|medium|high|xhigh|max|none|minimal|extra-high)(-fast)?$|-fast$/;
-      const familyBase = (m) => { let s = m; while (true) { const t = s.replace(VARIANT_RE, ''); if (t === s) return s; s = t; } };
-      // 三段分区: 主模型 (基名) / 变体覆盖 (有手动价的变体条目) / 幽灵
-      // 「禁止出现不存在的模型」: 幽灵默认不参与主表, 收进「幽灵」分区, 且分区头默认折叠
-      const live = rows.filter((m) => !m.hidden && !m.upstream_missing && m.source !== 'seen' && familyBase(m.model) === m.model);
-      const variants = rows.filter((m) => !m.hidden && !m.upstream_missing && familyBase(m.model) !== m.model && m.source !== 'seen');
-      const seenOnly = rows.filter((m) => !m.hidden && !m.upstream_missing && m.source === 'seen');
-      const ghosts = rows.filter((m) => !m.hidden && m.upstream_missing);
-      const hiddenRows = rows.filter((m) => m.hidden);
-      document.getElementById('md-count').textContent = '(主 ' + live.length + ' · 变体 ' + variants.length + ' · 未定价 ' + seenOnly.length + ' · 幽灵 ' + ghosts.length + (hiddenRows.length ? ' · 已隐藏 ' + hiddenRows.length : '') + ')';
-      const tb = document.getElementById('md-body');
-      tb.innerHTML = '';
-      if (!rows.length) { tb.innerHTML = '<tr><td colspan="11" class="muted">无匹配</td></tr>'; return; }
-      const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', seen: '<span class="pill warn">未定价</span>' };
-      // 变体的基名及其生效价 (covered_by)
-      const basePrice = (variant) => {
-        const base = familyBase(variant);
-        const baseRow = mdModels.find((m) => m.model === base);
-        return baseRow ? { base, price: baseRow } : { base, price: null };
-      };
-      // 主模型罩住的变体数
-      const coveredCount = (base) => mdModels.filter((m) => m.model !== base && familyBase(m.model) === base).length;
-      // 一键按家族定价: 从变体名推基名, 预填表单
-      const fillFamilyForm = (variant) => {
-        const base = familyBase(variant);
-        document.getElementById('md-model-add').open = true;
-        const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
-        set('mp-model', base); set('mp-note', '按 ' + variant + ' 家族定');
-        document.getElementById('mp-enabled').checked = true;
-        document.getElementById('mp-model').scrollIntoView({ block: 'center' });
-        mdMsg('已预填基名 ' + base + ' —— 前缀匹配会罩住所有变体, 保存后该 seen 行消失');
-      };
-      const renderRow = (m, section) => {
-        const tr = document.createElement('tr');
-        if (section === 'ghost') tr.style.background = 'rgba(255,80,80,.06)';
-        if (section === 'variant') tr.style.background = 'rgba(255,220,100,.04)';
-        const ghostBadge = m.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游 AvailableModels 无此模型 —— 误录的幽灵条目, 计价仍按影子价兜底">幽灵·上游不存在</span>' : '';
-        // 变体行: 显示「← 基名 罩住」
-        let coveredTag = '';
-        if (section === 'variant') {
-          const { base, price } = basePrice(m.model);
-          if (price) {
-            const samePrice = Math.abs((price.input_per_m||0) - (m.input_per_m||0)) < 1e-9 && Math.abs((price.output_per_m||0) - (m.output_per_m||0)) < 1e-9;
-            coveredTag = ' <span class="pill ' + (samePrice ? 'info' : 'warn') + '" style="font-size:10px" title="基名 ' + esc(base) + ' 价: $' + Number(price.input_per_m||0).toFixed(2) + '/$' + Number(price.output_per_m||0).toFixed(2) + (samePrice ? ' — 与变体价相同, 可清理' : ' — 与变体价不同, 差异化保留') + '">← ' + esc(base) + (samePrice ? ' 同价' : ' 差价') + '</span>';
-          }
-        }
-        // 主模型行: 显示罩住多少变体
-        let coverTag = '';
-        if (section === 'live') {
-          const n = coveredCount(m.model);
-          if (n > 0) coverTag = ' <span class="muted" style="font-size:10px" title="最长前缀匹配罩住这些变体">罩 ' + n + '</span>';
-        }
-        tr.innerHTML =
-          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + ghostBadge + coveredTag + coverTag + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td>' +
-          ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">$' + Number(m[k] || 0).toFixed(2) + '</td>').join('') +
-          '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px"></td>' +
-          '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td style="white-space:nowrap"></td>';
-        // 所属组: chips 可点 (跳模型组 tab 并滚动)
-        const groupTd = tr.children[6];
-        (m.groups || []).forEach((g) => {
-          const chip = el('button', { type: 'button', class: 'pill info', style: 'font-size:10px;padding:1px 6px;margin-right:2px;cursor:pointer;border:none', title: '跳模型组 tab 编辑 ' + g }, esc(g));
-          chip.addEventListener('click', () => {
-            document.querySelector('#mc-panel .tabs button[data-tab="groups"]').click();
-            setTimeout(() => {
-              const rows = document.querySelectorAll('#mg-body tr');
-              rows.forEach((row) => {
-                if (row.firstElementChild && row.firstElementChild.textContent.trim() === g) {
-                  row.scrollIntoView({ block: 'center' });
-                  row.style.background = 'rgba(255,220,100,.15)';
-                  setTimeout(() => { row.style.background = ''; }, 1500);
-                }
-              });
-            }, 50);
-          });
-          groupTd.appendChild(chip);
-        });
-        if (!(m.groups || []).length) groupTd.innerHTML = '<span class="muted">—</span>';
-        const act = tr.lastElementChild;
-        // seen 未定价行: 主推「按家族定」(宽按钮)
-        if (m.source === 'seen' && section !== 'ghost') {
-          const b = el('button', { type: 'button', style: 'font-size:12px;padding:4px 12px', title: '以家族基名建一条手动价, 前缀罩住所有变体' }, '按家族定 →');
-          b.addEventListener('click', () => fillFamilyForm(m.model));
-          act.appendChild(b);
-        }
-        // 变体行 + 变体价与基名同价: 主推「让基名罩」(删变体条目)
-        if (section === 'variant') {
-          const { base, price } = basePrice(m.model);
-          const samePrice = price && Math.abs((price.input_per_m||0) - (m.input_per_m||0)) < 1e-9 && Math.abs((price.output_per_m||0) - (m.output_per_m||0)) < 1e-9;
-          if (samePrice) {
-            const b = el('button', { type: 'button', style: 'font-size:12px;padding:4px 12px', title: '删除变体条目, 让基名 ' + base + ' 的价通过前缀罩住 (价相同, 无影响)' }, '让基名罩 →');
-            b.addEventListener('click', async () => {
-              await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
-              mdMsg(m.model + ' 已删, 现由 ' + base + ' 罩住');
-              await loadModelsPage();
-            });
-            act.appendChild(b);
-          }
-        }
-        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => fillModelForm(m));
-        // 幽灵行: 主推「下架」宽按钮
-        if (section === 'ghost') {
-          const b = el('button', { class: 'danger', type: 'button', style: 'font-size:12px;padding:4px 12px', title: '禁用+隐藏, 从 /v1/models 消失, 计价/账本不受影响' }, '下架');
-          b.addEventListener('click', async () => {
-            if (!confirm('下架幽灵 ' + m.model + '？上游根本不存在, 客户点名它只会 404')) return;
-            await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: false }) });
-            await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
-            await loadModelsPage();
-          });
-          act.appendChild(b);
-        } else {
-          act.appendChild(el('button', { class: 'ghost', type: 'button' }, m.enabled ? '停用' : '启用')).addEventListener('click', async () => {
-            await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: !m.enabled }) });
-            await loadModelsPage();
-          });
-          const isManual = m.source === 'manual';
-          const hasRefs = (m.requests_30d || 0) > 0;
-          const delLabel = isManual && !hasRefs ? '真删' : '下架';
-          const delTip = isManual && !hasRefs
-            ? ('真删手动条目 ' + m.model + '？无账本引用, 彻底删除 (回落内置价)')
-            : ('下架 ' + m.model + '？禁用 + 隐藏, 从列表与 /v1/models 消失, 计价/账本不受影响, 可恢复');
-          act.appendChild(el('button', { class: 'danger', type: 'button' }, delLabel)).addEventListener('click', async () => {
-            if (!confirm(delTip)) return;
-            if (isManual && !hasRefs) {
-              await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
-            } else {
-              await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: false }) });
-              await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
-            }
-            await loadModelsPage();
-          });
-        }
-        return tr;
-      };
-      // 分区渲染
-      const section = (label, list, hint, sectionKey) => {
-        if (!list.length) return;
-        const sep = document.createElement('tr');
-        sep.innerHTML = '<td colspan="11" style="padding:6px 8px;background:var(--bg2);font-size:11px;font-weight:600">' + esc(label) + ' <span class="muted">(' + list.length + ')</span>' + (hint ? ' <span class="muted" style="font-weight:400">—— ' + esc(hint) + '</span>' : '') + '</td>';
-        tb.appendChild(sep);
-        list.forEach((m) => tb.appendChild(renderRow(m, sectionKey)));
-      };
-      section('主模型 (基名定价, 罩住变体)', live, '客户可见, 定价即前缀罩住所有变体');
-      section('变体覆盖 (手动价的变体条目)', variants, '基名已有价时这些条目是冗余 —— 点「让基名罩」删掉; 价不同时保留作差异化', 'variant');
-      section('未定价 (账本见过)', seenOnly, '上游在变体级返回, 计价走家族前缀兜底 —— 点「按家族定」一行搞定', 'seen');
-      section('幽灵 (上游不存在)', ghosts, '误录/已下线, 客户点名 404 —— 点「下架」清出列表', 'ghost');
-      if (hiddenRows.length) {
-        const sep = document.createElement('tr');
-        sep.innerHTML = '<td colspan="11" style="padding:2px 8px"><span class="muted" style="font-size:11px">已隐藏 (' + hiddenRows.length + ') —— 软删的内置/账本行, 计价不受影响</span> <button type="button" class="ghost" id="md-hidden-toggle" style="font-size:11px">展开</button></td>';
-        tb.appendChild(sep);
-        const box = [];
-        hiddenRows.forEach((m) => { const r = renderRow(m, 'live'); r.style.display = 'none'; r.style.opacity = '0.55'; tb.appendChild(r); box.push(r); });
-        sep.querySelector('#md-hidden-toggle').addEventListener('click', (e) => {
-          const btn = e.target;
-          const open = btn.textContent === '收起';
-          box.forEach((r) => { r.style.display = open ? 'none' : ''; });
-          btn.textContent = open ? '展开' : '收起';
-        });
-      }
-    }
-    ['md-q', 'md-src'].forEach((id) => document.getElementById(id).addEventListener('input', renderModels));
-    // 清理变体价: 先 dry-run 报告, 确认后真删
-    document.getElementById('md-prune-variants').addEventListener('click', async () => {
-      try {
-        const d = await api('/admin/api/models/prune-variant-prices?dry_run=1', { method: 'POST', body: '{}' });
-        const pruned = d.pruned || [], kept = d.kept || [];
-        if (!pruned.length) { mdMsg('没有可清理的变体价 (所有变体要么基名无价, 要么价不同需保留)'); return; }
-        const preview = pruned.slice(0, 8).map((p) => '  ' + p.model + ' ← ' + p.covered_by).join('\n');
-        if (!confirm('将删除 ' + pruned.length + ' 条变体价 (基名同价罩住, 无影响):\n' + preview + (pruned.length > 8 ? '\n  … 共 ' + pruned.length + ' 条' : '') + '\n\n保留 ' + kept.length + ' 条差异化变体价。确认?')) return;
-        const r = await api('/admin/api/models/prune-variant-prices', { method: 'POST', body: '{}' });
-        mdMsg('已清理 ' + (r.pruned || []).length + ' 条变体价, 保留 ' + (r.kept || []).length + ' 条差异化');
-        await loadModelsPage();
-      } catch (e) { mdMsg(e.message, true); }
-    });
-    // 从上游同步主模型 (全流程: 拉上游 → 归类 → 建主模型条目)
-    document.getElementById('md-sync-upstream').addEventListener('click', async () => {
-      mdMsg('正在从上游同步…');
-      try {
-        const d = await api('/admin/api/models/sync-from-upstream', { method: 'POST', body: '{}' });
-        mdMsg('✅ 同步完成: ' + d.families_total + ' 家族 · 新增 ' + d.families_added + ' 主模型 · 变体 ' + d.variants_seen + ' · 跳过视频/图片 ' + d.skipped_video_image);
-        await loadModelsPage();
-      } catch (e) { mdMsg(e.message, true); }
-    });
-    function fillModelForm(m) {
-      document.getElementById('md-model-add').open = true;
-      const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
-      // 编辑已有模型: 自定义名填入, 下拉清空
-      set('mp-model', m.model); set('mp-model-pick', '');
-      set('mp-in', m.input_per_m); set('mp-out', m.output_per_m); set('mp-cr', m.cache_read_per_m); set('mp-cw', m.cache_write_per_m);
-      set('mp-note', m.note);
-      document.getElementById('mp-enabled').checked = m.enabled !== false;
-      document.getElementById('mp-ghost-warn').style.display = 'none';
-      document.getElementById('mp-model').scrollIntoView({ block: 'center' });
-    }
-    // 填上游主模型下拉 (在 loadModelCenter 后调用)
-    function fillUpstreamPicker() {
-      const fams = (mcFamilies && mcFamilies.families) || [];
-      const sel = document.getElementById('mp-model-pick');
-      const cur = sel.value;
-      sel.innerHTML = '<option value="">— 选择上游主模型 —</option>';
-      fams.filter((f) => !f.upstream_missing).forEach((f) => {
-        const o = el('option', { value: f.family }, f.family + ' (' + (f.variant_count || 0) + ' 变体 · $' + Number((f.price || {}).input || 0).toFixed(2) + '/$' + Number((f.price || {}).output || 0).toFixed(2) + ')');
-        sel.appendChild(o);
-      });
-      if (cur) sel.value = cur;
-    }
-    // 选中主模型 → 自动填官方价 + 清空自定义名
-    document.getElementById('mp-model-pick').addEventListener('change', () => {
-      const fam = document.getElementById('mp-model-pick').value;
-      if (!fam) return;
-      const f = (mcFamilies.families || []).find((x) => x.family === fam);
-      if (!f) return;
-      const p = f.price || {};
-      const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
-      set('mp-in', p.input); set('mp-out', p.output); set('mp-cr', p.cache_read); set('mp-cw', p.cache_write);
-      set('mp-model', ''); // 清空自定义名, 用下拉选的
-      document.getElementById('mp-ghost-warn').style.display = 'none';
-    });
-    // 自定义名输入时实时校验幽灵
-    document.getElementById('mp-model').addEventListener('input', () => {
-      const v = document.getElementById('mp-model').value.trim();
-      const warn = document.getElementById('mp-ghost-warn');
-      if (!v) { warn.style.display = 'none'; return; }
-      const fams = (mcFamilies && mcFamilies.families) || [];
-      const known = fams.some((f) => f.family === v && !f.upstream_missing);
-      warn.style.display = known ? 'none' : '';
-    });
-    document.getElementById('mp-reset').addEventListener('click', () => {
-      ['mp-model', 'mp-model-pick', 'mp-in', 'mp-out', 'mp-cr', 'mp-cw', 'mp-note'].forEach((id) => { document.getElementById(id).value = ''; });
-      document.getElementById('mp-enabled').checked = true;
-      document.getElementById('mp-ghost-warn').style.display = 'none';
-    });
-    document.getElementById('mp-save').addEventListener('click', async () => {
-      const g = (id) => document.getElementById(id).value.trim();
-      const num = (id) => { const v = g(id); return v === '' ? undefined : Number(v); };
-      // 优先自定义名 (高级), 否则用下拉选的主模型
-      const model = g('mp-model') || g('mp-model-pick');
-      const body = { model, note: g('mp-note'), enabled: document.getElementById('mp-enabled').checked };
-      if (!body.model) return mdMsg('选主模型 或 填自定义名', true);
-      // 幽灵二次确认
-      const fams = (mcFamilies && mcFamilies.families) || [];
-      const known = fams.some((f) => f.family === body.model && !f.upstream_missing);
-      if (!known && !confirm('⚠️ ' + body.model + ' 上游不存在, 客户点名会 404。确认添加?')) return;
-      [['input_per_m', 'mp-in'], ['output_per_m', 'mp-out'], ['cache_read_per_m', 'mp-cr'], ['cache_write_per_m', 'mp-cw']].forEach(([k, id]) => { const v = num(id); if (v != null) body[k] = v; });
-      try { await api('/admin/api/models', { method: 'POST', body: JSON.stringify(body) }); mdMsg('已保存 ' + body.model); await loadModelsPage(); }
-      catch (e) { mdMsg(e.message, true); }
     });
     // 模型组
     function groupUsage(id) {

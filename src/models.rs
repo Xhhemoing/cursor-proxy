@@ -357,12 +357,29 @@ impl ModelRegistry {
 
     /// 模型是否被面板隐藏
     pub fn is_hidden(&self, model: &str) -> bool {
-        self.data
-            .load()
-            .models
-            .iter()
-            .find(|e| e.model == model)
-            .map_or(false, |e| e.hidden)
+        let d = self.data.load();
+        // 1. 注册表条目自身的 hidden 字段 (面板「删除」内置/seen 行用)
+        if let Some(e) = d.models.iter().find(|e| e.model == model) {
+            if e.hidden {
+                return true;
+            }
+        }
+        // 2. 家族规则 menu=Hidden (客户菜单 checkbox 关掉 = 整族不进 /v1/models)
+        let base = Self::family_base(model);
+        if let Some(r) = d.family_rules.iter().find(|r| r.family == base) {
+            if r.menu == MenuMode::Hidden {
+                return true;
+            }
+        }
+        // 3. 模型本身是家族基名, 剥 cursor- 前缀再查一次 (cursor-grok-4.6 → grok-4.6)
+        if let Some(stripped) = base.strip_prefix("cursor-") {
+            if let Some(r) = d.family_rules.iter().find(|r| r.family == stripped) {
+                if r.menu == MenuMode::Hidden {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     // ── 家族规则 (默认思考档 / 菜单形态) ──
@@ -799,7 +816,12 @@ impl ModelRegistry {
             // 注册表手动条目 = 运营明确发布意图, 不做上游门 (名单是缓存会滞后,
             // 手动录一行开卖新模型是合法逃生舱; kimi-k3 / cursor-grok-4.6 等别名同理).
             // 「幽灵」只在 admin 面板侧打标 (upstream_present), 零客户侧影响.
+            // 但尊重 family rule 的 Hidden (客户菜单 checkbox 关掉 = 不出现在 /v1/models)
             if e.enabled && !e.hidden {
+                let base = Self::family_base(&e.model);
+                if self.family_menu_mode(base) == MenuMode::Hidden {
+                    continue;
+                }
                 push(e.model.clone());
             }
         }
