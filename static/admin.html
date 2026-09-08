@@ -733,8 +733,8 @@
             <div class="panel fill">
               <div class="ph"><h3>用户 <span class="muted" id="pu-count"></span></h3></div>
               <div class="table-scroll"><table>
-                <thead><tr><th>编号</th><th>用户名</th><th>余额</th><th>组</th><th>邀请码</th><th>状态</th><th></th></tr></thead>
-                <tbody id="pu-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+                <thead><tr><th>编号</th><th>用户名</th><th>余额</th><th>定额$</th><th>Key</th><th>组</th><th>邀请码</th><th>状态</th><th></th></tr></thead>
+                <tbody id="pu-body"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
               </table></div>
             </div>
           </div>
@@ -806,17 +806,18 @@
           <div id="mc-tab-families" style="display:flex;flex:1;min-height:0;flex-direction:column">
             <div class="panel fill">
               <div class="ph"><h3>模型家族 <span class="muted" id="mc-count"></span></h3>
-                <p class="muted" style="font-size:11px;margin:0">一行一个家族 · 展开看真实变体 · 默认档/菜单形态内联即改 · 统计三窗同口径 (24h/7d/30d)</p>
+                <p class="muted" style="font-size:11px;margin:0">一行一个家族 · 展开看真实变体 · 默认档/菜单形态内联即改 · 30d 面值柱 (浅色=30d, 深色=7d 同基线) · $/槽·时</p>
+                <label style="font-size:11px;display:flex;align-items:center;gap:4px;margin-left:auto"><input type="checkbox" id="mc-show-all"> 全部(含 30d 零流量)</label>
               </div>
               <div class="table-scroll">
                 <table class="nowrap">
                   <thead><tr>
-                    <th>家族</th><th>变体</th><th>菜单形态</th><th>默认思考档</th>
-                    <th>生效价 in/out</th><th>来源</th>
-                    <th>24h 请求/错误率</th><th>7d $</th><th>30d $ · $/槽·时</th>
-                    <th>风控规则</th><th>组</th><th>状态</th><th></th>
+                    <th>家族</th><th>变体</th><th>菜单形态</th><th>默认档</th>
+                    <th>价 in/out</th>
+                    <th>24h 请求</th><th>30d $ / $槽时</th>
+                    <th>风控/组</th><th></th>
                   </tr></thead>
-                  <tbody id="mc-body"><tr><td colspan="13" class="muted">加载中…</td></tr></tbody>
+                  <tbody id="mc-body"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -861,6 +862,8 @@
               <div class="fields">
                 <label>搜索 <input id="md-q" placeholder="模型名"></label>
                 <label>来源 <select id="md-src"><option value="">全部</option><option value="manual">手动设置</option><option value="builtin">内置</option><option value="seen">仅账本出现</option></select></label>
+                <button type="button" class="ghost" id="md-prune-variants" title="删除基名已有同价的变体条目, 让主模型价通过前缀罩住">清理变体价</button>
+                <button type="button" id="md-sync-upstream" title="拉上游 → 过滤视频/图片 → 按家族归类 → 给每个主模型建手动条目 (默认官方价)">从上游同步主模型</button>
               </div>
             </form>
             <div class="panel" id="md-upstream-box" style="display:none;flex:0 0 auto;margin-bottom:8px">
@@ -1070,8 +1073,10 @@
 
                 <!-- P1: 门户扩展字段 -->
                 <details id="cp-portal" style="margin-top:8px">
-                  <summary style="cursor:pointer;color:var(--info);font-size:12px">门户扩展（用户组/子套餐/叠加）</summary>
+                  <summary style="cursor:pointer;color:var(--info);font-size:12px">门户扩展（费率/用户组/子套餐/叠加）</summary>
                   <div class="form-grid" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
+                    <label style="grid-column:1/-1;color:var(--info)">费率模式 ¥/槽·时 <input id="cp-rate" type="number" step="0.01" min="0" placeholder=">0 时按 时长×并发 计价, 售价字段忽略; 0=固定价"></label>
+                    <label>最少购买 h <input id="cp-min-hours" type="number" min="1" placeholder="1"></label>
                     <label>额度 $ <input id="cp-quota" type="number" step="1" min="0" placeholder="0=无限"></label>
                     <label>过期 h <input id="cp-expire" type="number" min="0" placeholder="0=不过期"></label>
                     <label>计时起点 <select id="cp-billing-mode"><option value="purchase_time">购买即计时</option><option value="first_call">首次调用</option></select></label>
@@ -1117,8 +1122,8 @@
               <div class="ph"><h3>卡列表 <span class="muted" id="cd-cards-count"></span></h3></div>
               <div class="table-scroll">
                 <table>
-                  <thead><tr><th>卡号</th><th>套餐</th><th>归属</th><th>实收</th><th>到期</th><th>档位</th><th>在飞</th><th>今日次数</th><th>今日面值$</th><th>今日成本¥</th><th>定额余额$</th><th>评分</th><th>状态</th><th></th></tr></thead>
-                  <tbody id="cd-cards-body"><tr><td colspan="14" class="muted">加载中…</td></tr></tbody>
+                  <thead><tr><th>卡号</th><th>套餐</th><th>归属</th><th>用户</th><th>槽</th><th>实收</th><th>到期</th><th>档位</th><th>在飞</th><th>今日次数</th><th>今日面值$</th><th>今日成本¥</th><th>定额余额$</th><th>评分</th><th>状态</th><th></th></tr></thead>
+                  <tbody id="cd-cards-body"><tr><td colspan="16" class="muted">加载中…</td></tr></tbody>
                 </table>
               </div>
             </div>
@@ -1138,6 +1143,7 @@
               <div><div class="l">收入 ¥</div><div class="v ok" id="pk-rev">–</div><div class="s">卡实收 (按开卡日)</div></div>
               <div><div class="l">成本 ¥</div><div class="v warn" id="pk-cost">–</div><div class="s">面值 $<b class="mono" id="pk-face">–</b> × ¥/$ <b class="mono" id="pk-rate">–</b></div></div>
               <div><div class="l">利润 ¥ / 毛利</div><div class="v" id="pk-profit">–</div><div class="s"><span id="pk-cards">–</span> 卡 · <span id="pk-req">–</span> 请求</div></div>
+              <div><div class="l">今日 / 昨日</div><div class="v" id="pk-today">–</div><div class="s" id="pk-today-sub">–</div></div>
             </div>
             <div class="panel fill">
               <div class="ph"><h3 id="cd-profit-title">按套餐</h3></div>
@@ -2074,8 +2080,9 @@
       cdPlans.forEach((p) => {
         const tr = document.createElement('tr');
         tr.innerHTML =
-          '<td class="mono">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mono">' + rmb(p.price) + '</td>' +
-          '<td>' + (p.kind === 'quota' ? '<span class="pill info">定额 $' + p.face_usd + '</span>' : '<span class="pill ok">畅饮</span>') + '</td>' +
+          '<td class="mono">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mono">' +
+          (p.price_per_lane_hour > 0 ? '<span title="费率模式">¥' + Number(p.price_per_lane_hour).toFixed(2) + '/槽·时</span>' : rmb(p.price)) + '</td>' +
+          '<td>' + (p.kind === 'quota' ? '<span class="pill info">定额 $' + p.face_usd + '</span>' : p.price_per_lane_hour > 0 ? '<span class="pill ok">畅饮·费率</span>' : '<span class="pill ok">畅饮</span>') + '</td>' +
           '<td class="mono">' + ((p.model_groups || []).length ? esc(p.model_groups.join(',')) : '<span class="muted">不限</span>') +
           (p.model_count != null ? '<br><span class="muted" style="font-size:10px">可调 ' + p.model_count + ' 模型</span>' : '') +
           ((p.warnings || []).length ? '<br><span class="pill bad" style="font-size:10px" title="' + esc(p.warnings.join('；')) + '">⚠ ' + esc(p.warnings[0].slice(0, 18)) + '</span>' : '') +
@@ -2108,6 +2115,11 @@
       set('cp-dur', p.duration_hours); set('cp-conc', p.max_concurrency); set('cp-rpm', p.rpm_limit);
       set('cp-rpd', p.fair_use_rpd); set('cp-dq', p.daily_quota_usd); set('cp-soft', p.soften_ratio); set('cp-dconc', p.degraded_concurrency);
       set('cp-p0', p.pace_normal_tps); set('cp-p1', p.pace_soften_tps); set('cp-p2', p.pace_degraded_tps); set('cp-abuse', p.abuse_score_threshold);
+      set('cp-rate', p.price_per_lane_hour || ''); set('cp-min-hours', p.min_hours || '');
+      set('cp-quota', p.quota_usd || ''); set('cp-expire', p.expire_hours || '');
+      set('cp-billing-mode', p.billing_mode || 'purchase_time'); set('cp-stack-mode', p.stack_mode || 'time_multiply');
+      set('cp-sub-plans', (p.sub_plan_ids || []).join(',')); set('cp-allowed-groups', (p.allowed_group_ids || []).join(','));
+      set('cp-extra-limits', (p.extra_limits || []).map((l) => l.hours + 'h:' + l.quota_usd).join(','));
       set('cp-prefix', (p.model_prefixes || []).join(',')); set('cp-note', p.note);
       renderGroupPicker(document.getElementById('cp-groups'), p.model_groups || []);
       document.getElementById('cp-enabled').checked = !!p.enabled;
@@ -2139,6 +2151,8 @@
       body.note = g('cp-note');
       body.enabled = document.getElementById('cp-enabled').checked;
       // P1: 门户扩展字段
+      if (num('cp-rate') != null) body.price_per_lane_hour = num('cp-rate');
+      if (num('cp-min-hours') != null) body.min_hours = num('cp-min-hours');
       if (num('cp-quota') != null) body.quota_usd = num('cp-quota');
       if (num('cp-expire') != null) body.expire_hours = num('cp-expire') || null;
       body.billing_mode = g('cp-billing-mode');
@@ -2189,17 +2203,18 @@
       document.getElementById('cd-cards-count').textContent = cards.length ? '(' + cards.length + ')' : '';
       const tb = document.getElementById('cd-cards-body');
       tb.innerHTML = '';
-      if (!cards.length) tb.innerHTML = '<tr><td colspan="14" class="muted">还没有卡</td></tr>';
+      if (!cards.length) tb.innerHTML = '<tr><td colspan="16" class="muted">还没有卡</td></tr>';
       cards.forEach((c) => {
         const tr = document.createElement('tr');
-        const st = !c.enabled ? '<span class="pill bad">已吊销</span>' : c.expired ? '<span class="pill warn">已过期</span>' : '<span class="pill ok">有效</span>';
+        const st = !c.enabled ? '<span class="pill bad">已吊销</span>' : c.expired ? '<span class="pill warn">已过期</span>' : c.activated === false ? '<span class="pill info">未激活</span>' : '<span class="pill ok">有效</span>';
         const thr = c.throttle === 'normal' ? '<span class="pill ok">normal</span>' : c.throttle === 'soften' ? '<span class="pill warn">soften</span>' : '<span class="pill bad">degraded</span>';
         const pace = c.pace_tps ? ' <span class="muted mono">' + c.pace_tps + 't/s</span>' : '';
         const score = c.abuse ? c.abuse.score : 0;
         const scoreCls = score >= 55 ? 'bad' : score >= 33 ? 'warn' : '';
         tr.innerHTML =
           '<td class="mono" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(0, 13)) + '…</td><td>' + esc(c.plan_name || c.plan_id) + '</td><td>' + esc(c.owner || '') + '</td>' +
-          '<td class="mono">' + rmb(c.paid_rmb) + '</td><td class="mono">' + tsDate(c.expires_at) + '</td><td>' + thr + pace + '</td>' +
+          '<td class="mono" style="font-size:11px">' + esc(c.user_id || '—') + '</td><td class="mono">' + (c.slots ?? '–') + '</td>' +
+          '<td class="mono">' + rmb(c.paid_rmb) + '</td><td class="mono">' + (c.activated === false ? '未激活' : tsDate(c.expires_at)) + '</td><td>' + thr + pace + '</td>' +
           '<td class="mono">' + c.in_flight + '</td><td class="mono">' + c.day_used + (c.fair_use_rpd ? '/' + c.fair_use_rpd : '') + '</td>' +
           '<td class="mono">' + usd(c.day_quota_usd) + '</td><td class="mono">' + rmb(c.day_cost_rmb) + '</td>' +
           '<td class="mono">' + (c.plan_kind === 'quota' ? usd(c.face_left_usd, 2) + ' / ' + c.face_usd : '–') + '</td>' +
@@ -2238,9 +2253,9 @@
     });
     // 利润
     const PROFIT_COLS = {
-      plan: [['plan_id', '套餐', 'mono'], ['plan_name', '名称'], ['kind', '类型'], ['cards_sold', '开卡数', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['avg_cost_per_card_rmb', '每卡成本¥', 'rmb']],
-      card: [['card_key', '卡号', 'mono'], ['plan_id', '套餐', 'mono'], ['owner', '归属'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct'], ['models', '模型', 'models']],
-      day: [['day', '日期', 'mono'], ['cards_issued', '开卡', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['profit_rmb', '利润¥', 'rmb'], ['margin', '毛利', 'pct']],
+      plan: [['plan_id', '套餐', 'mono'], ['plan_name', '名称'], ['kind', '类型'], ['cards_sold', '开卡数', 'mono'], ['requests', '请求', 'mono'], ['req_per_card', '请求/卡', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['cost_share', '成本占比', 'costshare'], ['profit_rmb', '利润¥', 'rmb']],
+      card: [['card_key', '卡号', 'mono'], ['plan_id', '套餐', 'mono'], ['owner', '归属'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['cost_share', '成本占比', 'costshare'], ['profit_rmb', '利润¥', 'rmb'], ['models', '模型', 'models']],
+      day: [['day', '日期', 'mono'], ['cards_issued', '开卡', 'mono'], ['requests', '请求', 'mono'], ['revenue_rmb', '收入¥', 'rmb'], ['face_usd', '面值$', 'usd'], ['cost_rmb', '成本¥', 'rmb'], ['cost_share', '成本占比', 'costshare'], ['profit_rmb', '利润¥', 'rmb']],
     };
     async function loadProfit() {
       const q = new URLSearchParams();
@@ -2258,6 +2273,19 @@
       document.getElementById('pk-cards').textContent = T.cards || 0;
       document.getElementById('pk-req').textContent = fmtN(T.requests);
       document.getElementById('cd-profit-title').textContent = { plan: '按套餐', card: '按卡', day: '按天' }[g];
+      // 今日 vs 昨日 (独立拉一次 day 分组, 与主查询区间无关; 按后端 UTC+8 对齐自然日)
+      api('/admin/api/cards/profit?group=day').then((dd) => {
+        const cn = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+        const days = (dd.rows || []);
+        const today = days.find((x) => x.day === cn);
+        const yday = days.length >= 2 ? days[days.length - (today ? 2 : 1)] : null;
+        if (today) {
+          const el = document.getElementById('pk-today');
+          el.textContent = '$' + Number(today.face_usd || 0).toFixed(1) + ' / $' + Number((yday && yday.face_usd) || 0).toFixed(1);
+          el.className = 'v ' + ((yday && today.face_usd > (yday.face_usd || 0) * 2) ? 'bad' : (yday && today.face_usd > (yday.face_usd || 0) * 1.3) ? 'warn' : 'ok');
+          document.getElementById('pk-today-sub').textContent = (today.requests || 0) + ' 请求 vs ' + ((yday && yday.requests) || 0);
+        }
+      }).catch(() => {});
       const cols = PROFIT_COLS[g];
       document.getElementById('cd-profit-head').innerHTML = '<tr>' + cols.map((c) => '<th>' + c[1] + '</th>').join('') + '</tr>';
       const tb = document.getElementById('cd-profit-body');
@@ -2266,11 +2294,26 @@
       if (!rows.length) tb.innerHTML = '<tr><td colspan="' + cols.length + '" class="muted">区间内无数据</td></tr>';
       rows.forEach((r) => {
         const tr = document.createElement('tr');
+        // 派生: 成本占收入 (revenue=0 时区分「无消耗=纯利」/「纯烧」)
+        const rev = r.revenue_rmb || 0, cost = r.cost_rmb || 0;
+        if (rev > 0) r.cost_share = cost / rev;
+        else if (cost > 0) r.cost_share = 'burn';
+        else r.cost_share = null;
+        if (r.cards_sold) r.req_per_card = Math.round((r.requests || 0) / r.cards_sold);
+        // 纯烧日整行加红 (revenue=0 且 cost>0)
+        if (r.cost_share === 'burn') tr.style.background = 'rgba(255,80,80,.08)';
         tr.innerHTML = cols.map((c) => {
           const v = r[c[0]]; const k = c[2];
           if (k === 'rmb') return '<td class="mono">' + rmb(v) + '</td>';
           if (k === 'usd') return '<td class="mono">' + usd(v, 3) + '</td>';
           if (k === 'pct') return '<td class="mono">' + pct(v) + '</td>';
+          if (k === 'costshare') {
+            if (v === 'burn') return '<td class="mono"><span class="pill bad">纯烧</span></td>';
+            if (v == null) return '<td class="mono muted">–</td>';
+            const pctV = Number(v) * 100;
+            const cls = pctV > 80 ? 'bad' : pctV > 50 ? 'warn' : 'ok';
+            return '<td class="mono ' + cls + '">' + pctV.toFixed(0) + '%</td>';
+          }
           if (k === 'models') return '<td class="muted" style="font-size:11px">' + (v || []).map((m) => esc(m.model) + '×' + m.requests + ' ' + usd(m.face_usd)).join('<br>') + '</td>';
           if (k === 'mono') return '<td class="mono">' + (v == null ? '–' : String(v).length > 20 ? esc(String(v).slice(0, 13)) + '…' : esc(String(v))) + '</td>';
           return '<td>' + (v == null ? '–' : esc(String(v))) + '</td>';
@@ -2342,6 +2385,7 @@
       refreshGroupPickers();
       document.getElementById('nav-models-badge').textContent = models.manual_count ? String(models.manual_count) : '';
     }
+    document.getElementById('mc-show-all').addEventListener('change', () => { renderFamilies(); });
     const loadModelsPage = loadModelCenter; // 旧调用点 (上游拉取/litellm/保存后刷新) 同名兼容
 
     // ── tab 1: 家族总览 ──
@@ -2349,39 +2393,50 @@
     const MENU_LABEL = { base_and_fast: '基名+fast', base: '只列基名', all: '全部变体', hidden: '隐藏' };
     function renderFamilies() {
       const rows = (mcFamilies && mcFamilies.families) || [];
-      document.getElementById('mc-count').textContent = '(' + rows.length + ' 家族 · 上游 ' + (mcFamilies.upstream_count || 0) + ' 名)';
+      const live = rows.filter((r) => (r.w30d && r.w30d.requests) > 0);
+      const dead = rows.length - live.length;
+      const showAll = document.getElementById('mc-show-all') && document.getElementById('mc-show-all').checked;
+      const shown = showAll ? rows : live;
+      document.getElementById('mc-count').textContent = '(' + shown.length + '/' + rows.length + ' 家族 · 上游 ' + (mcFamilies.upstream_count || 0) + ' 名' + (dead ? ' · ' + dead + ' 族 30d 零流量已收' : '') + ')';
       const tb = document.getElementById('mc-body');
       tb.innerHTML = '';
-      if (!rows.length) { tb.innerHTML = '<tr><td colspan="13" class="muted">无数据</td></tr>'; return; }
-      const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', fallback: '<span class="pill bad">兜底</span>' };
-      rows.forEach((r) => {
+      if (!shown.length) { tb.innerHTML = '<tr><td colspan="9" class="muted">无数据</td></tr>'; return; }
+      // 30d 面值最高者作基线 (迷你柱 100%)
+      const max30 = Math.max(1e-9, ...shown.map((r) => (r.w30d && r.w30d.face_usd) || 0));
+      const srcPill = { manual: '<span class="pill info" style="font-size:10px">手动</span>', builtin: '<span class="muted" style="font-size:10px">内置</span>', fallback: '<span class="pill bad" style="font-size:10px">兜底</span>' };
+      shown.forEach((r) => {
         const tr = document.createElement('tr');
         const w24 = r.w24h || {}, w7 = r.w7d || {}, w30 = r.w30d || {};
         const p = r.price || {};
         const ghost = r.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游 AvailableModels 无此家族 —— 误录/已下线">幽灵</span>' : '';
         const errRate = w24.requests ? ((w24.error_rate || 0) * 100).toFixed(1) + '%' : '—';
         const errCls = (w24.error_rate || 0) > 0.2 ? 'bad' : (w24.error_rate || 0) > 0.05 ? 'warn' : '';
-        const usdLane = w30.usd_per_lane_hour != null ? '$' + Number(w30.usd_per_lane_hour).toFixed(1) + '/h' : '<span class="muted">数据不足</span>';
+        const usdLane = w30.usd_per_lane_hour != null ? '$' + Number(w30.usd_per_lane_hour).toFixed(1) + '/h' : '—';
+        // 7d 面值柱 (与 30d 最高值同基线): 宽度 % + 颜色随 24h 流量
+        const w7pct = Math.min(100, ((w7.face_usd || 0) / max30) * 100);
+        const w30pct = Math.min(100, ((w30.face_usd || 0) / max30) * 100);
+        const trendColor = (w24.requests || 0) > 0 ? 'var(--ok)' : ((w7.requests || 0) > 0 ? 'var(--warn)' : 'var(--muted)');
         const rule = r.pace_rule;
         const ruleTxt = rule
-          ? (rule.exempt ? '<span class="pill ok">免限</span>'
-            : 'TTFT ' + (rule.ttft_floor_ms || 0) + 'ms · '
-              + (rule.speed_ratio != null ? '×' + rule.speed_ratio : (rule.pace_normal_tps || '沿用') + 'tps')
-              + (rule.max_output_tokens ? ' · ≤' + rule.max_output_tokens : ''))
-          : '<span class="muted">—</span>';
-        const statePill = r.hidden ? '<span class="pill bad">已隐藏</span>' : (r.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>');
+          ? (rule.exempt ? '<span class="pill ok" style="font-size:10px">免限</span>'
+            : '<span style="font-size:10px">TTFT' + (rule.ttft_floor_ms || 0) + '·'
+              + (rule.speed_ratio != null ? '×' + rule.speed_ratio : (rule.pace_normal_tps || '—') + 'tps')
+              + (rule.max_output_tokens ? '·≤' + rule.max_output_tokens : '') + '</span>')
+          : '';
+        const groupTxt = (r.groups || []).length ? '<span class="muted" style="font-size:10px">' + (r.groups || []).map(esc).join(',') + '</span>' : '';
+        const ruleGroup = [ruleTxt, groupTxt].filter(Boolean).join(' ') || '<span class="muted">—</span>';
+        const statePill = r.hidden ? '<span class="pill bad" style="font-size:10px">隐藏</span>' : (r.enabled ? '' : '<span class="pill bad" style="font-size:10px">停用</span>');
         tr.innerHTML =
-          '<td class="mono">' + esc(r.family) + ghost + '</td>' +
+          '<td class="mono">' + esc(r.family) + ghost + statePill + '</td>' +
           '<td class="mono">' + (r.variant_count || 0) + '</td>' +
           '<td></td><td></td>' +
-          '<td class="mono">$' + Number(p.input || 0).toFixed(2) + '/$' + Number(p.output || 0).toFixed(2) + '</td>' +
-          '<td>' + (srcPill[p.source] || esc(p.source || '')) + '</td>' +
-          '<td class="mono">' + (w24.requests || 0) + ' / <span class="' + errCls + '">' + errRate + '</span></td>' +
-          '<td class="mono">$' + Number(w7.face_usd || 0).toFixed(2) + '</td>' +
-          '<td class="mono">$' + Number(w30.face_usd || 0).toFixed(2) + ' · ' + usdLane + '</td>' +
-          '<td style="font-size:11px">' + ruleTxt + '</td>' +
-          '<td class="mono" style="font-size:11px">' + (r.groups || []).map(esc).join(', ') + '</td>' +
-          '<td>' + statePill + '</td><td></td>';
+          '<td class="mono" style="font-size:11px">$' + Number(p.input || 0).toFixed(2) + '/$' + Number(p.output || 0).toFixed(2) + ' ' + (srcPill[p.source] || '') + '</td>' +
+          '<td class="mono" style="font-size:11px">' + (w24.requests || 0) + ' <span class="' + errCls + '">' + errRate + '</span></td>' +
+          '<td class="mono" style="font-size:11px" title="7d $' + Number(w7.face_usd || 0).toFixed(2) + ' · 30d $' + Number(w30.face_usd || 0).toFixed(2) + '">' +
+            '<div style="display:flex;align-items:center;gap:4px"><div style="flex:1;height:6px;background:var(--bg2);border-radius:2px;position:relative;min-width:40px"><div style="position:absolute;left:0;top:0;bottom:0;width:' + w30pct.toFixed(1) + '%;background:' + trendColor + ';border-radius:2px;opacity:.85"></div><div style="position:absolute;left:0;top:0;bottom:0;width:' + w7pct.toFixed(1) + '%;background:' + trendColor + ';border-radius:2px"></div></div>' +
+            '<span>$' + Number(w30.face_usd || 0).toFixed(0) + '</span></div>' +
+            '<div class="muted" style="font-size:10px">' + usdLane + '</div></td>' +
+          '<td style="font-size:11px">' + ruleGroup + '</td><td></td>';
         // 菜单形态 (内联下拉)
         const menuSel = el('select', { style: 'font-size:11px' });
         Object.keys(MENU_LABEL).forEach((k) => {
@@ -2412,6 +2467,30 @@
           } catch (e) { mcMsg(e.message, true); }
         });
         tr.children[3].appendChild(tierSel);
+        // 档位禁选 chips (low/medium/high/max; 灭=被禁, 客户请求该档回落默认档)
+        const blocked = new Set(r.blocked_tiers || []);
+        const tierCell = tr.children[3];
+        const chipWrap = el('div', { style: 'display:flex;gap:2px;margin-top:2px' });
+        ['low', 'medium', 'high', 'max'].forEach((t) => {
+          const on = !blocked.has(t);
+          const chip = el('button', {
+            type: 'button',
+            class: on ? 'pill ok' : 'pill bad',
+            style: 'font-size:9px;padding:1px 6px;cursor:pointer;border:none;opacity:' + (on ? '1' : '0.55'),
+            title: on ? ('点击禁 ' + t + ' 档 (客户请求会回落默认档)') : ('已禁 ' + t + ' 档, 点击恢复'),
+          }, t);
+          chip.addEventListener('click', async () => {
+            const next = new Set(blocked);
+            if (next.has(t)) next.delete(t); else next.add(t);
+            try {
+              await api('/admin/api/models/family-rule', { method: 'POST', body: JSON.stringify({ family: r.family, blocked_tiers: [...next] }) });
+              mcMsg(r.family + ' 禁档 → ' + ([...next].join(',') || '无'));
+              await loadModelCenter();
+            } catch (e) { mcMsg(e.message, true); }
+          });
+          chipWrap.appendChild(chip);
+        });
+        tierCell.appendChild(chipWrap);
         // 操作: 展开变体 / 编辑定价 / 路由测试
         const act = tr.lastElementChild;
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '变体')).addEventListener('click', () => {
@@ -2419,8 +2498,33 @@
           if (ex) { ex.remove(); return; }
           const er = document.createElement('tr');
           er.id = 'mc-exp-' + r.family;
+          // 4 块关联信息: 变体 / 生效价 / 所属组 / 风控
           const vars = (r.variants || []).map((v) => '<span class="mono" style="font-size:11px">' + esc(v) + '</span>').join(' · ');
-          er.innerHTML = '<td></td><td colspan="12" style="font-size:11px">' + (vars || '<span class="muted">上游无变体</span>') + '</td>';
+          const p = r.price || {};
+          const priceSrc = { manual: '手动价', builtin: '内置价', fallback: '兜底价' }[p.source] || (p.source || '');
+          const priceTxt = '$' + Number(p.input || 0).toFixed(2) + ' / $' + Number(p.output || 0).toFixed(2) + ' / $' + Number(p.cache_read || 0).toFixed(2) + ' / $' + Number(p.cache_write || 0).toFixed(2) + ' <span class="muted">(' + esc(priceSrc) + ')</span>';
+          const groupTxt = (r.groups || []).length
+            ? (r.groups || []).map((g) => '<span class="pill info" style="font-size:10px;margin-right:2px">' + esc(g) + '</span>').join('')
+            : '<span class="muted">—</span>';
+          const pr = r.pace_rule;
+          const paceTxt = pr
+            ? ('<span style="font-size:11px">TTFT ≥ ' + (pr.ttft_floor_ms || 0) + 'ms · '
+              + (pr.speed_ratio != null ? '速度比 ×' + pr.speed_ratio : '正常 ' + (pr.pace_normal_tps || '—') + ' tps')
+              + ' · 降档 ' + (pr.pace_degraded_tps || '—') + ' tps'
+              + (pr.max_output_tokens ? ' · ≤' + pr.max_output_tokens + ' tok' : '')
+              + (pr.exempt ? ' <span class="pill ok" style="font-size:10px">免限</span>' : '') + '</span>')
+            : '<span class="muted">— (无规则, 走全局默认)</span>';
+          const w30 = r.w30d || {};
+          const statsTxt = '30d ' + (w30.requests || 0) + ' 请求 · $' + Number(w30.face_usd || 0).toFixed(2) + (w30.usd_per_lane_hour != null ? ' · $' + Number(w30.usd_per_lane_hour).toFixed(1) + '/槽·时' : '');
+          er.innerHTML = '<td></td><td colspan="8" style="font-size:11px;padding:10px 12px">' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">' +
+              '<div><div class="muted" style="font-size:10px;margin-bottom:2px">上游变体 (' + (r.variants || []).length + ')</div><div>' + (vars || '<span class="muted">上游无变体</span>') + '</div></div>' +
+              '<div><div class="muted" style="font-size:10px;margin-bottom:2px">生效价 in/out/cr/cw</div><div class="mono">' + priceTxt + '</div></div>' +
+              '<div><div class="muted" style="font-size:10px;margin-bottom:2px">所属模型组</div><div>' + groupTxt + '</div></div>' +
+              '<div><div class="muted" style="font-size:10px;margin-bottom:2px">风控规则</div><div>' + paceTxt + '</div></div>' +
+            '</div>' +
+            '<div class="muted" style="font-size:10px;margin-top:6px;border-top:1px solid var(--bg2);padding-top:4px">' + statsTxt + '</div>' +
+            '</td>';
           tr.after(er);
         });
         act.appendChild(el('button', { class: 'ghost', type: 'button' }, '定价')).addEventListener('click', () => {
@@ -2442,39 +2546,49 @@
     function renderMenu() {
       const menu = (mcFamilies && mcFamilies.menu) || [];
       const fams = (mcFamilies && mcFamilies.families) || [];
-      document.getElementById('mc-menu-count').textContent = '(' + menu.length + ' 项)';
+      // 按家族分组: 基名 + 基名-fast 折叠到同一行
+      const byFam = new Map();
+      menu.forEach((id) => {
+        const base = id.replace(/-fast$/, '');
+        if (!byFam.has(base)) byFam.set(base, { base, ids: [] });
+        byFam.get(base).ids.push(id);
+      });
+      document.getElementById('mc-menu-count').textContent = '(' + byFam.size + ' 家族 · ' + menu.length + ' 项)';
       const tb = document.getElementById('mc-menu-body');
       tb.innerHTML = '';
       if (!menu.length) { tb.innerHTML = '<tr><td colspan="4" class="muted">空</td></tr>'; return; }
-      menu.forEach((id) => {
-        const fam = fams.find((f) => f.family === id.replace(/-fast$/, ''));
-        const isFast = id.endsWith('-fast') && fam;
-        const isAlias = id === 'kimi-k3';
-        const isExact = fam && (fam.variants || []).includes(id);
+      byFam.forEach(({ base, ids }) => {
+        const fam = fams.find((f) => f.family === base);
+        const isAlias = base === 'kimi-k3';
+        const isExact = fam && (fam.variants || []).includes(base);
+        const hasFast = ids.some((id) => id.endsWith('-fast'));
         let kind, route, why;
         if (isAlias) {
           kind = '<span class="pill info">别名</span>';
           route = 'kimi-k3-max/high/low (按请求特征)';
           why = '网关侧自动路由别名, 上游无同名, 永久保留';
-        } else if (isFast) {
-          kind = '<span class="pill warn">fast 入口</span>';
-          route = (fam.variants || []).filter((v) => v.endsWith('-fast')).slice(0, 4).join(', ') || '(无 -fast 变体)';
-          why = '价格 ×2, 按思考档路由到 -<档>-fast 真变体';
         } else if (isExact) {
           kind = '<span class="pill ok">真名</span>';
-          route = id + ' (原样透传)';
+          route = base + ' (原样透传)';
           why = '上游 AvailableModels 精确存在';
         } else if (fam) {
           kind = '<span class="pill info">基名</span>';
-          route = (fam.variants || []).slice(0, 5).join(', ') + ((fam.variants || []).length > 5 ? ' …' : '');
-          why = '家族基名, 按默认档/请求参数路由到上游真变体';
+          const v = fam.variants || [];
+          route = v.slice(0, 4).join(', ') + (v.length > 4 ? ' … (' + v.length + ' 变体)' : ' (' + v.length + ' 变体)');
+          why = '家族基名, 按默认档/请求参数路由';
         } else {
           kind = '<span class="muted">手动</span>';
           route = '(原样透传)';
           why = '注册表手动条目 (逃生舱), 上游未确认';
         }
+        // 禁档徽标
+        const blockedBadge = (fam && (fam.blocked_tiers || []).length)
+          ? ' <span class="pill bad" style="font-size:10px" title="禁: ' + esc((fam.blocked_tiers || []).join(', ')) + ' — 客户请求这些档会回落默认档">禁 ' + (fam.blocked_tiers || []).length + ' 档</span>'
+          : '';
+        // fast 折叠徽标
+        const fastBadge = hasFast ? ' <span class="pill warn" style="font-size:10px" title="/v1/models 同列 ' + esc(base) + '-fast, 价格 ×2">+fast</span>' : '';
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td class="mono">' + esc(id) + '</td><td>' + kind + '</td>' +
+        tr.innerHTML = '<td class="mono">' + esc(base) + blockedBadge + fastBadge + '</td><td>' + kind + '</td>' +
           '<td class="mono" style="font-size:11px">' + esc(route) + '</td>' +
           '<td style="font-size:11px" class="muted">' + esc(why) + '</td>';
         tb.appendChild(tr);
@@ -2495,12 +2609,16 @@
         const d = await api('/admin/api/models/route-preview?' + q.toString());
         const p = d.price || {};
         const rule = d.pace_rule;
+        const blocked = (d.family_rule && d.family_rule.blocked_tiers) || [];
+        const tlReq = tl || '';
+        const wasBlocked = tlReq && blocked.includes(tlReq);
         document.getElementById('rt-out').textContent =
           '输入:        ' + d.input + '\n' +
           '闸门:        ' + d.gate + (d.upstream_exact ? ' (上游精确名)' : '') + '\n' +
           '路由结果:    ' + (d.resolved ? d.input + ' → ' + d.resolved : '(不重写, 原样透传)') + '\n' +
+          (wasBlocked ? '⚠️ 档位拦截:  ' + tlReq + ' 被禁, 已回落 (家族规则: 禁 ' + blocked.join(', ') + ')\n' : '') +
           '发给 Cursor: ' + d.final_model + '\n' +
-          '家族:        ' + d.family + (d.family_rule ? ' (默认档 ' + (d.family_rule.default_tier || 'auto') + ')' : ' (无自定义规则)') + '\n' +
+          '家族:        ' + d.family + (d.family_rule ? ' (默认档 ' + (d.family_rule.default_tier || 'auto') + (blocked.length ? ' · 禁 ' + blocked.join(',') : '') + ')' : ' (无自定义规则)') + '\n' +
           '价格:        in $' + Number(p.input || 0).toFixed(2) + ' / out $' + Number(p.output || 0).toFixed(2) + ' / cr $' + Number(p.cache_read || 0).toFixed(2) + ' / cw $' + Number(p.cache_write || 0).toFixed(2) + ' /1M\n' +
           '风控规则:    ' + (rule ? JSON.stringify(rule) : '(无, 沿用套餐/全局)');
       } catch (e) { mcMsg(e.message, true); }
@@ -2557,35 +2675,121 @@
       const q = document.getElementById('md-q').value.trim().toLowerCase();
       const src = document.getElementById('md-src').value;
       const rows = mdModels.filter((m) => (!q || m.model.toLowerCase().includes(q)) && (!src || m.source === src));
-      document.getElementById('md-count').textContent = '(' + rows.length + '/' + mdModels.length + ')';
+      // 主模型 vs 变体判定 (与后端 family_base 同规则: 剥掉 -(thinking-)?(low|medium|high|xhigh|max|none|minimal|extra-high)(-fast)?$ 和 -fast)
+      const VARIANT_RE = /-(thinking-)?(low|medium|high|xhigh|max|none|minimal|extra-high)(-fast)?$|-fast$/;
+      const familyBase = (m) => { let s = m; while (true) { const t = s.replace(VARIANT_RE, ''); if (t === s) return s; s = t; } };
+      // 三段分区: 主模型 (基名) / 变体覆盖 (有手动价的变体条目) / 幽灵
+      // 「禁止出现不存在的模型」: 幽灵默认不参与主表, 收进「幽灵」分区, 且分区头默认折叠
+      const live = rows.filter((m) => !m.hidden && !m.upstream_missing && m.source !== 'seen' && familyBase(m.model) === m.model);
+      const variants = rows.filter((m) => !m.hidden && !m.upstream_missing && familyBase(m.model) !== m.model && m.source !== 'seen');
+      const seenOnly = rows.filter((m) => !m.hidden && !m.upstream_missing && m.source === 'seen');
+      const ghosts = rows.filter((m) => !m.hidden && m.upstream_missing);
+      const hiddenRows = rows.filter((m) => m.hidden);
+      document.getElementById('md-count').textContent = '(主 ' + live.length + ' · 变体 ' + variants.length + ' · 未定价 ' + seenOnly.length + ' · 幽灵 ' + ghosts.length + (hiddenRows.length ? ' · 已隐藏 ' + hiddenRows.length : '') + ')';
       const tb = document.getElementById('md-body');
       tb.innerHTML = '';
-      if (!rows.length) tb.innerHTML = '<tr><td colspan="11" class="muted">无匹配</td></tr>';
+      if (!rows.length) { tb.innerHTML = '<tr><td colspan="11" class="muted">无匹配</td></tr>'; return; }
       const srcPill = { manual: '<span class="pill info">手动</span>', builtin: '<span class="muted">内置</span>', seen: '<span class="pill warn">未定价</span>' };
-      const visible = rows.filter((m) => !m.hidden);
-      const hiddenRows = rows.filter((m) => m.hidden);
-      const renderRow = (m) => {
+      // 变体的基名及其生效价 (covered_by)
+      const basePrice = (variant) => {
+        const base = familyBase(variant);
+        const baseRow = mdModels.find((m) => m.model === base);
+        return baseRow ? { base, price: baseRow } : { base, price: null };
+      };
+      // 主模型罩住的变体数
+      const coveredCount = (base) => mdModels.filter((m) => m.model !== base && familyBase(m.model) === base).length;
+      // 一键按家族定价: 从变体名推基名, 预填表单
+      const fillFamilyForm = (variant) => {
+        const base = familyBase(variant);
+        document.getElementById('md-model-add').open = true;
+        const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
+        set('mp-model', base); set('mp-note', '按 ' + variant + ' 家族定');
+        document.getElementById('mp-enabled').checked = true;
+        document.getElementById('mp-model').scrollIntoView({ block: 'center' });
+        mdMsg('已预填基名 ' + base + ' —— 前缀匹配会罩住所有变体, 保存后该 seen 行消失');
+      };
+      const renderRow = (m, section) => {
         const tr = document.createElement('tr');
+        if (section === 'ghost') tr.style.background = 'rgba(255,80,80,.06)';
+        if (section === 'variant') tr.style.background = 'rgba(255,220,100,.04)';
         const ghostBadge = m.upstream_missing ? ' <span class="pill bad" style="font-size:10px" title="上游 AvailableModels 无此模型 —— 误录的幽灵条目, 计价仍按影子价兜底">幽灵·上游不存在</span>' : '';
+        // 变体行: 显示「← 基名 罩住」
+        let coveredTag = '';
+        if (section === 'variant') {
+          const { base, price } = basePrice(m.model);
+          if (price) {
+            const samePrice = Math.abs((price.input_per_m||0) - (m.input_per_m||0)) < 1e-9 && Math.abs((price.output_per_m||0) - (m.output_per_m||0)) < 1e-9;
+            coveredTag = ' <span class="pill ' + (samePrice ? 'info' : 'warn') + '" style="font-size:10px" title="基名 ' + esc(base) + ' 价: $' + Number(price.input_per_m||0).toFixed(2) + '/$' + Number(price.output_per_m||0).toFixed(2) + (samePrice ? ' — 与变体价相同, 可清理' : ' — 与变体价不同, 差异化保留') + '">← ' + esc(base) + (samePrice ? ' 同价' : ' 差价') + '</span>';
+          }
+        }
+        // 主模型行: 显示罩住多少变体
+        let coverTag = '';
+        if (section === 'live') {
+          const n = coveredCount(m.model);
+          if (n > 0) coverTag = ' <span class="muted" style="font-size:10px" title="最长前缀匹配罩住这些变体">罩 ' + n + '</span>';
+        }
         tr.innerHTML =
-          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + ghostBadge + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td>' +
+          '<td class="mono">' + esc(m.model) + (m.upstream ? ' <span class="pill ok" style="font-size:10px" title="上游 AvailableModels 确认存在">上游✓</span>' : '') + ghostBadge + coveredTag + coverTag + '</td><td>' + (srcPill[m.source] || esc(m.source)) + '</td>' +
           ['input_per_m', 'output_per_m', 'cache_read_per_m', 'cache_write_per_m'].map((k) => '<td class="mono">$' + Number(m[k] || 0).toFixed(2) + '</td>').join('') +
-          '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px">' + (m.groups || []).map(esc).join(', ') + '</td>' +
-          '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td></td>';
-        const act = tr.lastElementChild;
-        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => fillModelForm(m));
-        act.appendChild(el('button', { class: 'ghost', type: 'button' }, m.enabled ? '停用' : '启用')).addEventListener('click', async () => {
-          await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: !m.enabled }) });
-          await loadModelsPage();
+          '<td class="mono">' + (m.requests_30d || 0) + '</td><td class="mono" style="font-size:11px"></td>' +
+          '<td>' + (m.enabled ? '<span class="pill ok">允许</span>' : '<span class="pill bad">停用</span>') + '</td><td style="white-space:nowrap"></td>';
+        // 所属组: chips 可点 (跳模型组 tab 并滚动)
+        const groupTd = tr.children[6];
+        (m.groups || []).forEach((g) => {
+          const chip = el('button', { type: 'button', class: 'pill info', style: 'font-size:10px;padding:1px 6px;margin-right:2px;cursor:pointer;border:none', title: '跳模型组 tab 编辑 ' + g }, esc(g));
+          chip.addEventListener('click', () => {
+            document.querySelector('#mc-panel .tabs button[data-tab="groups"]').click();
+            setTimeout(() => {
+              const rows = document.querySelectorAll('#mg-body tr');
+              rows.forEach((row) => {
+                if (row.firstElementChild && row.firstElementChild.textContent.trim() === g) {
+                  row.scrollIntoView({ block: 'center' });
+                  row.style.background = 'rgba(255,220,100,.15)';
+                  setTimeout(() => { row.style.background = ''; }, 1500);
+                }
+              });
+            }, 50);
+          });
+          groupTd.appendChild(chip);
         });
-        if (m.hidden) {
-          // 已隐藏的内置/seen 行: 提供恢复
-          act.appendChild(el('button', { class: 'ghost', type: 'button' }, '恢复')).addEventListener('click', async () => {
-            await api('/admin/api/models/' + encodeURIComponent(m.model) + '/unhide', { method: 'POST' });
+        if (!(m.groups || []).length) groupTd.innerHTML = '<span class="muted">—</span>';
+        const act = tr.lastElementChild;
+        // seen 未定价行: 主推「按家族定」(宽按钮)
+        if (m.source === 'seen' && section !== 'ghost') {
+          const b = el('button', { type: 'button', style: 'font-size:12px;padding:4px 12px', title: '以家族基名建一条手动价, 前缀罩住所有变体' }, '按家族定 →');
+          b.addEventListener('click', () => fillFamilyForm(m.model));
+          act.appendChild(b);
+        }
+        // 变体行 + 变体价与基名同价: 主推「让基名罩」(删变体条目)
+        if (section === 'variant') {
+          const { base, price } = basePrice(m.model);
+          const samePrice = price && Math.abs((price.input_per_m||0) - (m.input_per_m||0)) < 1e-9 && Math.abs((price.output_per_m||0) - (m.output_per_m||0)) < 1e-9;
+          if (samePrice) {
+            const b = el('button', { type: 'button', style: 'font-size:12px;padding:4px 12px', title: '删除变体条目, 让基名 ' + base + ' 的价通过前缀罩住 (价相同, 无影响)' }, '让基名罩 →');
+            b.addEventListener('click', async () => {
+              await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
+              mdMsg(m.model + ' 已删, 现由 ' + base + ' 罩住');
+              await loadModelsPage();
+            });
+            act.appendChild(b);
+          }
+        }
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '编辑')).addEventListener('click', () => fillModelForm(m));
+        // 幽灵行: 主推「下架」宽按钮
+        if (section === 'ghost') {
+          const b = el('button', { class: 'danger', type: 'button', style: 'font-size:12px;padding:4px 12px', title: '禁用+隐藏, 从 /v1/models 消失, 计价/账本不受影响' }, '下架');
+          b.addEventListener('click', async () => {
+            if (!confirm('下架幽灵 ' + m.model + '？上游根本不存在, 客户点名它只会 404')) return;
+            await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: false }) });
+            await api('/admin/api/models/' + encodeURIComponent(m.model), { method: 'DELETE' });
             await loadModelsPage();
           });
+          act.appendChild(b);
         } else {
-          // #7 删除语义统一为「下架」: 禁用 + 隐藏 (保留条目, 不出现在任何列表), 手动条目且无账本引用时可「真删」
+          act.appendChild(el('button', { class: 'ghost', type: 'button' }, m.enabled ? '停用' : '启用')).addEventListener('click', async () => {
+            await api('/admin/api/models', { method: 'POST', body: JSON.stringify({ model: m.model, enabled: !m.enabled }) });
+            await loadModelsPage();
+          });
           const isManual = m.source === 'manual';
           const hasRefs = (m.requests_30d || 0) > 0;
           const delLabel = isManual && !hasRefs ? '真删' : '下架';
@@ -2605,13 +2809,24 @@
         }
         return tr;
       };
-      visible.forEach((m) => tb.appendChild(renderRow(m)));
+      // 分区渲染
+      const section = (label, list, hint, sectionKey) => {
+        if (!list.length) return;
+        const sep = document.createElement('tr');
+        sep.innerHTML = '<td colspan="11" style="padding:6px 8px;background:var(--bg2);font-size:11px;font-weight:600">' + esc(label) + ' <span class="muted">(' + list.length + ')</span>' + (hint ? ' <span class="muted" style="font-weight:400">—— ' + esc(hint) + '</span>' : '') + '</td>';
+        tb.appendChild(sep);
+        list.forEach((m) => tb.appendChild(renderRow(m, sectionKey)));
+      };
+      section('主模型 (基名定价, 罩住变体)', live, '客户可见, 定价即前缀罩住所有变体');
+      section('变体覆盖 (手动价的变体条目)', variants, '基名已有价时这些条目是冗余 —— 点「让基名罩」删掉; 价不同时保留作差异化', 'variant');
+      section('未定价 (账本见过)', seenOnly, '上游在变体级返回, 计价走家族前缀兜底 —— 点「按家族定」一行搞定', 'seen');
+      section('幽灵 (上游不存在)', ghosts, '误录/已下线, 客户点名 404 —— 点「下架」清出列表', 'ghost');
       if (hiddenRows.length) {
         const sep = document.createElement('tr');
         sep.innerHTML = '<td colspan="11" style="padding:2px 8px"><span class="muted" style="font-size:11px">已隐藏 (' + hiddenRows.length + ') —— 软删的内置/账本行, 计价不受影响</span> <button type="button" class="ghost" id="md-hidden-toggle" style="font-size:11px">展开</button></td>';
         tb.appendChild(sep);
         const box = [];
-        hiddenRows.forEach((m) => { const r = renderRow(m); r.style.display = 'none'; r.style.opacity = '0.55'; tb.appendChild(r); box.push(r); });
+        hiddenRows.forEach((m) => { const r = renderRow(m, 'live'); r.style.display = 'none'; r.style.opacity = '0.55'; tb.appendChild(r); box.push(r); });
         sep.querySelector('#md-hidden-toggle').addEventListener('click', (e) => {
           const btn = e.target;
           const open = btn.textContent === '收起';
@@ -2621,6 +2836,28 @@
       }
     }
     ['md-q', 'md-src'].forEach((id) => document.getElementById(id).addEventListener('input', renderModels));
+    // 清理变体价: 先 dry-run 报告, 确认后真删
+    document.getElementById('md-prune-variants').addEventListener('click', async () => {
+      try {
+        const d = await api('/admin/api/models/prune-variant-prices?dry_run=1', { method: 'POST', body: '{}' });
+        const pruned = d.pruned || [], kept = d.kept || [];
+        if (!pruned.length) { mdMsg('没有可清理的变体价 (所有变体要么基名无价, 要么价不同需保留)'); return; }
+        const preview = pruned.slice(0, 8).map((p) => '  ' + p.model + ' ← ' + p.covered_by).join('\n');
+        if (!confirm('将删除 ' + pruned.length + ' 条变体价 (基名同价罩住, 无影响):\n' + preview + (pruned.length > 8 ? '\n  … 共 ' + pruned.length + ' 条' : '') + '\n\n保留 ' + kept.length + ' 条差异化变体价。确认?')) return;
+        const r = await api('/admin/api/models/prune-variant-prices', { method: 'POST', body: '{}' });
+        mdMsg('已清理 ' + (r.pruned || []).length + ' 条变体价, 保留 ' + (r.kept || []).length + ' 条差异化');
+        await loadModelsPage();
+      } catch (e) { mdMsg(e.message, true); }
+    });
+    // 从上游同步主模型 (全流程: 拉上游 → 归类 → 建主模型条目)
+    document.getElementById('md-sync-upstream').addEventListener('click', async () => {
+      mdMsg('正在从上游同步…');
+      try {
+        const d = await api('/admin/api/models/sync-from-upstream', { method: 'POST', body: '{}' });
+        mdMsg('✅ 同步完成: ' + d.families_total + ' 家族 · 新增 ' + d.families_added + ' 主模型 · 变体 ' + d.variants_seen + ' · 跳过视频/图片 ' + d.skipped_video_image);
+        await loadModelsPage();
+      } catch (e) { mdMsg(e.message, true); }
+    });
     function fillModelForm(m) {
       document.getElementById('md-model-add').open = true;
       const set = (id, v) => { document.getElementById(id).value = v == null ? '' : v; };
@@ -3876,12 +4113,14 @@
         : '<tr><td colspan="3" class="muted">暂无</td></tr>';
       const tb = document.getElementById('pu-body');
       tb.innerHTML = '';
-      if (!users.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无用户</td></tr>'; return; }
+      if (!users.length) { tb.innerHTML = '<tr><td colspan="9" class="muted">暂无用户</td></tr>'; return; }
       users.forEach((u) => {
         const tr = document.createElement('tr');
         tr.innerHTML =
           '<td class="mono">' + esc(u.id) + '</td><td>' + esc(u.username) + '</td>' +
           '<td class="mono">¥' + Number(u.balance_rmb || 0).toFixed(2) + '</td>' +
+          '<td class="mono" title="已充 $' + Number(u.quota_credited_usd || 0).toFixed(2) + ' / 已用 $' + Number(u.quota_used_usd || 0).toFixed(2) + '">$' + Number(u.quota_remaining_usd || 0).toFixed(2) + '</td>' +
+          '<td class="mono">' + (u.keys_count || 0) + '</td>' +
           '<td class="muted">' + esc(u.group_id || '—') + '</td>' +
           '<td class="mono" style="font-size:11px">' + esc(u.aff_code || '') + '</td>' +
           '<td>' + (u.enabled ? '<span class="pill ok">正常</span>' : '<span class="pill bad">禁用</span>') + '</td><td></td>';
@@ -3894,6 +4133,17 @@
           try {
             const r = await api('/admin/api/portal/users/' + u.id + '/balance', { method: 'POST', body: JSON.stringify({ delta_rmb: n, reason: 'admin_add' }) });
             toast('pu-msg', u.username + ' 新余额 ¥' + Number(r.balance_rmb).toFixed(2));
+            loadPortalUsers();
+          } catch (e) { toast('pu-msg', e.message, true); }
+        });
+        act.appendChild(el('button', { class: 'ghost', type: 'button' }, '调定额')).addEventListener('click', async () => {
+          const v = prompt('给用户 ' + u.username + ' 调定额 $ (负数=扣减, 当前剩 $' + Number(u.quota_remaining_usd || 0).toFixed(2) + '):', '10');
+          if (v === null) return;
+          const n = parseFloat(v);
+          if (!isFinite(n) || n === 0) return toast('pu-msg', '金额非法', true);
+          try {
+            const r = await api('/admin/api/portal/users/' + u.id + '/quota', { method: 'POST', body: JSON.stringify({ delta_usd: n }) });
+            toast('pu-msg', u.username + ' 定额剩 $' + Number(r.quota_remaining_usd).toFixed(2));
             loadPortalUsers();
           } catch (e) { toast('pu-msg', e.message, true); }
         });

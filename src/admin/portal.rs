@@ -621,9 +621,21 @@ pub async fn api_admin_portal_create_user(Json(b): Json<CreateUserBody>) -> Resp
     }
 }
 
-/// GET /admin/api/portal/users — 用户列表
-pub async fn api_admin_portal_list_users() -> Response {
-    let users: Vec<Value> = portal().list_users().iter().map(user_json).collect();
+/// GET /admin/api/portal/users — 用户列表 (带定额池余额)
+pub async fn api_admin_portal_list_users(State(state): State<Arc<AppState>>) -> Response {
+    let users: Vec<Value> = portal()
+        .list_users()
+        .iter()
+        .map(|u| {
+            let mut v = user_json(u);
+            let (c, used) = state.card_store.quota_totals(&u.id);
+            v["quota_credited_usd"] = json!(c as f64 / 1e6);
+            v["quota_used_usd"] = json!(used as f64 / 1e6);
+            v["quota_remaining_usd"] = json!(((c - used).max(0)) as f64 / 1e6);
+            v["keys_count"] = json!(portal().list_keys(&u.id).len());
+            v
+        })
+        .collect();
     Json(json!({"users": users, "groups": portal().list_groups()})).into_response()
 }
 

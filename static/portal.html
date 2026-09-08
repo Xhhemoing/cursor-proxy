@@ -19,12 +19,14 @@
   .muted { color: var(--muted); }
   button { font: inherit; padding: 6px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--bg); border-radius: 6px; cursor: pointer; }
   button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  button.sm { padding: 2px 8px; font-size: 11px; }
   button:hover { opacity: 0.85; }
   input, select { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); color: var(--ink); }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
   .pill.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
   .pill.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
   .pill.bad { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+  .pill.info { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
 
   /* 登录页 */
   #login-view { display: flex; align-items: center; justify-content: center; height: 100vh; }
@@ -47,12 +49,12 @@
   .topbar .who { font-size: 13px; }
   .topbar .bal { font-family: var(--mono); font-weight: 600; color: var(--ok); }
   main { flex: 1; overflow: auto; padding: 20px; }
-  .page { display: none; max-width: 900px; margin: 0 auto; }
+  .page { display: none; max-width: 960px; margin: 0 auto; }
   .page.active { display: block; }
   .card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 14px; }
   .card h3 { margin: 0 0 10px; font-size: 15px; }
   .stat-row { display: flex; gap: 14px; flex-wrap: wrap; }
-  .stat { flex: 1; min-width: 140px; padding: 14px; background: var(--bg); border-radius: 8px; }
+  .stat { flex: 1; min-width: 130px; padding: 14px; background: var(--bg); border-radius: 8px; }
   .stat .l { font-size: 12px; color: var(--muted); }
   .stat .v { font: 600 22px var(--mono); margin-top: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -68,6 +70,15 @@
   .toast { position: fixed; top: 20px; right: 20px; padding: 10px 18px; background: var(--ink); color: var(--bg); border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 99; }
   .toast.show { opacity: 1; }
   .toast.err { background: var(--bad); }
+  .modal-mask { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center; }
+  .modal-box { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 24px; max-width: 480px; width: 92%; }
+  .modal-box h3 { margin: 0 0 12px; }
+  .form-row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; font-size: 13px; }
+  .form-row label { flex: 0 0 76px; color: var(--muted); }
+  .form-row input, .form-row select { flex: 1; }
+  .key-line { display: flex; align-items: center; gap: 6px; }
+  .key-line code { font-size: 11px; word-break: break-all; }
+  .sec-title { font-size: 13px; color: var(--muted); margin: 18px 0 8px; }
 </style>
 </head>
 <body>
@@ -94,8 +105,9 @@
     <nav id="nav">
       <a href="#dashboard" data-page="dashboard" class="active">首页</a>
       <a href="#plans" data-page="plans">购买套餐</a>
+      <a href="#keys" data-page="keys">我的 Key</a>
       <a href="#cards" data-page="cards">我的套餐</a>
-      <a href="#balance" data-page="balance">余额</a>
+      <a href="#balance" data-page="balance">钱包</a>
       <a href="#aff" data-page="aff">邀请</a>
     </nav>
     <span class="who"><span id="who-name">–</span> · 余额 <span class="bal" id="who-bal">¥0</span></span>
@@ -104,39 +116,70 @@
   <main>
     <!-- 首页 -->
     <div class="page active" id="page-dashboard">
-      <!-- 到期提醒横幅 -->
       <div id="expiry-banner" style="display:none;background:linear-gradient(90deg,var(--warn) 0%,var(--bad) 100%);color:#fff;padding:10px 16px;border-radius:8px;margin-bottom:14px;font-size:13px">
         <span id="expiry-text"></span>
-        <button class="ghost" style="background:rgba(255,255,255,0.2);border-color:transparent;color:#fff;padding:4px 12px;margin-left:12px;font-size:12px" onclick="location.hash='#plans'">立即续费</button>
+        <button class="ghost" style="background:rgba(255,255,255,0.2);border-color:transparent;color:#fff;padding:4px 12px;margin-left:12px;font-size:12px" onclick="location.hash='#cards'">去处理</button>
       </div>
       <div class="stat-row">
-        <div class="stat"><div class="l">账户余额</div><div class="v" id="d-balance">¥0</div></div>
-        <div class="stat"><div class="l">我的套餐</div><div class="v" id="d-cards">0</div></div>
+        <div class="stat"><div class="l">余额 ¥</div><div class="v" id="d-balance">¥0</div></div>
+        <div class="stat"><div class="l">定额剩余 $</div><div class="v" id="d-quota">$0</div></div>
         <div class="stat"><div class="l">有效套餐</div><div class="v" id="d-active">0</div></div>
-        <div class="stat"><div class="l">邀请人数</div><div class="v" id="d-invited">0</div></div>
+        <div class="stat"><div class="l">我的 Key</div><div class="v" id="d-keys">0</div></div>
       </div>
       <div class="card">
         <h3>有效套餐</h3>
         <div id="d-cards-list" class="muted">加载中…</div>
       </div>
+      <div class="card">
+        <h3>我的 Key</h3>
+        <div id="d-keys-list" class="muted">加载中…</div>
+      </div>
     </div>
 
     <!-- 购买套餐 -->
     <div class="page" id="page-plans">
-      <h2 style="margin:0 0 14px">购买套餐</h2>
-      <div class="plan-grid" id="plans-grid">加载中…</div>
+      <h2 style="margin:0 0 6px">定额卡 <span class="muted" style="font-size:12px;font-weight:400">购买后额度直接充入钱包</span></h2>
+      <div class="plan-grid" id="plans-quota" style="margin-bottom:22px">加载中…</div>
+      <h2 style="margin:0 0 6px">限时畅饮 <span class="muted" style="font-size:12px;font-weight:400">时长 × 并发自由搭配, 购买后不激活</span></h2>
+      <div class="plan-grid" id="plans-unlimited">加载中…</div>
     </div>
 
-    <!-- 叠加选择弹窗 -->
-    <div id="stack-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
-      <div style="background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:480px;width:90%">
-        <h3 style="margin:0 0 12px">选择叠加方式</h3>
-        <div id="stack-info" class="muted" style="font-size:13px;margin-bottom:16px"></div>
-        <div id="stack-grid" style="display:grid;gap:8px;margin-bottom:16px"></div>
+    <!-- 费率购买弹窗 (时长×并发) -->
+    <div class="modal-mask" id="rate-modal">
+      <div class="modal-box">
+        <h3 id="rate-title">购买畅饮卡</h3>
+        <div class="muted" id="rate-sub" style="font-size:12px;margin-bottom:14px"></div>
+        <div class="form-row"><label>时长</label><input id="rate-hours" type="range" min="1" max="720" value="24" style="flex:1"><span class="mono" id="rate-hours-v" style="flex:0 0 64px;text-align:right">24h</span></div>
+        <div class="form-row"><label>并发槽</label><input id="rate-slots" type="range" min="1" max="4" value="1" style="flex:1"><span class="mono" id="rate-slots-v" style="flex:0 0 64px;text-align:right">1 槽</span></div>
+        <div style="font:700 22px var(--mono);color:var(--ok);margin:8px 0 16px" id="rate-price">¥0</div>
+        <div class="muted" style="font-size:12px;margin-bottom:14px">购买后不激活 — 首次调用或在「我的套餐」手动激活才开始计时</div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button class="ghost" id="stack-cancel">取消</button>
-          <button id="stack-confirm">确认购买</button>
+          <button class="ghost" id="rate-cancel">取消</button>
+          <button id="rate-confirm">确认购买</button>
         </div>
+      </div>
+    </div>
+
+    <!-- 我的 Key -->
+    <div class="page" id="page-keys">
+      <h2 style="margin:0 0 14px">我的 Key</h2>
+      <div class="card">
+        <h3>新建 Key</h3>
+        <div class="form-row"><label>名称</label><input id="nk-name" placeholder="如 工作机 / agent-1"></div>
+        <div class="form-row"><label>模式</label>
+          <select id="nk-mode"><option value="quota">定额 (烧钱包额度)</option><option value="card">畅饮卡 (绑定一张卡)</option></select>
+        </div>
+        <div class="form-row" id="nk-card-row" style="display:none"><label>绑定卡</label><select id="nk-card"></select></div>
+        <div class="form-row" id="nk-conc-row"><label>并发帽</label><input id="nk-conc" type="number" min="1" max="8" value="2" style="width:80px"> <span class="muted" style="font-size:12px">定额模式有效, 1-8</span></div>
+        <div style="text-align:right"><button id="nk-submit">创建 Key</button></div>
+        <div id="nk-out" class="mono" style="display:none;margin-top:10px;padding:10px;background:var(--bg);border-radius:8px;font-size:12px"></div>
+      </div>
+      <div class="card">
+        <h3>已有 Key</h3>
+        <table>
+          <thead><tr><th>名称</th><th>Key</th><th>模式</th><th>绑定/并发</th><th>状态</th><th></th></tr></thead>
+          <tbody id="keys-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+        </table>
       </div>
     </div>
 
@@ -145,34 +188,60 @@
       <h2 style="margin:0 0 14px">我的套餐</h2>
       <div class="card">
         <table>
-          <thead><tr><th>套餐</th><th>Key</th><th>状态</th><th>剩余时间</th><th>已用额度</th><th>实付</th><th></th></tr></thead>
-          <tbody id="cards-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+          <thead><tr><th>套餐</th><th>状态</th><th>剩余/时长</th><th>并发槽</th><th>实付</th><th>已绑 Key</th><th>操作</th></tr></thead>
+          <tbody id="cards-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
         </table>
       </div>
+      <div class="card muted" style="font-size:12px">畅饮卡首次调用自动激活; 加时按当前槽数×费率折算; 减槽立即生效不退款</div>
     </div>
 
-    <!-- 临时叠加弹窗 -->
-    <div id="boost-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
-      <div style="background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:420px;width:90%">
-        <h3 style="margin:0 0 12px">临时加并发</h3>
-        <div id="boost-info" class="muted" style="font-size:13px;margin-bottom:16px"></div>
-        <label style="display:block;margin-bottom:12px">加几个槽 (1-4) <input id="boost-slots" type="number" min="1" max="4" value="1" style="width:60px"></label>
-        <div id="boost-price" style="font:600 18px var(--mono);color:var(--ok);margin-bottom:16px"></div>
+    <!-- 加时弹窗 -->
+    <div class="modal-mask" id="extend-modal">
+      <div class="modal-box">
+        <h3>套餐加时</h3>
+        <div class="muted" id="extend-info" style="font-size:12px;margin-bottom:14px"></div>
+        <div class="form-row"><label>加时长</label><input id="extend-hours" type="number" min="1" max="2160" value="24" style="width:100px"> 小时</div>
+        <div style="font:700 20px var(--mono);color:var(--ok);margin:8px 0 16px" id="extend-price">¥0</div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button class="ghost" id="boost-cancel">取消</button>
-          <button id="boost-confirm">确认支付</button>
+          <button class="ghost" id="extend-cancel">取消</button>
+          <button id="extend-confirm">确认加时</button>
         </div>
       </div>
     </div>
 
-    <!-- 余额 -->
+    <!-- 改槽弹窗 -->
+    <div class="modal-mask" id="slots-modal">
+      <div class="modal-box">
+        <h3>调整并发槽</h3>
+        <div class="muted" id="slots-info" style="font-size:12px;margin-bottom:14px"></div>
+        <div class="form-row"><label>并发槽</label><input id="slots-n" type="number" min="1" max="4" value="1" style="width:80px"></div>
+        <div style="font:700 20px var(--mono);color:var(--ok);margin:8px 0 6px" id="slots-price">¥0</div>
+        <div class="muted" style="font-size:12px;margin-bottom:14px">增槽按剩余时间折算扣款; 减槽立即生效不退款</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="ghost" id="slots-cancel">取消</button>
+          <button id="slots-confirm">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 钱包 -->
     <div class="page" id="page-balance">
-      <h2 style="margin:0 0 14px">余额管理</h2>
+      <h2 style="margin:0 0 14px">钱包</h2>
       <div class="stat-row">
-        <div class="stat"><div class="l">当前余额</div><div class="v" id="b-current">¥0</div></div>
+        <div class="stat"><div class="l">余额 (¥)</div><div class="v" id="b-current">¥0</div></div>
+        <div class="stat"><div class="l">定额已充 ($)</div><div class="v" id="b-credited">$0</div></div>
+        <div class="stat"><div class="l">定额已用 ($)</div><div class="v" id="b-used">$0</div></div>
+        <div class="stat"><div class="l">定额剩余 ($)</div><div class="v" id="b-remaining" style="color:var(--ok)">$0</div></div>
       </div>
       <div class="card">
-        <h3>最近流水</h3>
+        <h3>定额流水</h3>
+        <table>
+          <thead><tr><th>时间</th><th>金额</th><th>类型</th><th>来源</th></tr></thead>
+          <tbody id="quota-log"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>余额流水</h3>
         <table>
           <thead><tr><th>时间</th><th>金额</th><th>余额</th><th>原因</th></tr></thead>
           <tbody id="balance-log"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
@@ -207,6 +276,8 @@
   const $ = (id) => document.getElementById(id);
   let token = sessionStorage.getItem('portal_token') || '';
   let me = null;
+  let myCards = [];   // loadCards 缓存, key 下拉/弹窗共用
+  let myPlans = [];
 
   function toast(msg, err) {
     const t = $('toast');
@@ -234,6 +305,9 @@
     const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600);
     return d > 0 ? d + ' 天 ' + h + ' 时' : h + ' 时';
   }
+  function fmtUsd(v) { return '$' + Number(v || 0).toFixed(2); }
+  function esc(s) { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+  window.esc = esc;
 
   // ── 登录 ──
   $('login-form').addEventListener('submit', async (e) => {
@@ -267,17 +341,24 @@
   $('logout-btn').addEventListener('click', doLogout);
 
   // ── 路由 ──
-  const PAGES = ['dashboard', 'plans', 'cards', 'balance', 'aff'];
+  const PAGES = ['dashboard', 'plans', 'keys', 'cards', 'balance', 'aff'];
   function showPage(name) {
     if (!PAGES.includes(name)) name = 'dashboard';
     PAGES.forEach((p) => $('page-' + p).classList.toggle('active', p === name));
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === name));
     if (name === 'plans') loadPlans();
+    if (name === 'keys') loadKeys();
     if (name === 'cards') loadCards();
     if (name === 'balance') loadBalance();
     if (name === 'aff') loadAff();
   }
   window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
+
+  async function refreshTopBal() {
+    const bal = await api('/portal/api/balance');
+    $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
+    return bal;
+  }
 
   async function showApp() {
     $('login-view').style.display = 'none';
@@ -288,166 +369,381 @@
     showPage(location.hash.slice(1) || 'dashboard');
   }
 
-  // ── 各页加载 ──
+  // ── 首页 ──
   async function loadDashboard() {
     try {
-      const [bal, cards, aff] = await Promise.all([
-        api('/portal/api/balance'), api('/portal/api/cards'), api('/portal/api/aff'),
+      const [bal, cards, keys, aff] = await Promise.all([
+        api('/portal/api/balance'), api('/portal/api/cards'), api('/portal/api/keys'), api('/portal/api/aff'),
       ]);
       $('d-balance').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
       $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
-
-      // P0: 余额预警 (<¥20 变红)
-      const balEl = $('d-balance');
-      if ((bal.balance_rmb || 0) < 20) {
-        balEl.style.color = 'var(--bad)';
-        balEl.parentElement.style.borderColor = 'var(--bad)';
-      } else {
-        balEl.style.color = 'var(--ok)';
-        balEl.parentElement.style.borderColor = 'var(--line)';
-      }
+      const q = bal.quota || {};
+      $('d-quota').textContent = fmtUsd(q.remaining_usd);
 
       const list = cards.cards || [];
-      $('d-cards').textContent = list.length;
+      myCards = list;
       const active = list.filter((c) => c.enabled && !c.expired);
       $('d-active').textContent = active.length;
-      $('d-invited').textContent = aff.invited_count || 0;
+      $('d-keys').textContent = (keys.keys || []).length;
 
-      // P0: 卡到期提醒 (24h 内到期)
+      // 到期提醒: 24h 内到期的已激活卡
       const now = Math.floor(Date.now() / 1000);
-      const expiring = active.filter((c) => c.expires_at > 0 && (c.expires_at - now) < 86400);
+      const expiring = active.filter((c) => c.activated && c.expires_at > 0 && (c.expires_at - now) < 86400);
       if (expiring.length > 0) {
         const nearest = expiring.sort((a, b) => a.expires_at - b.expires_at)[0];
         const hours = Math.floor((nearest.expires_at - now) / 3600);
-        $('expiry-text').textContent = `您的「${nearest.plan_name || nearest.plan_id}」将于 ${hours} 小时后到期`;
+        $('expiry-text').textContent = `「${nearest.plan_name || nearest.plan_id}」将于 ${hours} 小时后到期`;
         $('expiry-banner').style.display = 'block';
       } else {
         $('expiry-banner').style.display = 'none';
       }
 
-      $('d-cards-list').innerHTML = active.length
-        ? active.map((c) => '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>' + esc(c.plan_name || c.plan_id) + '</b> · <span class="mono" style="font-size:12px">' + esc(c.card_key.slice(0, 16)) + '…</span> · 剩 ' + fmtDur(c.remaining_secs) + '</div>').join('')
-        : '<span class="muted">暂无有效套餐, 去「购买套餐」开通</span>';
+      $('d-cards-list').innerHTML = list.length
+        ? list.map((c) => {
+            const st = !c.enabled ? '<span class="pill bad">已禁用</span>'
+              : c.expired ? '<span class="pill bad">已过期</span>'
+              : !c.activated ? '<span class="pill warn">未激活</span>'
+              : '<span class="pill ok">使用中</span>';
+            return '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>' + esc(c.plan_name || c.plan_id) + '</b> ' + st +
+              ' <span class="muted" style="font-size:12px">槽 ' + (c.slots || c.max_concurrency) +
+              (c.activated ? ' · 剩 ' + fmtDur(c.remaining_secs) : ' · 时长 ' + (c.duration_hours || c.plan_hours) + 'h') + '</span></div>';
+          }).join('')
+        : '<span class="muted">暂无套餐, 去「购买套餐」开通</span>';
+
+      const ks = keys.keys || [];
+      $('d-keys-list').innerHTML = ks.length
+        ? ks.map((k) => '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>' + esc(k.name || '(未命名)') + '</b> ' +
+            (k.mode === 'quota' ? '<span class="pill info">定额</span>' : '<span class="pill ok">畅饮</span>') +
+            ' <span class="mono muted" style="font-size:11px">' + esc(k.key) + '</span></div>').join('')
+        : '<span class="muted">暂无 Key, 去「我的 Key」创建</span>';
     } catch (e) { /* 401 已处理 */ }
   }
 
+  // ── 购买套餐 ──
   async function loadPlans() {
-    const g = $('plans-grid');
     try {
       const d = await api('/portal/api/plans');
-      const plans = d.plans || [];
-      if (!plans.length) { g.innerHTML = '<div class="muted">暂无可用套餐</div>'; return; }
-      g.innerHTML = '';
-      plans.forEach((p) => {
+      myPlans = d.plans || [];
+      const quota = myPlans.filter((p) => p.kind === 'Quota');
+      const unl = myPlans.filter((p) => p.kind !== 'Quota');
+      $('plans-quota').innerHTML = quota.length ? '' : '<div class="muted">暂无定额卡</div>';
+      quota.forEach((p) => {
         const div = document.createElement('div');
         div.className = 'plan-card';
         div.innerHTML =
           '<h4>' + esc(p.name) + '</h4>' +
           '<div class="price">¥' + Number(p.price).toFixed(0) + '</div>' +
-          '<div class="meta">' + esc(p.kind) + ' · ' + (p.duration_hours ? fmtDur(p.duration_hours * 3600) : '不限时') + ' · ' + p.max_concurrency + ' 并发' + (p.face_usd > 0 ? ' · $' + p.face_usd + ' 额度' : '') + '</div>' +
+          '<div class="meta">充入 $' + p.face_usd + ' 定额 · 按用量计费 · 永不过期</div>' +
           (p.note ? '<div class="meta">' + esc(p.note) + '</div>' : '');
         const btn = document.createElement('button');
-        btn.textContent = '购买';
-        btn.addEventListener('click', () => purchase(p));
+        btn.textContent = '购买充入';
+        btn.addEventListener('click', () => {
+          if (!confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2) + ', 充入 $' + p.face_usd)) return;
+          doPurchase({ plan_id: p.id });
+        });
         div.appendChild(btn);
-        g.appendChild(div);
+        $('plans-quota').appendChild(div);
       });
-    } catch (e) { g.innerHTML = '<div class="muted">' + esc(e.message) + '</div>'; }
+      $('plans-unlimited').innerHTML = unl.length ? '' : '<div class="muted">暂无畅饮卡</div>';
+      unl.forEach((p) => {
+        const div = document.createElement('div');
+        div.className = 'plan-card';
+        const rateMode = p.price_per_lane_hour > 0;
+        div.innerHTML =
+          '<h4>' + esc(p.name) + '</h4>' +
+          (rateMode
+            ? '<div class="price" style="font-size:18px">¥' + Number(p.price_per_lane_hour).toFixed(2) + '<span style="font-size:12px;color:var(--muted)">/槽·时</span></div>' +
+              '<div class="meta">时长 × 并发自由搭配 · 最多 ' + p.max_concurrency + ' 槽 · 购买后不激活</div>'
+            : '<div class="price">¥' + Number(p.price).toFixed(0) + '</div>' +
+              '<div class="meta">' + fmtDur((p.duration_hours || 24) * 3600) + ' · ' + p.max_concurrency + ' 并发</div>') +
+          (p.note ? '<div class="meta">' + esc(p.note) + '</div>' : '');
+        const btn = document.createElement('button');
+        btn.textContent = rateMode ? '选时长×并发' : '购买';
+        btn.addEventListener('click', () => {
+          if (rateMode) showRateModal(p);
+          else if (confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2))) doPurchase({ plan_id: p.id });
+        });
+        div.appendChild(btn);
+        $('plans-unlimited').appendChild(div);
+      });
+    } catch (e) { $('plans-unlimited').innerHTML = '<div class="muted">' + esc(e.message) + '</div>'; }
   }
 
-  async function purchase(p) {
-    // 检查是否已持有同套餐 (叠加场景)
-    try {
-      const d = await api('/portal/api/cards');
-      const existing = (d.cards || []).find((c) => c.plan_id === p.id && c.enabled && !c.expired);
-      if (existing) {
-        // 弹叠加选择: 时间叠加 vs 槽位叠加
-        showStackModal(p, existing);
-        return;
-      }
-    } catch (e) { /* 忽略, 继续正常购买 */ }
-    // 正常购买
-    if (!confirm('购买「' + p.name + '」? 从余额扣 ¥' + Number(p.price).toFixed(2))) return;
-    doPurchase(p.id, null);
-  }
-
-  function showStackModal(plan, existing) {
-    const modal = $('stack-modal');
-    const info = $('stack-info');
-    const grid = $('stack-grid');
-    const hours = plan.duration_hours || 24;
-    const remaining = existing.remaining_secs || 0;
-    const remHours = Math.floor(remaining / 3600);
-    info.textContent = `你已持有「${plan.name}」(剩 ${remHours}h)。选择叠加方式:`;
-    grid.innerHTML = '';
-    // 时间叠加
-    const opt1 = document.createElement('div');
-    opt1.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:12px;cursor:pointer';
-    opt1.innerHTML = `<b>时间叠加</b><div class="muted" style="font-size:12px;margin-top:4px">延长现有卡 +${hours}h<br>新到期: ${remHours + hours}h</div>`;
-    opt1.onclick = () => selectStack('time_multiply');
-    // 槽位叠加
-    const opt2 = document.createElement('div');
-    opt2.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:12px;cursor:pointer';
-    opt2.innerHTML = `<b>槽位叠加</b><div class="muted" style="font-size:12px;margin-top:4px">新卡独立计时 ${hours}h<br>并发 +1 (同时可用 2 个槽)</div>`;
-    opt2.onclick = () => selectStack('slot_multiply');
-    grid.appendChild(opt1);
-    grid.appendChild(opt2);
-    let selected = null;
-    function selectStack(mode) {
-      selected = mode;
-      [opt1, opt2].forEach((el, i) => {
-        const isSel = (i === 0 && mode === 'time_multiply') || (i === 1 && mode === 'slot_multiply');
-        el.style.borderColor = isSel ? 'var(--info)' : 'var(--line)';
-        el.style.background = isSel ? 'color-mix(in srgb, var(--info) 8%, transparent)' : 'transparent';
-      });
-    }
-    selectStack('time_multiply'); // 默认时间叠加
-    $('stack-confirm').onclick = () => {
-      if (!selected) return;
-      modal.style.display = 'none';
-      doPurchase(plan.id, selected);
+  // 费率购买弹窗
+  let ratePlan = null;
+  function showRateModal(p) {
+    ratePlan = p;
+    $('rate-title').textContent = '购买「' + p.name + '」';
+    $('rate-sub').textContent = '费率 ¥' + Number(p.price_per_lane_hour).toFixed(2) + '/槽·时 · 最少 ' + (p.min_hours || 1) + 'h';
+    const h = $('rate-hours'), s = $('rate-slots');
+    h.min = p.min_hours || 1; h.max = 720; h.value = 24;
+    s.min = 1; s.max = p.max_concurrency || 4; s.value = 1;
+    const calc = () => {
+      const hours = parseInt(h.value) || 1, slots = parseInt(s.value) || 1;
+      $('rate-hours-v').textContent = hours + 'h';
+      $('rate-slots-v').textContent = slots + ' 槽';
+      $('rate-price').textContent = '¥' + (p.price_per_lane_hour * hours * slots).toFixed(2);
     };
-    $('stack-cancel').onclick = () => { modal.style.display = 'none'; };
-    modal.style.display = 'flex';
+    h.oninput = calc; s.oninput = calc; calc();
+    $('rate-confirm').onclick = () => {
+      const hours = parseInt(h.value) || 1, slots = parseInt(s.value) || 1;
+      $('rate-modal').style.display = 'none';
+      doPurchase({ plan_id: p.id, hours: hours, slots: slots });
+    };
+    $('rate-cancel').onclick = () => { $('rate-modal').style.display = 'none'; };
+    $('rate-modal').style.display = 'flex';
   }
 
-  async function doPurchase(planId, stackMode) {
+  async function doPurchase(body) {
     try {
-      const body = { plan_id: planId };
-      if (stackMode) body.stack_mode = stackMode;
       const d = await api('/portal/api/purchase', { method: 'POST', body: JSON.stringify(body) });
-      if (d.extended) {
-        toast('已延长现有卡至 ' + fmtTime(d.new_expires_at));
+      if (d.quota_credited) {
+        toast('已充入 $' + Number(d.quota_credited).toFixed(0) + ', 钱包剩 ' + fmtUsd(d.quota_remaining_usd));
+      } else if (d.extended) {
+        toast('已延长至 ' + fmtTime(d.new_expires_at));
       } else {
-        toast('购买成功! Key: ' + d.card_key.slice(0, 20) + '…');
+        toast('购买成功' + (d.activated === false ? ' (未激活, 首调开始计时)' : ''));
       }
-      const bal = await api('/portal/api/balance');
-      $('who-bal').textContent = '¥' + (bal.balance_rmb || 0).toFixed(2);
+      await refreshTopBal();
     } catch (e) { toast(e.message, true); }
   }
 
+  // ── 我的 Key ──
+  async function loadKeys() {
+    // 先拉卡填下拉
+    try {
+      const d = await api('/portal/api/cards');
+      myCards = d.cards || [];
+      const sel = $('nk-card');
+      sel.innerHTML = myCards
+        .filter((c) => c.enabled && !c.expired)
+        .map((c) => '<option value="' + esc(c.card_key) + '">' + esc(c.plan_name || c.plan_id) + ' (' + esc(c.card_key.slice(0, 14)) + '…)</option>')
+        .join('');
+    } catch (e) {}
+
+    const tb = $('keys-body');
+    try {
+      const d = await api('/portal/api/keys');
+      const list = d.keys || [];
+      if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">暂无 Key, 上面创建一个</td></tr>'; return; }
+      tb.innerHTML = list.map((k) => {
+        const modePill = k.mode === 'quota' ? '<span class="pill info">定额</span>' : '<span class="pill ok">畅饮卡</span>';
+        const binding = k.mode === 'quota'
+          ? '并发帽 ' + k.max_concurrency
+          : (k.card ? esc(k.card.plan_name) + (k.card.activated ? ' · 剩 ' + fmtDur(k.card.remaining_secs) : ' · 未激活') : '<span class="muted">未绑定</span>');
+        return '<tr><td>' + esc(k.name || '(未命名)') + '</td>' +
+          '<td><div class="key-line"><code>' + esc(k.key) + '</code><button class="ghost sm" onclick="copyKey(\'' + esc(k.key) + '\')">复制</button></div></td>' +
+          '<td>' + modePill + '</td>' +
+          '<td style="font-size:12px">' + binding + '</td>' +
+          '<td>' + (k.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill warn">停用</span>') + '</td>' +
+          '<td style="white-space:nowrap">' +
+            '<button class="ghost sm" onclick="keyRebind(\'' + esc(k.key) + '\',\'' + k.mode + '\',\'' + (k.card_key || '') + '\',' + k.max_concurrency + ')">改绑定</button> ' +
+            '<button class="ghost sm" onclick="keyToggle(\'' + esc(k.key) + '\',' + !k.enabled + ')">' + (k.enabled ? '停用' : '启用') + '</button> ' +
+            '<button class="ghost sm" style="color:var(--bad)" onclick="keyDel(\'' + esc(k.key) + '\',\'' + esc(k.name || '') + '\')">删除</button>' +
+          '</td></tr>';
+      }).join('');
+    } catch (e) { tb.innerHTML = '<tr><td colspan="6" class="muted">' + esc(e.message) + '</td></tr>'; }
+  }
+
+  $('nk-mode').addEventListener('change', () => {
+    const cardMode = $('nk-mode').value === 'card';
+    $('nk-card-row').style.display = cardMode ? 'flex' : 'none';
+    $('nk-conc-row').style.display = cardMode ? 'none' : 'flex';
+  });
+  $('nk-submit').addEventListener('click', async () => {
+    const mode = $('nk-mode').value;
+    const body = {
+      name: $('nk-name').value.trim(),
+      mode: mode,
+      max_concurrency: parseInt($('nk-conc').value) || 2,
+    };
+    if (mode === 'card') {
+      body.card_key = $('nk-card').value;
+      if (!body.card_key) { toast('请先购买畅饮卡', true); return; }
+    }
+    try {
+      const d = await api('/portal/api/keys', { method: 'POST', body: JSON.stringify(body) });
+      $('nk-out').style.display = 'block';
+      $('nk-out').innerHTML = 'Key 已创建 (只提示一次, 请立即保存):<br><b>' + esc(d.key) + '</b> <button class="ghost sm" onclick="copyKey(\'' + esc(d.key) + '\')">复制</button>';
+      toast('Key 已创建');
+      loadKeys();
+    } catch (e) { toast(e.message, true); }
+  });
+
+  // 改绑定: 简单 prompt 流程 (改名/换模式/换卡/调并发帽)
+  window.keyRebind = function(key, mode, cardKey, maxConc) {
+    const cardsOpts = myCards.filter((c) => c.enabled && !c.expired);
+    const cardList = cardsOpts.map((c, i) => (i + 1) + '. ' + (c.plan_name || c.plan_id) + ' ' + c.card_key.slice(0, 14) + '…').join('\n');
+    const hint = mode === 'quota'
+      ? '当前: 定额模式, 并发帽 ' + maxConc + '\n输入新并发帽 (1-8), 或输入 c 切换到畅饮卡模式:'
+      : '当前: 畅饮卡模式' + (cardKey ? ' ' + cardKey.slice(0, 14) + '…' : ' (未绑定)') + '\n可用卡:\n' + (cardList || '(无, 请先购买)') + '\n输入卡序号换绑, 或输入 q 切换到定额模式:';
+    const v = prompt(hint);
+    if (v == null) return;
+    (async () => {
+      try {
+        if (mode === 'quota') {
+          if (v.trim().toLowerCase() === 'c') {
+            if (!cardsOpts.length) { toast('没有可用畅饮卡', true); return; }
+            const idx = prompt('绑定哪张卡? 输入序号:\n' + cardList);
+            const c = cardsOpts[(parseInt(idx) || 0) - 1];
+            if (!c) return;
+            await api('/portal/api/keys/' + encodeURIComponent(key), { method: 'POST', body: JSON.stringify({ mode: 'card', card_key: c.card_key }) });
+          } else {
+            const n = parseInt(v);
+            if (!n || n < 1 || n > 8) { toast('并发帽 1-8', true); return; }
+            await api('/portal/api/keys/' + encodeURIComponent(key), { method: 'POST', body: JSON.stringify({ max_concurrency: n }) });
+          }
+        } else {
+          if (v.trim().toLowerCase() === 'q') {
+            await api('/portal/api/keys/' + encodeURIComponent(key), { method: 'POST', body: JSON.stringify({ mode: 'quota' }) });
+          } else {
+            const c = cardsOpts[(parseInt(v) || 0) - 1];
+            if (!c) { toast('无效序号', true); return; }
+            await api('/portal/api/keys/' + encodeURIComponent(key), { method: 'POST', body: JSON.stringify({ card_key: c.card_key }) });
+          }
+        }
+        toast('已更新');
+        loadKeys();
+      } catch (e) { toast(e.message, true); }
+    })();
+  };
+
+  window.keyToggle = async function(key, enable) {
+    try {
+      await api('/portal/api/keys/' + encodeURIComponent(key), { method: 'POST', body: JSON.stringify({ enabled: enable }) });
+      loadKeys();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  window.keyDel = async function(key, name) {
+    if (!confirm('删除 Key「' + (name || key.slice(0, 12)) + '」? 删除后立即失效且不可恢复')) return;
+    try {
+      await api('/portal/api/keys/' + encodeURIComponent(key), { method: 'DELETE' });
+      toast('已删除');
+      loadKeys();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  // ── 我的套餐 ──
   async function loadCards() {
     const tb = $('cards-body');
     try {
       const d = await api('/portal/api/cards');
       const list = d.cards || [];
-      if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">暂无套餐</td></tr>'; return; }
-      tb.innerHTML = list.map((c) =>
-        '<tr><td>' + esc(c.plan_name || c.plan_id) + '</td>' +
-        '<td class="mono" style="font-size:11px" title="' + esc(c.card_key) + '">' + esc(c.card_key.slice(0, 20)) + '… <button class="ghost" style="padding:1px 6px;font-size:10px;margin-left:4px" onclick="copyKey(\'' + esc(c.card_key) + '\')">复制</button></td>' +
-        '<td>' + (c.expired ? '<span class="pill bad">已过期</span>' : c.enabled ? '<span class="pill ok">使用中</span>' : '<span class="pill warn">未启用</span>') + '</td>' +
-        '<td>' + fmtDur(c.remaining_secs) + '</td>' +
-        '<td class="mono">$' + Number(c.face_used_usd || 0).toFixed(2) + (c.face_usd > 0 ? ' / $' + c.face_usd : '') + '</td>' +
-        '<td class="mono">¥' + Number(c.paid_rmb || 0).toFixed(2) + '</td>' +
-        '<td>' + (c.enabled && !c.expired ? '<button class="ghost" style="padding:2px 8px;font-size:11px" onclick="showBoost(\'' + esc(c.card_key) + '\',' + c.remaining_secs + ',' + c.paid_rmb + ',' + (c.plan_hours || 24) + ')">加并发</button>' : '') + '</td></tr>'
-      ).join('');
-    } catch (e) { tb.innerHTML = '<tr><td colspan="6" class="muted">' + esc(e.message) + '</td></tr>'; }
+      myCards = list;
+      if (!list.length) { tb.innerHTML = '<tr><td colspan="7" class="muted">暂无套餐</td></tr>'; return; }
+      tb.innerHTML = list.map((c) => {
+        const st = !c.enabled ? '<span class="pill bad">已禁用</span>'
+          : c.expired ? '<span class="pill bad">已过期</span>'
+          : !c.activated ? '<span class="pill warn">未激活</span>'
+          : '<span class="pill ok">使用中</span>';
+        const timeCell = c.activated ? fmtDur(c.remaining_secs) : (c.duration_hours || c.plan_hours) + 'h (未激活)';
+        const bound = (c.bound_keys || []).map(esc).join(', ') || '<span class="muted">—</span>';
+        const ops = [];
+        if (c.enabled) {
+          if (!c.activated) ops.push('<button class="ghost sm" onclick="cardActivate(\'' + esc(c.card_key) + '\')">激活</button>');
+          if (!c.expired) {
+            ops.push('<button class="ghost sm" onclick="showExtend(\'' + esc(c.card_key) + '\')">加时</button>');
+            ops.push('<button class="ghost sm" onclick="showSlots(\'' + esc(c.card_key) + '\')">改槽</button>');
+          }
+        }
+        return '<tr><td>' + esc(c.plan_name || c.plan_id) + '</td>' +
+          '<td>' + st + '</td>' +
+          '<td style="font-size:12px">' + timeCell + '</td>' +
+          '<td>' + (c.slots || c.max_concurrency) + '</td>' +
+          '<td class="mono">¥' + Number(c.paid_rmb || 0).toFixed(2) + '</td>' +
+          '<td style="font-size:12px">' + bound + '</td>' +
+          '<td style="white-space:nowrap">' + ops.join(' ') + '</td></tr>';
+      }).join('');
+    } catch (e) { tb.innerHTML = '<tr><td colspan="7" class="muted">' + esc(e.message) + '</td></tr>'; }
   }
 
+  window.cardActivate = async function(cardKey) {
+    if (!confirm('激活后开始计时, 确定?')) return;
+    try {
+      await api('/portal/api/cards/activate', { method: 'POST', body: JSON.stringify({ card_key: cardKey }) });
+      toast('已激活');
+      loadCards();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  // 加时弹窗
+  let opCard = null;
+  window.showExtend = function(cardKey) {
+    opCard = myCards.find((c) => c.card_key === cardKey);
+    if (!opCard) return;
+    const cur = opCard.slots || opCard.max_concurrency;
+    $('extend-info').textContent = (opCard.plan_name || opCard.plan_id) + ' · 当前 ' + cur + ' 槽' +
+      (opCard.activated ? ' · 剩 ' + fmtDur(opCard.remaining_secs) : ' · 未激活');
+    const h = $('extend-hours');
+    h.value = 24;
+    const calc = () => {
+      const hours = parseInt(h.value) || 1;
+      let price;
+      if (opCard.rate_mode && opCard.plan_rate) price = opCard.plan_rate * hours * cur;
+      else price = (opCard.paid_rmb / (opCard.plan_hours || 24)) * hours; // 固定价按实付折算
+      $('extend-price').textContent = '≈ ¥' + price.toFixed(2) + ' (以服务端为准)';
+    };
+    h.oninput = calc; calc();
+    $('extend-confirm').onclick = async () => {
+      const hours = parseInt(h.value) || 1;
+      $('extend-modal').style.display = 'none';
+      try {
+        const d = await api('/portal/api/cards/extend', { method: 'POST', body: JSON.stringify({ card_key: cardKey, hours: hours }) });
+        toast('已加时 ' + hours + 'h, 扣 ¥' + Number(d.price).toFixed(2));
+        await refreshTopBal();
+        loadCards();
+      } catch (e) { toast(e.message, true); }
+    };
+    $('extend-cancel').onclick = () => { $('extend-modal').style.display = 'none'; };
+    $('extend-modal').style.display = 'flex';
+  };
+
+  // 改槽弹窗
+  window.showSlots = function(cardKey) {
+    opCard = myCards.find((c) => c.card_key === cardKey);
+    if (!opCard) return;
+    const cur = opCard.slots || opCard.max_concurrency;
+    $('slots-info').textContent = (opCard.plan_name || opCard.plan_id) + ' · 当前 ' + cur + ' 槽 (上限 ' + opCard.max_concurrency + ')';
+    const n = $('slots-n');
+    n.min = 1; n.max = opCard.max_concurrency; n.value = cur;
+    const calc = () => {
+      const v = parseInt(n.value) || cur;
+      if (v <= cur) { $('slots-price').textContent = v < cur ? '减槽: 免费 (不退款)' : '不变'; return; }
+      const remHours = opCard.activated ? (opCard.remaining_secs || 0) / 3600 : (opCard.duration_hours || opCard.plan_hours || 24);
+      const perHour = opCard.rate_mode ? (opCard.plan_rate || 0) : (opCard.paid_rmb / (opCard.plan_hours || 24) / opCard.max_concurrency);
+      $('slots-price').textContent = '≈ ¥' + (perHour * (v - cur) * remHours).toFixed(2) + ' (以服务端为准)';
+    };
+    n.oninput = calc; calc();
+    $('slots-confirm').onclick = async () => {
+      const v = parseInt(n.value) || cur;
+      $('slots-modal').style.display = 'none';
+      try {
+        const d = await api('/portal/api/cards/slots', { method: 'POST', body: JSON.stringify({ card_key: cardKey, slots: v }) });
+        toast('已调整为 ' + d.slots + ' 槽' + (d.price > 0 ? ', 扣 ¥' + Number(d.price).toFixed(2) : ''));
+        await refreshTopBal();
+        loadCards();
+      } catch (e) { toast(e.message, true); }
+    };
+    $('slots-cancel').onclick = () => { $('slots-modal').style.display = 'none'; };
+    $('slots-modal').style.display = 'flex';
+  };
+
+  // ── 钱包 ──
   async function loadBalance() {
     try {
       const d = await api('/portal/api/balance');
       $('b-current').textContent = '¥' + (d.balance_rmb || 0).toFixed(2);
+      const q = d.quota || {};
+      $('b-credited').textContent = fmtUsd(q.credited_usd);
+      $('b-used').textContent = fmtUsd(q.used_usd);
+      $('b-remaining').textContent = fmtUsd(q.remaining_usd);
+      const ql = d.quota_log || [];
+      $('quota-log').innerHTML = ql.length
+        ? ql.map((l) => '<tr><td class="mono" style="font-size:11px">' + fmtTime(l.ts_ms / 1000) + '</td>' +
+            '<td class="mono" style="color:' + (l.delta_usd >= 0 ? 'var(--ok)' : 'var(--bad)') + '">' + (l.delta_usd >= 0 ? '+' : '') + fmtUsd(l.delta_usd) + '</td>' +
+            '<td class="muted">' + esc(l.kind) + '</td><td class="muted">' + esc(l.ref_id || '—') + '</td></tr>').join('')
+        : '<tr><td colspan="4" class="muted">暂无定额流水 (购买定额卡后在此显示)</td></tr>';
       const log = d.log || [];
       $('balance-log').innerHTML = log.length
         ? log.map((l) => '<tr><td class="mono" style="font-size:11px">' + fmtTime(l.ts_ms / 1000) + '</td><td class="mono" style="color:' + (l.delta_rmb >= 0 ? 'var(--ok)' : 'var(--bad)') + '">' + (l.delta_rmb >= 0 ? '+' : '') + Number(l.delta_rmb).toFixed(2) + '</td><td class="mono">¥' + Number(l.balance_after).toFixed(2) + '</td><td class="muted">' + esc(l.reason) + '</td></tr>').join('')
@@ -467,55 +763,17 @@
     } catch (e) { /* 401 已处理 */ }
   }
 
-  function esc(s) { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
-
-  // P0: 一键复制卡 key
+  // 一键复制
   window.copyKey = function(key) {
-    navigator.clipboard.writeText(key).then(() => {
-      toast('Key 已复制到剪贴板');
-    }).catch(() => {
-      // 降级: 手动选择
+    navigator.clipboard.writeText(key).then(() => toast('已复制到剪贴板')).catch(() => {
       const ta = document.createElement('textarea');
       ta.value = key;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand('copy');
       document.body.removeChild(ta);
-      toast('Key 已复制');
+      toast('已复制');
     });
-  };
-
-  // ── 临时加并发 ──
-  window.showBoost = function(cardKey, remainingSecs, paidRmb, planHours) {
-    const modal = $('boost-modal');
-    const info = $('boost-info');
-    const priceEl = $('boost-price');
-    const slotsEl = $('boost-slots');
-    const remHours = Math.floor(remainingSecs / 3600);
-    info.textContent = '卡 ' + cardKey.slice(0, 20) + '… (剩 ' + remHours + 'h)';
-    function calcPrice() {
-      const slots = parseInt(slotsEl.value) || 1;
-      // 按剩余时间折算: 价格 = 原价 × (剩余小时 / 套餐总小时) × 槽数
-      const ratio = remainingSecs / (planHours * 3600);
-      const price = paidRmb * ratio * slots;
-      priceEl.textContent = '¥' + price.toFixed(2) + ' (' + slots + ' 槽 × ' + Math.round(ratio * 100) + '% 剩余时间)';
-      return price;
-    }
-    slotsEl.oninput = calcPrice;
-    calcPrice();
-    $('boost-confirm').onclick = async () => {
-      const slots = parseInt(slotsEl.value) || 1;
-      const price = calcPrice();
-      if (!confirm('加 ' + slots + ' 个并发槽? 从余额扣 ¥' + price.toFixed(2))) return;
-      try {
-        const d = await api('/portal/api/boost', { method: 'POST', body: JSON.stringify({ card_key: cardKey, slots: slots }) });
-        toast('已加 ' + slots + ' 并发, 新余额 ¥' + d.balance_rmb.toFixed(2));
-        modal.style.display = 'none';
-        loadCards();
-      } catch (e) { toast(e.message, true); }
-    };
-    $('boost-cancel').onclick = () => { modal.style.display = 'none'; };
-    modal.style.display = 'flex';
   };
 
   // ── 启动: 已有 token 直接进 ──
